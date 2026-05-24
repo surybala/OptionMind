@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Test artefacts
+tests/test_trades*.db
+.coverage
+
+# Backtest results
+results_*.json
+backtest-output/
+
+# Runtime data (generated, not source)
+data/
+
+# Claude Code
+.claude/
+
+# Secrets / local config overrides  (never commit real credentials!)
+.env
+*.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db

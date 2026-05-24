@@ -1,0 +1,6 @@
+# Dependency constraints for optionwheel.
+# Pass to pip with: pip install -c constraints.txt -r requirements.txt
+#
+# litellm is explicitly excluded — do not allow it into this environment
+# under any circumstances (direct or transitive).
+litellm==0.0.0.dev0

@@ -1,0 +1,312 @@
+{
+  "market_cap_min": 1000000000,
+  "expiry_days_max": 14,
+  "top_n_per_strategy": 5,
+  "max_picks_per_ticker": 1,
+
+  "max_capital_per_period": 50000,
+  "max_contracts_per_pick": 50,
+
+  "_universe_note": "etf = all ETFs on NASDAQ/NYSE/NYSE Arca (default). Options: etf | index (S&P500+NDX100+Dow30) | default (NASDAQ/NYSE stocks by market cap) | full (alias for default).",
+  "universe": "etf",
+
+  "_perf_note": "skip_market_cap_check_in_scanner=true avoids a redundant ticker.fast_info call per scan when the ticker list was already filtered (universe.py). Always true for etf/index universes which have no market-cap pre-filter.",
+  "skip_market_cap_check_in_scanner": true,
+
+  "_blacklist_note": "Tickers in this list are permanently excluded from scanning — the scanner will never generate picks for them regardless of universe or strategy.",
+  "ticker_blacklist": [],
+
+  "alpaca": {
+    "_credentials_note": "Leave api_key/api_secret blank and set ALPACA_API_KEY + ALPACA_API_SECRET env vars instead — env vars take priority and keep secrets out of git.",
+    "api_key": "",
+    "api_secret": "",
+    "paper": true,
+    "approve_mode": true,
+    "_approve_mode_note": "true=interactive approve gate | false/'auto'=auto-execute high-confidence picks | 'scan-only'=never execute",
+    "high_confidence_mode": false,
+    "auto_execute_prob": 0.80
+  },
+  "risk_parameters": {
+    "max_delta": 0.1,
+    "min_probability_of_expiry": 0.9,
+    "auto_execute_prob": 0.80,
+    "stop_loss_multiplier": 2.0,
+    "_stop_loss_note": "Legacy guard: close when current_mark > multiplier × entry_premium. Still active but the width-relative guard below is the primary trigger for spreads.",
+    "stop_loss_max_loss_pct": 0.80,
+    "_stop_loss_max_loss_note": "Primary spread guard: close when unrealised loss exceeds this fraction of max possible loss (spread_width - entry_premium). 0.80 = exit when 80% of width is lost. Set to null to disable (legacy multiplier only).",
+    "stop_loss_check_interval_minutes": 1,
+    "_interval_note": "How often the position monitor polls for stop-loss triggers during market hours (default 15). Lower values give tighter intraday protection at the cost of more API calls.",
+    "max_loss_multiple": {
+      "enabled": true,
+      "default": 30.0,
+      "by_strategy": {
+        "PCS": 30.0,
+        "CCS": 30.0,
+        "IC": 30.0,
+        "IFLY": 30.0
+      },
+      "_note": "Reject new trades whose max loss per contract is too large relative to collected credit. 30.0 means do not risk more than $30 for each $1 collected."
+    },
+    "directional_exposure_caps": {
+      "enabled": true,
+      "put": 0.50,
+      "call": 0.50,
+      "min_side_cap_dollars": 1500,
+      "_note": "Cap aggregate same-direction max-loss exposure as a fraction of account_capital, or max_capital_per_period when account_capital is not configured, with a dollar floor for small budgets. This is a gross side-exposure concentration guard; portfolio stress and symbol stress caps are the primary tail-risk brakes. PCS/CSP count as put risk, CCS/CC count as call risk, and IC/IFLY/STRANGLE split exposure across both sides."
+    },
+    "portfolio_gamma_risk": {
+      "enabled": true,
+      "fail_closed": true,
+      "max_stress_loss_pct": 0.10,
+      "min_stress_loss_dollars": 500,
+      "shock_moves_pct": [1, 2, 3, 5],
+      "iv_shock_points": 10,
+      "max_gamma_loss_to_daily_theta": 2.0,
+      "gamma_loss_to_theta_warning_only": true,
+      "near_expiry_dte": 2,
+      "max_near_expiry_stress_pct": 0.0025,
+      "min_near_expiry_stress_dollars": 250,
+      "symbol_stress_cap_enabled": true,
+      "max_symbol_stress_pct": 0.05,
+      "min_symbol_stress_dollars": 250,
+      "complex_spread_quantity_cap": {
+        "enabled": true,
+        "strategies": ["IC", "IFLY"],
+        "symbol_stress_threshold_pct": 0.50,
+        "max_quantity": 1,
+        "_note": "Cap IC/IFLY quantity to max_quantity when one contract would consume at least this fraction of the per-symbol stress cap."
+      },
+      "expiry_bucket_cap_enabled": false,
+      "max_expiry_bucket_pct": 0.0,
+      "min_expiry_bucket_dollars": 500,
+      "default_iv": 0.25,
+      "_note": "Account-level short-gamma gate. Simulates existing open/pending-close positions plus each candidate pick under +/- index shocks and IV expansion, then reduces or rejects new trades if hard stress-loss limits breach. Per-symbol stress caps prevent one ETF from dominating tail risk. 1% gamma-loss/theta is warning-only by default; expiry bucket cap is disabled by default."
+    },
+    "profit_take_enabled": true,
+    "profit_take_pct": 0.75,
+    "_profit_take_note": "Close any open position once this fraction of the entry premium has been captured as profit (pnl / entry_premium >= profit_take_pct). 0.75 = close when 75% of collected credit is locked in. Set profit_take_enabled to false or profit_take_pct to 0.0 to disable.",
+    "gamma_risk": {
+      "enabled": true,
+      "_gamma_risk_note": "Dynamic early-exit based on Black-Scholes Greeks. Closes a position when gamma is outpacing theta income AND the short leg delta is moving ITM — aiming to lock in remaining premium before it erodes.",
+      "gamma_theta_ratio_threshold": 1.5,
+      "_ratio_note": "Close when |net_gamma| / |net_theta_per_day| >= this value. Higher means gamma risk per dollar of daily theta income is too high. 1.5 = default; lower for more aggressive protection.",
+      "min_delta_to_trigger": 0.15,
+      "_delta_note": "Only fire the gamma trigger when |short_delta| >= this value, indicating the short leg is not safely OTM.",
+      "min_profit_captured_pct": 0.25,
+      "_profit_note": "Require at least this fraction of entry_premium to have been captured (pnl/entry_premium >= threshold) before allowing an early close. Avoids closing a newly opened position immediately.",
+      "urgent_delta_threshold": 0.30,
+      "_urgent_note": "If |short_delta| >= this value, bypass min_profit_captured_pct and close regardless — position has moved deeply ITM and is in urgent danger. Also serves as the near-expiry (DTE<=1) threshold when ratio-based check is bypassed."
+    },
+    "vix_filter": {
+      "enabled": true,
+      "ic_pause_threshold": 18,
+      "_note": "When VIX >= ic_pause_threshold, skip Iron Condor scans for that period. Lowered to 18 for ETF/index universe — indices are more sensitive to VIX spikes than individual stocks."
+    },
+    "regime_filter": {
+      "enabled": true,
+      "fail_closed": false,
+      "yellow_quantity_multiplier": 0.65,
+      "orange_quantity_multiplier": 0.30,
+      "yellow_top_n_multiplier": 0.70,
+      "orange_top_n_multiplier": 0.35,
+      "vix": {
+        "green_below": 18,
+        "yellow_below": 25,
+        "orange_below": 32
+      },
+      "vix_spike": {
+        "one_day_pct": 0.15,
+        "red_one_day_pct": 0.25,
+        "three_day_pct": 0.25
+      },
+      "trend": {
+        "symbol": "SPY",
+        "sma_fast": 20,
+        "sma_slow": 50
+      },
+      "realized_vol": {
+        "fast_days": 5,
+        "slow_days": 20,
+        "expansion_multiple": 1.50
+      },
+      "_note": "Classifies market regime before opening new trades. GREEN trades normally; YELLOW/ORANGE reduce scan count and quantity; RED pauses new openings while still monitoring existing positions."
+    }
+  },
+
+  "sentiment": {
+    "enabled": false,
+    "_sentiment_disabled_note": "Disabled for ETF/index universe. RSI/SMA momentum signals are designed for individual stocks; broad-market ETFs do not exhibit the same single-name momentum patterns and the signals add noise.",
+    "lookback_days": 20,
+    "rsi_period": 14,
+    "bull_threshold": 0.20,
+    "bear_threshold": 0.20,
+    "skew_factor": 0.20,
+    "max_skew": 0.20,
+    "top_n_skew_factor": 0.75,
+    "_sentiment_note": "BULL → raise PCS max_delta + top-N quota, lower CCS delta + quota. BEAR → opposite. NEUTRAL → no change. top_n_skew_factor controls pick-count reallocation (0.50 = up to ±50% of base top_n shifted between PCS and CCS).",
+    "weight_rsi": 0.35,
+    "weight_sma": 0.35,
+    "weight_momentum": 0.30
+  },
+  "strategies": {
+    "covered_put": {
+      "enabled": false,
+      "min_premium": 0.10,
+      "max_delta_short_put": 0.30,
+      "_note": "DISABLED — ties up full cash collateral (strike x 100)"
+    },
+    "put_credit_spread": {
+      "enabled": true,
+      "min_net_credit": 0.10,
+      "max_delta_short_leg": 0.15,
+      "strike_width": 5,
+      "min_prob_profit": 0.80,
+      "min_open_interest": 100,
+      "_oi_note": "Raised to 100 for ETF universe — liquid ETF options carry deep OI; low OI indicates an illiquid strike or a thinly-traded ETF."
+    },
+    "call_credit_spread": {
+      "enabled": true,
+      "min_net_credit": 0.10,
+      "max_delta_short_leg": 0.15,
+      "strike_width": 5,
+      "min_prob_profit": 0.80,
+      "min_open_interest": 100
+    },
+    "iron_condor": {
+      "enabled": false,
+      "min_net_credit": 0.10,
+      "max_delta_short_leg": 0.20,
+      "put_strike_width": 5,
+      "call_strike_width": 5,
+      "min_prob_profit": 0.80,
+      "min_open_interest": 100,
+      "ic_allocation_pct": 0.50,
+      "_ic_allocation_note": "DISABLED by default after backtests showed IC tail losses outweighed upside. If enabled, IC picks are capped at ic_allocation_pct × top_n slots to prevent condors from crowding out PCS/CCS.",
+      "high_iv_threshold": 0.40,
+      "wide_put_strike_width": 20,
+      "wide_call_strike_width": 20,
+      "_high_iv_note": "For ETFs with HV30 >= high_iv_threshold (40%), use wider wing widths to provide more cushion against gamma moves."
+    },
+    "iron_butterfly": {
+      "enabled": false,
+      "put_wing_width": 15,
+      "call_wing_width": 15,
+      "min_net_credit": 0.50,
+      "min_prob_profit": 0.80,
+      "atm_pct_tolerance": 0.025,
+      "_note": "DISABLED — ATM short put + ATM short call + OTM wings. Capital = max(wing_width,wing_width) x 100. Higher premium than IC; profits when stock stays near entry price."
+    },
+    "short_strangle": {
+      "enabled": false,
+      "min_net_credit": 0.50,
+      "max_delta_short_leg": 0.20,
+      "min_prob_profit": 0.80,
+      "_note": "DISABLED — naked options require large margin"
+    },
+    "covered_call": {
+      "enabled": false,
+      "min_premium": 0.10,
+      "max_delta_short_call": 0.30,
+      "_note": "DISABLED — requires owning 100 shares (stock_price x 100 capital)"
+    }
+  },
+
+  "_email_note": "Remove or leave empty to disable email notifications entirely.",
+  "email": {
+    "smtp_host": "smtp.gmail.com",
+    "smtp_port": 587,
+    "imap_host": "imap.gmail.com",
+    "imap_port": 993,
+    "from_addr": "cherry.doggo.bot@gmail.com",
+    "to_addr": "coolsury@gmail.com",
+    "app_password": "",
+    "approval_timeout_seconds": 21600,
+    "approval_poll_interval_seconds": 15
+  },
+
+  "_schedule_note": "Used only when running with --daemon. run_time is local 24-h HH:MM. weekdays_only skips Saturday/Sunday.",
+  "schedule": {
+    "run_time": "09:35",
+    "timezone": "US/Eastern",
+    "weekdays_only": true
+  },
+
+  "_monitor_schedule_note": "Used when running position_monitor.py --daemon. Checks stop-losses every run_interval_minutes during market_open..market_close window (24-h HH:MM, local timezone).",
+  "monitor_schedule": {
+    "run_interval_minutes": 15,
+    "market_open": "09:30",
+    "market_close": "16:00",
+    "timezone": "US/Eastern",
+    "weekdays_only": true,
+    "eod_risk_report": true,
+    "weekly_digest": true,
+    "_weekly_digest_note": "Send a weekly summary email every Friday after market close. Includes week P&L, cumulative P&L, capital deployed, win rate, best/worst trade, and open-position risk breakdown.",
+    "reconcile_interval_seconds": 300,
+    "_reconcile_note": "How often the Alpaca↔DB reconciliation daemon runs (seconds). Runs independently of market hours and the risk cycle. Default 300 (5 min). Resolves PENDING opens, PENDING_CLOSE rows, ghost EXECUTED positions, and logs orphan Alpaca positions.",
+    "ghost_grace_minutes": 10,
+    "_ghost_grace_note": "EXECUTED positions created within this many minutes are exempt from ghost detection. In auto mode the agent and reconciler run concurrently; Alpaca MLEG fills can take several seconds to appear in the positions API. 10 min = 2× the default reconcile interval."
+  },
+
+  "_earnings_note": "ETFs do not have earnings announcements — this filter is disabled for the ETF universe.",
+  "earnings_exclusion": {
+    "enabled": false,
+    "days_buffer": 2
+  },
+
+  "_otm_pct_note": "Hard floor on how far OTM the short strike must be, independent of delta. ETFs are more range-bound than individual stocks — 4% provides adequate buffer without sacrificing too much premium.",
+  "min_otm_pct": {
+    "put": 0.04,
+    "call": 0.04
+  },
+
+  "_dynamic_width_note": "Scale strike width with underlying price. ETFs trade at higher prices (SPY ~$550, QQQ ~$480) so wider tiers are needed to keep the spread a meaningful % of spot. Tiers are evaluated in order; first tier whose max_price >= spot wins.",
+  "dynamic_width": {
+    "enabled": true,
+    "tiers": [
+      {"max_price": 50,   "width": 5,  "_note": "< $50: $5 width (10%+ of price)"},
+      {"max_price": 150,  "width": 10, "_note": "$50-150: $10 width (~7-20%)"},
+      {"max_price": 300,  "width": 15, "_note": "$150-300: $15 width (~5-10%)"},
+      {"max_price": 500,  "width": 15, "_note": "$300-500: capped at $15 width"},
+      {"max_price": 9999, "width": 15, "_note": "> $500: capped at $15 width"}
+    ]
+  },
+
+  "_iv_filters_note": "IV rank filter is disabled for the ETF universe. Index ETFs carry a structural volatility risk premium (VIX effect) that makes the HV-rank gate unreliable — it would incorrectly block ETFs during low-VIX regimes when conditions are actually ideal for premium selling.",
+  "iv_filters": {
+    "enabled": false,
+    "min_iv_rank": 0.30,
+    "_iv_rank_note": "Skip tickers where HV rank < this threshold. HV rank = percentile of current 30-day realised vol within its 1-year range (0.30 = bottom 30th percentile filtered out). Requires history_days of price history.",
+    "require_iv_premium": true,
+    "_iv_premium_note": "Skip tickers where ATM implied vol < HV30 × iv_premium_min_ratio. Ensures you are selling options priced richer than recent realised vol — the core edge of premium selling.",
+    "iv_premium_min_ratio": 1.0,
+    "_ratio_note": "Minimum ratio of ATM_IV / HV30 required. 1.0 = IV must at least equal HV30. 1.10 = IV must be 10% above HV30.",
+    "history_days": 252,
+    "_history_note": "Trading days of price history to fetch for HV rank computation. 252 = 1 year. Increasing this costs more API bandwidth per scan cycle."
+  },
+
+  "_chain_liquidity_note": "Chain-level liquidity pre-filter applied once per expiry before strategy scanning. Raised min_open_interest and min_bid for ETF universe — liquid ETF options have deep OI and tight spreads; low values indicate illiquid strikes.",
+  "chain_liquidity": {
+    "min_bid": 0.10,
+    "min_open_interest": 100,
+    "max_spread_pct": 0.30,
+    "_note": "min_bid: skip options with bid < $0.10. min_open_interest: skip if OI < 100. max_spread_pct: skip if (ask-bid)/bid > 30% (tight for liquid ETFs)."
+  },
+
+  "_atr_note": "ATR-based distance guard: require |spot - short_strike| >= multiplier × ATR(atr_period). Multiplier raised to 2.0 for ETF universe — ETF ATR is tighter than individual stocks so a higher multiplier maintains adequate cushion.",
+  "atr_distance": {
+    "enabled": true,
+    "atr_period": 14,
+    "multiplier": 2.0
+  },
+
+  "_hft_note": "Set hft_mode=true to activate high-frequency trading mode: Alpaca-only data (no yfinance fallback), broker-supplied greeks from snapshots, fast polling. Requires valid ALPACA_API_KEY + ALPACA_API_SECRET.",
+  "hft_mode": true,
+  "hft": {
+    "poll_interval_seconds": 60,
+    "_poll_note": "How often the HFT daemon polls Alpaca for fresh option snapshots (seconds). Default 15. monitor_schedule.run_interval_minutes is ignored when hft_mode=true.",
+    "max_retries": 3,
+    "_retry_note": "Number of retry attempts before giving up on an Alpaca call. No yfinance fallback in HFT mode — failed calls raise an error after exhausting retries.",
+    "retry_base_delay_seconds": 2.0,
+    "_delay_note": "Base delay for exponential back-off: attempt 1 = base, attempt 2 = 2×base, attempt 3 = 4×base."
+  }
+}

@@ -1,0 +1,2442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>OptionWheel Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+/* ── Reset & base ──────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:          #0d1117;
+  --surface:     #161b22;
+  --surface2:    #1c2130;
+  --border:      #30363d;
+  --text:        #e6edf3;
+  --text-muted:  #8b949e;
+  --accent:      #58a6ff;
+  --green:       #3fb950;
+  --red:         #f85149;
+  --yellow:      #d29922;
+  --purple:      #bc8cff;
+  --orange:      #ffa657;
+  --radius:      8px;
+  --shadow:      0 4px 16px rgba(0,0,0,0.4);
+}
+
+html { font-size: 14px; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  min-height: 100vh;
+}
+
+/* ── Layout ────────────────────────────────────────────────────────────── */
+.app { display: flex; flex-direction: column; min-height: 100vh; }
+
+header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.logo {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: -0.3px;
+}
+.logo span { color: var(--text-muted); font-weight: 400; font-size: 0.85rem; margin-left: 6px; }
+
+.header-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.refresh-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: var(--radius);
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  transition: border-color 0.15s, color 0.15s;
+}
+.refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+.last-updated { color: var(--text-muted); font-size: 0.78rem; }
+
+main { padding: 20px 24px 40px; max-width: 1600px; margin: 0 auto; width: 100%; }
+
+/* ── Tabs ──────────────────────────────────────────────────────────────── */
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+}
+.tab-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  padding: 8px 16px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.15s, border-color 0.15s;
+}
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+/* ── Stat cards ────────────────────────────────────────────────────────── */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  transition: border-color 0.15s;
+}
+.stat-card:hover { border-color: var(--accent); }
+.stat-label { color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+.stat-value { font-size: 1.5rem; font-weight: 700; line-height: 1.1; }
+.stat-sub { color: var(--text-muted); font-size: 0.75rem; margin-top: 4px; }
+
+.pos { color: var(--green); }
+.neg { color: var(--red); }
+.neu { color: var(--text); }
+.acc { color: var(--accent); }
+
+/* ── Charts row ────────────────────────────────────────────────────────── */
+.charts-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+@media (max-width: 900px) { .charts-row { grid-template-columns: 1fr; } }
+
+.chart-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+.chart-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 12px;
+}
+.chart-wrap { position: relative; }
+
+/* ── Strategy breakdown row ────────────────────────────────────────────── */
+.strategy-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.strat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+.strat-name { font-weight: 700; font-size: 0.9rem; margin-bottom: 8px; }
+.strat-row { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 3px; }
+.strat-row .val { color: var(--text); font-weight: 500; }
+
+/* ── Filters ───────────────────────────────────────────────────────────── */
+.filter-bar {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+  margin-bottom: 16px;
+}
+
+.filter-group { display: flex; flex-direction: column; gap: 4px; }
+.filter-label { font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.4px; }
+
+.filter-input, .filter-select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 0.82rem;
+  min-width: 120px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.filter-input:focus, .filter-select:focus { border-color: var(--accent); }
+.filter-input::placeholder { color: var(--text-muted); }
+
+.filter-select option { background: var(--surface); }
+
+.segmented {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px;
+}
+.seg-btn {
+  background: transparent;
+  border: 0;
+  color: var(--text-muted);
+  border-radius: 5px;
+  padding: 5px 10px;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.seg-btn:hover { color: var(--text); }
+.seg-btn.active { background: var(--accent); color: #0d1117; font-weight: 700; }
+
+.btn {
+  border-radius: 6px;
+  padding: 6px 16px;
+  font-size: 0.82rem;
+  cursor: pointer;
+  border: none;
+  font-weight: 500;
+  transition: opacity 0.15s;
+}
+.btn:hover { opacity: 0.85; }
+.btn-primary { background: var(--accent); color: #0d1117; }
+.btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+
+/* ── Table ─────────────────────────────────────────────────────────────── */
+.table-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.table-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.table-title { font-size: 0.8rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+.table-count { font-size: 0.78rem; color: var(--text-muted); }
+
+.table-scroll { overflow-x: auto; }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+thead th {
+  padding: 10px 12px;
+  text-align: left;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+thead th:hover { color: var(--text); }
+thead th.sorted { color: var(--accent); }
+
+tbody tr {
+  border-bottom: 1px solid var(--border);
+  transition: background 0.1s;
+}
+tbody tr:last-child { border-bottom: none; }
+tbody tr:hover { background: var(--surface2); }
+
+td { padding: 10px 12px; vertical-align: middle; white-space: nowrap; }
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.badge-executed  { background: rgba(63,185,80,0.15);  color: var(--green);  }
+.badge-dry_run   { background: rgba(88,166,255,0.15); color: var(--accent); }
+.badge-pending   { background: rgba(210,153,34,0.15); color: var(--yellow); }
+.badge-closed    { background: rgba(139,148,158,0.15);color: var(--text-muted); }
+.badge-cancelled { background: rgba(248,81,73,0.15);  color: var(--red); }
+
+.strat-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+.strat-IC   { background: rgba(88,166,255,0.15);  color: var(--accent); }
+.strat-IFLY { background: rgba(188,140,255,0.15); color: var(--purple); }
+.strat-PCS  { background: rgba(63,185,80,0.15);   color: var(--green);  }
+.strat-CCS  { background: rgba(255,166,87,0.15);  color: var(--orange); }
+.strat-CSP  { background: rgba(210,153,34,0.15);  color: var(--yellow); }
+.strat-CC   { background: rgba(248,81,73,0.15);   color: var(--red);    }
+.strat-STRANGLE { background: rgba(139,148,158,0.15); color: var(--text-muted); }
+
+/* ── Pagination ────────────────────────────────────────────────────────── */
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+.page-btn {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.page-btn:hover, .page-btn.active { border-color: var(--accent); color: var(--accent); }
+.page-btn:disabled { opacity: 0.3; cursor: default; }
+
+/* ── Loading / empty ───────────────────────────────────────────────────── */
+.loading {
+  text-align: center;
+  padding: 40px;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+.empty-state {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--text-muted);
+}
+.empty-state svg { opacity: 0.3; margin-bottom: 12px; }
+.empty-state p { font-size: 0.85rem; }
+
+/* ── Sparkline bar ─────────────────────────────────────────────────────── */
+.mini-bar {
+  display: inline-block;
+  height: 4px;
+  border-radius: 2px;
+  vertical-align: middle;
+  min-width: 2px;
+}
+
+/* ── Tooltip ───────────────────────────────────────────────────────────── */
+[title] { cursor: help; }
+
+/* ── Scrollbar ─────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ── Responsive tweaks ─────────────────────────────────────────────────── */
+@media (max-width: 600px) {
+  main { padding: 12px; }
+  .stat-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ── Position row expand ────────────────────────────────────────────────── */
+.pos-row { cursor: pointer; }
+.pos-row:hover td { background: rgba(88,166,255,0.04); }
+.pos-chevron {
+  display: inline-block;
+  font-size: 0.6rem;
+  color: var(--text-muted);
+  margin-right: 5px;
+  vertical-align: middle;
+  transition: color 0.15s;
+}
+.pos-row:hover .pos-chevron { color: var(--accent); }
+
+.pos-detail-row > td {
+  padding: 0 !important;
+  border-top: none !important;
+}
+.leg-detail-panel {
+  background: var(--surface2);
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  border-radius: 0 0 var(--radius) var(--radius);
+  margin: 0 2px 6px;
+  padding: 14px 18px 12px;
+  font-size: 0.81rem;
+}
+.leg-detail-header {
+  display: flex;
+  align-items: center;
+  margin-bottom: 10px;
+  gap: 10px;
+}
+.leg-detail-title {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.02em;
+}
+.leg-detail-scroll { overflow-x: auto; }
+.leg-detail-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.79rem;
+}
+.leg-detail-table th {
+  text-align: right;
+  padding: 4px 12px;
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.leg-detail-table th:first-child { text-align: left; }
+.leg-detail-table td {
+  text-align: right;
+  padding: 6px 12px;
+  font-family: monospace;
+  border-bottom: 1px solid rgba(48,54,61,0.45);
+  white-space: nowrap;
+}
+.leg-detail-table td:first-child { text-align: left; font-family: sans-serif; }
+.leg-detail-table tr:last-child td { border-bottom: none; }
+.leg-label-short { color: var(--red); font-size: 0.78rem; }
+.leg-label-long  { color: var(--green); font-size: 0.78rem; }
+.leg-mid  { color: var(--accent); font-weight: 600; }
+.leg-iv   { color: var(--yellow); }
+.leg-oi, .leg-vol { color: var(--text-muted); }
+.leg-detail-footer {
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--text-muted);
+  font-size: 0.79rem;
+  flex-wrap: wrap;
+}
+.leg-detail-footer strong { color: var(--text); }
+.leg-detail-sep { color: var(--border); margin: 0 2px; }
+.leg-detail-msg {
+  padding: 14px 0;
+  color: var(--text-muted);
+  text-align: center;
+  font-style: italic;
+  font-size: 0.8rem;
+}
+.leg-detail-err {
+  padding: 14px 0;
+  color: var(--red);
+  text-align: center;
+  font-size: 0.8rem;
+}
+
+/* ── Risk Monitor tab ──────────────────────────────────────────────────── */
+.risk-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  white-space: nowrap;
+}
+.risk-SAFE      { background: rgba(63,185,80,0.18);   color: var(--green);      }
+.risk-WATCH     { background: rgba(88,166,255,0.18);  color: var(--accent);     }
+.risk-WARNING   { background: rgba(210,153,34,0.18);  color: var(--yellow);     }
+.risk-TRIGGER   { background: rgba(255,166,87,0.22);  color: var(--orange);     }
+.risk-STOP_LOSS { background: rgba(248,81,73,0.22);   color: var(--red);        }
+.risk-UNKNOWN   { background: rgba(139,148,158,0.18); color: var(--text-muted); }
+.regime-GREEN   { background: rgba(63,185,80,0.18);   color: var(--green);      }
+.regime-YELLOW  { background: rgba(210,153,34,0.18);  color: var(--yellow);     }
+.regime-ORANGE  { background: rgba(255,166,87,0.22);  color: var(--orange);     }
+.regime-RED     { background: rgba(248,81,73,0.22);   color: var(--red);        }
+.regime-UNKNOWN { background: rgba(139,148,158,0.18); color: var(--text-muted); }
+
+/* ratio / delta colour helpers */
+.ratio-safe    { color: var(--green);  }
+.ratio-watch   { color: var(--yellow); }
+.ratio-danger  { color: var(--orange); }
+.ratio-alert   { color: var(--red);    }
+
+/* config pill strip */
+.cfg-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+.cfg-pill {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 3px 10px;
+  font-size: 0.74rem;
+  white-space: nowrap;
+}
+.cfg-pill strong { color: var(--accent); }
+
+/* mini gauge bar (risk score) */
+.gauge-wrap { display: inline-flex; align-items: center; gap: 6px; }
+.gauge-bar  {
+  width: 44px; height: 6px; border-radius: 3px;
+  background: var(--surface2); overflow: hidden; display: inline-block;
+}
+.gauge-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
+
+.risk-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+@media (max-width: 900px) { .risk-split { grid-template-columns: 1fr; } }
+.mini-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.79rem;
+}
+.mini-table th {
+  text-align: left;
+  color: var(--text-muted);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+}
+.mini-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid rgba(48,54,61,0.55);
+}
+.mini-table td:last-child, .mini-table th:last-child { text-align: right; }
+.mini-table tr:last-child td { border-bottom: none; }
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- ── Header ─────────────────────────────────────────────────────────── -->
+<header>
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+  </svg>
+  <span class="logo">OptionWheel <span>Dashboard</span></span>
+  <div class="header-right">
+    <span class="last-updated" id="lastUpdated">—</span>
+    <button class="refresh-btn" onclick="refreshAll()">⟳ Refresh</button>
+  </div>
+</header>
+
+<!-- ── Main ───────────────────────────────────────────────────────────── -->
+<main>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="overview" onclick="switchTab('overview', this)">Overview</button>
+    <button class="tab-btn" data-tab="positions" onclick="switchTab('positions', this)">Open Positions <span id="posTabBadge" style="display:none;background:var(--accent);color:#0d1117;border-radius:10px;padding:1px 6px;font-size:0.68rem;font-weight:700;margin-left:4px"></span></button>
+    <button class="tab-btn" data-tab="scanner" onclick="switchTab('scanner', this)">Scanner Picks</button>
+    <button class="tab-btn" data-tab="trades" onclick="switchTab('trades', this)">Trades</button>
+    <button class="tab-btn" data-tab="analytics" onclick="switchTab('analytics', this)">Analytics</button>
+    <button class="tab-btn" data-tab="risk" onclick="switchTab('risk', this)">Risk Monitor <span id="riskAlertBadge" style="display:none;background:var(--red);color:#fff;border-radius:10px;padding:1px 6px;font-size:0.68rem;font-weight:700;margin-left:4px">!</span></button>
+  </div>
+
+  <!-- ═══════════════════════════ OVERVIEW TAB ══════════════════════════ -->
+  <div id="tab-overview" class="tab-panel active">
+
+    <!-- Stat cards -->
+    <div class="stat-grid" id="statGrid">
+      <div class="stat-card"><div class="stat-label">Total Trades</div><div class="stat-value acc" id="s-total">—</div></div>
+      <div class="stat-card"><div class="stat-label">Total P&amp;L</div><div class="stat-value" id="s-pnl">—</div></div>
+      <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value" id="s-winrate">—</div></div>
+      <div class="stat-card"><div class="stat-label">Avg Premium</div><div class="stat-value acc" id="s-avgprem">—</div></div>
+      <div class="stat-card"><div class="stat-label">Total Premium</div><div class="stat-value acc" id="s-totprem">—</div></div>
+      <div class="stat-card"><div class="stat-label">Best Trade</div><div class="stat-value pos" id="s-best">—</div></div>
+      <div class="stat-card"><div class="stat-label">Worst Trade</div><div class="stat-value neg" id="s-worst">—</div></div>
+      <div class="stat-card"><div class="stat-label">Avg P&amp;L</div><div class="stat-value" id="s-avgpnl">—</div></div>
+    </div>
+
+    <!-- Charts -->
+    <div class="charts-row">
+      <div class="chart-card">
+        <div class="chart-title">Cumulative P&amp;L</div>
+        <div class="chart-wrap" style="height:220px">
+          <canvas id="pnlChart"></canvas>
+        </div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Trades by Strategy</div>
+        <div class="chart-wrap" style="height:220px">
+          <canvas id="stratChart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- Strategy breakdown cards -->
+    <div class="chart-title" style="margin-bottom:12px;">Strategy Breakdown</div>
+    <div class="strategy-grid" id="stratGrid">
+      <div class="loading">Loading…</div>
+    </div>
+
+  </div><!-- /overview -->
+
+  <!-- ════════════════════════ OPEN POSITIONS TAB ══════════════════════ -->
+  <div id="tab-positions" class="tab-panel">
+
+    <!-- Summary cards -->
+    <div class="stat-grid" id="posStatGrid" style="margin-bottom:16px">
+      <div class="stat-card">
+        <div class="stat-label">Open Positions</div>
+        <div class="stat-value acc" id="ps-count">—</div>
+        <div class="stat-sub">active / not expired</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Unrealized P&amp;L</div>
+        <div class="stat-value" id="ps-upnl">—</div>
+        <div class="stat-sub" id="ps-upnl-sub">live marks</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Priced Positions</div>
+        <div class="stat-value acc" id="ps-priced">—</div>
+        <div class="stat-sub">option chain fetched</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Avg DTE</div>
+        <div class="stat-value acc" id="ps-dte">—</div>
+        <div class="stat-sub">days to expiry</div>
+      </div>
+    </div>
+
+    <!-- Refresh / status bar -->
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+      <button class="btn btn-primary" id="posRefreshBtn" onclick="loadPositions()">
+        ⟳ Refresh live marks
+      </button>
+      <button class="btn" id="closeAllBtn"
+              style="background:var(--red);color:#fff;border-color:var(--red)"
+              onclick="closeAllPositions()">
+        ✕ Close All Positions
+      </button>
+      <span id="posLoadMsg" style="color:var(--text-muted);font-size:0.8rem"></span>
+    </div>
+
+    <!-- Positions table -->
+    <div class="table-card">
+      <div class="table-header">
+        <span class="table-title">Open Positions — Current P&amp;L</span>
+        <span class="table-count" id="posTableCount">—</span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Symbol</th>
+              <th>Strategy</th>
+              <th title="Number of option contracts in this position">Contracts</th>
+              <th>Spot</th>
+              <th>Entry Date</th>
+              <th>Expiry</th>
+              <th>DTE</th>
+              <th>Strike / Legs</th>
+              <th title="Entry premium per contract (×100)">Entry Premium</th>
+              <th title="Current mark per contract (×100)">Current Mark</th>
+              <th title="Total unrealized P&amp;L across all contracts">Unrealized P&amp;L</th>
+              <th>P&amp;L %</th>
+              <th>Status</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="posTbody">
+            <tr><td colspan="15" class="loading">Click "Refresh live marks" to load current P&amp;L.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div><!-- /positions -->
+
+  <!-- ════════════════════════ SCANNER PICKS TAB ══════════════════════ -->
+  <div id="tab-scanner" class="tab-panel">
+
+    <div class="stat-grid" style="margin-bottom:16px">
+      <div class="stat-card">
+        <div class="stat-label">Picked</div>
+        <div class="stat-value acc" id="sp-selected">—</div>
+        <div class="stat-sub">latest scan plan</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Risk Rejected</div>
+        <div class="stat-value" id="sp-rejected">—</div>
+        <div class="stat-sub">higher-score candidates shown</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Last Scan</div>
+        <div class="stat-value acc" id="sp-updated">—</div>
+        <div class="stat-sub" id="sp-basis">mispricing score is informational</div>
+      </div>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+      <button class="btn btn-primary" onclick="loadScannerPicks()">⟳ Refresh scanner picks</button>
+      <span id="scannerLoadMsg" style="color:var(--text-muted);font-size:0.8rem"></span>
+    </div>
+
+    <div class="table-card" style="margin-bottom:16px">
+      <div class="table-header">
+        <span class="table-title">Picked Candidates — Mispricing Score</span>
+        <span class="table-count" id="scannerSelectedCount">—</span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Strategy</th>
+              <th>Expiry</th>
+              <th>Legs</th>
+              <th>Contracts</th>
+              <th>Total Credit</th>
+              <th>Prob</th>
+              <th>ROI</th>
+              <th title="Premium-richness score from scanner data; not a filter">Mispricing</th>
+            </tr>
+          </thead>
+          <tbody id="scannerSelectedTbody">
+            <tr><td colspan="9" class="loading">Refresh scanner picks to load latest scan.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="table-card">
+      <div class="table-header">
+        <span class="table-title">Higher-Score Risk Rejections</span>
+        <span class="table-count" id="scannerRejectedCount">—</span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Strategy</th>
+              <th>Expiry</th>
+              <th>Legs</th>
+              <th>Total Credit</th>
+              <th>Prob</th>
+              <th>Mispricing</th>
+              <th>Filtered By</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody id="scannerRejectedTbody">
+            <tr><td colspan="9" class="loading">Refresh scanner picks to load latest risk rejections.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div><!-- /scanner -->
+
+  <!-- ═══════════════════════════ TRADES TAB ═══════════════════════════ -->
+  <div id="tab-trades" class="tab-panel">
+
+    <!-- Filter bar -->
+    <div class="filter-bar">
+      <div class="filter-group">
+        <label class="filter-label">Symbol</label>
+        <input id="f-symbol" class="filter-input" placeholder="e.g. AAPL" style="width:100px" />
+      </div>
+      <div class="filter-group">
+        <label class="filter-label">Strategy</label>
+        <select id="f-strategy" class="filter-select">
+          <option value="">All</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label">Status</label>
+        <select id="f-status" class="filter-select">
+          <option value="">All</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label">From</label>
+        <input id="f-start" type="date" class="filter-input" />
+      </div>
+      <div class="filter-group">
+        <label class="filter-label">To</label>
+        <input id="f-end" type="date" class="filter-input" />
+      </div>
+      <button class="btn btn-primary" onclick="applyFilters()">Apply</button>
+      <button class="btn btn-secondary" onclick="clearFilters()">Clear</button>
+    </div>
+
+    <!-- Table -->
+    <div class="table-card">
+      <div class="table-header">
+        <span class="table-title">Trade Log</span>
+        <span class="table-count" id="tableCount">—</span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th onclick="sortBy('id')" id="th-id">ID</th>
+              <th onclick="sortBy('timestamp')" id="th-timestamp">Date ↕</th>
+              <th onclick="sortBy('symbol')" id="th-symbol">Symbol</th>
+              <th onclick="sortBy('type')" id="th-type">Strategy</th>
+              <th onclick="sortBy('expiry')" id="th-expiry">Expiry</th>
+              <th onclick="sortBy('strike')" id="th-strike">Strike</th>
+              <th onclick="sortBy('contracts')" id="th-contracts">Contracts</th>
+              <th onclick="sortBy('premium')" id="th-premium" title="Total entry premium across all contracts">Premium</th>
+              <th onclick="sortBy('prob_expiry')" id="th-prob_expiry">Prob</th>
+              <th onclick="sortBy('pnl')" id="th-pnl">P&amp;L</th>
+              <th onclick="sortBy('status')" id="th-status">Status</th>
+              <th>Order ID</th>
+            </tr>
+          </thead>
+          <tbody id="tradesTbody">
+            <tr><td colspan="12" class="loading">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="pagination" id="pagination"></div>
+    </div>
+
+  </div><!-- /trades -->
+
+  <!-- ═══════════════════════════ ANALYTICS TAB ════════════════════════ -->
+  <div id="tab-analytics" class="tab-panel">
+
+    <div class="filter-bar">
+      <div class="filter-group">
+        <label class="filter-label">Period</label>
+        <div class="segmented" id="analyticsPeriod">
+          <button class="seg-btn" data-period="daily" onclick="setAnalyticsPeriod('daily', this)">Daily</button>
+          <button class="seg-btn active" data-period="weekly" onclick="setAnalyticsPeriod('weekly', this)">Weekly</button>
+          <button class="seg-btn" data-period="quarterly" onclick="setAnalyticsPeriod('quarterly', this)">Quarterly</button>
+          <button class="seg-btn" data-period="6m" onclick="setAnalyticsPeriod('6m', this)">6 Months</button>
+          <button class="seg-btn" data-period="yearly" onclick="setAnalyticsPeriod('yearly', this)">Yearly</button>
+          <button class="seg-btn" data-period="all" onclick="setAnalyticsPeriod('all', this)">All</button>
+        </div>
+      </div>
+      <button class="btn btn-secondary" onclick="loadAnalytics()">Refresh</button>
+      <span id="analyticsLoadMsg" style="color:var(--text-muted);font-size:0.8rem"></span>
+    </div>
+
+    <div class="stat-grid" id="analyticsCapitalGrid">
+      <div class="stat-card"><div class="stat-label">Capital Deployed</div><div class="stat-value acc" id="a-cap-deployed">—</div></div>
+      <div class="stat-card"><div class="stat-label">Capital Remaining</div><div class="stat-value" id="a-cap-remaining">—</div></div>
+      <div class="stat-card"><div class="stat-label">Capital Budget</div><div class="stat-value acc" id="a-cap-budget">—</div></div>
+      <div class="stat-card"><div class="stat-label">Verified P&amp;L</div><div class="stat-value" id="a-verified-pnl">—</div></div>
+      <div class="stat-card"><div class="stat-label">Unverified P&amp;L</div><div class="stat-value" id="a-unverified-pnl">—</div></div>
+    </div>
+
+    <div class="chart-card" style="margin-bottom:20px">
+      <div class="chart-title">Capital Deployed by Strategy</div>
+      <div id="capitalByStrategy"></div>
+    </div>
+
+    <div class="charts-row" style="grid-template-columns:1fr 1fr;">
+      <div class="chart-card">
+        <div class="chart-title" id="dailyPnlTitle">Daily P&amp;L</div>
+        <div class="chart-wrap" style="height:240px">
+          <canvas id="dailyPnlChart"></canvas>
+        </div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">P&amp;L by Strategy</div>
+        <div class="chart-wrap" style="height:240px">
+          <canvas id="stratPnlChart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <div class="charts-row" style="grid-template-columns:1fr 1fr;">
+      <div class="chart-card">
+        <div class="chart-title">Win vs Loss by Strategy</div>
+        <div class="chart-wrap" style="height:240px">
+          <canvas id="winLossChart"></canvas>
+        </div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Trade Status Distribution</div>
+        <div class="chart-wrap" style="height:240px">
+          <canvas id="statusChart"></canvas>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /analytics -->
+
+  <!-- ══════════════════════════ RISK MONITOR TAB ═══════════════════════ -->
+  <div id="tab-risk" class="tab-panel">
+
+    <!-- Summary stat cards -->
+    <div class="stat-grid" id="riskStatGrid" style="margin-bottom:16px">
+      <div class="stat-card">
+        <div class="stat-label">Positions Monitored</div>
+        <div class="stat-value acc" id="rs-total">—</div>
+        <div class="stat-sub">open &amp; not expired</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">At Risk</div>
+        <div class="stat-value" id="rs-atrisk">—</div>
+        <div class="stat-sub">trigger or stop-loss</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Warning Zone</div>
+        <div class="stat-value" id="rs-warning">—</div>
+        <div class="stat-sub">approaching thresholds</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Watching</div>
+        <div class="stat-value acc" id="rs-watch">—</div>
+        <div class="stat-sub">minor drift, monitor</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Safe</div>
+        <div class="stat-value pos" id="rs-safe">—</div>
+        <div class="stat-sub">within normal bounds</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Avg γ/θ Ratio</div>
+        <div class="stat-value" id="rs-avgratio">—</div>
+        <div class="stat-sub">portfolio-wide</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Market Regime</div>
+        <div class="stat-value" id="rs-regime">—</div>
+        <div class="stat-sub" id="rs-regime-sub">new-trade throttle</div>
+      </div>
+    </div>
+
+    <div class="chart-title" style="margin-bottom:12px;">Portfolio Gamma Stress</div>
+    <div class="stat-grid" id="portfolioRiskGrid" style="margin-bottom:16px">
+      <div class="stat-card">
+        <div class="stat-label">Worst Stress Loss</div>
+        <div class="stat-value" id="prs-worst">—</div>
+        <div class="stat-sub" id="prs-worst-limit">shock + IV expansion</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">1% Stress Loss</div>
+        <div class="stat-value" id="prs-onepct">—</div>
+        <div class="stat-sub">gamma loss / theta input</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Daily Theta</div>
+        <div class="stat-value" id="prs-theta">—</div>
+        <div class="stat-sub">current book</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">1% Loss / Theta</div>
+        <div class="stat-value" id="prs-ratio">—</div>
+        <div class="stat-sub" id="prs-ratio-limit">budget ratio</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Near-Expiry Stress</div>
+        <div class="stat-value" id="prs-near">—</div>
+        <div class="stat-sub" id="prs-near-limit">DTE bucket</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Max Expiry Bucket</div>
+        <div class="stat-value" id="prs-bucket">—</div>
+        <div class="stat-sub" id="prs-bucket-limit">concentration cap</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Max Symbol Stress</div>
+        <div class="stat-value" id="prs-symbol">—</div>
+        <div class="stat-sub" id="prs-symbol-limit">per-symbol cap</div>
+      </div>
+    </div>
+
+    <div class="risk-split">
+      <div class="chart-card">
+        <div class="chart-title">Stress Scenarios</div>
+        <table class="mini-table">
+          <thead><tr><th>Move</th><th>Loss</th></tr></thead>
+          <tbody id="portfolioScenarioRows">
+            <tr><td colspan="2" class="loading">Refresh risk data to compute portfolio stress.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Expiry Buckets</div>
+        <table class="mini-table">
+          <thead><tr><th>Expiry</th><th>Worst Loss</th></tr></thead>
+          <tbody id="portfolioBucketRows">
+            <tr><td colspan="2" class="loading">Refresh risk data to compute expiry concentration.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Symbol Buckets</div>
+        <table class="mini-table">
+          <thead><tr><th>Symbol</th><th>Worst Loss</th></tr></thead>
+          <tbody id="portfolioSymbolRows">
+            <tr><td colspan="2" class="loading">Refresh risk data to compute symbol concentration.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Action bar -->
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap">
+      <button class="btn btn-primary" id="riskRefreshBtn" onclick="loadRisk()">
+        ⟳ Refresh risk data
+      </button>
+      <span id="riskLoadMsg" style="color:var(--text-muted);font-size:0.8rem"></span>
+      <div id="riskCfgPills" class="cfg-pills" style="margin-left:auto"></div>
+    </div>
+
+    <!-- Risk table -->
+    <div class="table-card">
+      <div class="table-header">
+        <span class="table-title">Position Risk Scores — Live Greeks</span>
+        <span class="table-count" id="riskTableCount">—</span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th title="Position ID">#</th>
+              <th>Symbol</th>
+              <th>Strategy</th>
+              <th title="Days to expiry">DTE</th>
+              <th title="Current underlying spot price">Spot</th>
+              <th title="|Net delta of short legs|. Rises as the position moves in-the-money.">Short Δ</th>
+              <th title="Gamma / Theta ratio: |net_gamma| / |net_theta_per_day|. Rising means gamma risk outpaces daily theta income.">γ/θ Ratio</th>
+              <th title="Composite risk score = gamma_theta_ratio × (1 + delta_penalty). Higher = riskier.">Risk Score</th>
+              <th title="Net daily theta income per contract (×100). Positive = earning time decay.">Θ/day ($)</th>
+              <th title="% of entry premium already earned. Higher = safer to close early.">Profit %</th>
+              <th title="How far the current mark is from the stop-loss trigger, as % of premium. Negative = already past stop-loss.">SL Distance</th>
+              <th title="Total unrealized P&amp;L across all contracts">P&amp;L</th>
+              <th title="Exit trigger evaluation">Status</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="riskTbody">
+            <tr><td colspan="14" class="loading">Click "Refresh risk data" to compute live Greeks.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Legend -->
+    <div style="margin-top:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 18px;">
+      <div class="chart-title" style="margin-bottom:10px">Status Legend &amp; Trigger Logic</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;font-size:0.8rem;color:var(--text-muted)">
+        <div><span class="risk-badge risk-SAFE">SAFE</span> &nbsp; γ/θ &lt; 60% of threshold, Δ &lt; 40% of min-delta</div>
+        <div><span class="risk-badge risk-WATCH">WATCH</span> &nbsp; Drifting toward thresholds — monitor closely</div>
+        <div><span class="risk-badge risk-WARNING">WARNING</span> &nbsp; Within 70% of one or both thresholds</div>
+        <div><span class="risk-badge risk-TRIGGER">TRIGGER</span> &nbsp; Gamma risk trigger would fire — exit recommended</div>
+        <div><span class="risk-badge risk-STOP_LOSS">STOP LOSS</span> &nbsp; Stop-loss threshold exceeded — close immediately</div>
+      </div>
+      <div style="margin-top:10px;font-size:0.78rem;color:var(--text-muted);line-height:1.6">
+        <strong style="color:var(--text)">Gamma risk trigger</strong> fires when:
+        γ/θ ratio ≥ threshold <em>AND</em> |short Δ| ≥ min-delta <em>AND</em>
+        (profit captured ≥ min% <em>OR</em> |short Δ| ≥ urgent-delta).
+        <br>
+        <strong style="color:var(--text)">γ/θ ratio</strong> colour: <span class="ratio-safe">■</span> &lt;0.8
+        &nbsp;<span class="ratio-watch">■</span> 0.8–1.5
+        &nbsp;<span class="ratio-danger">■</span> 1.5–2.0
+        &nbsp;<span class="ratio-alert">■</span> &gt;2.0
+      </div>
+    </div>
+
+  </div><!-- /risk -->
+
+</main>
+</div><!-- /app -->
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────────
+let state = {
+  sort: 'timestamp',
+  dir:  'desc',
+  page: 0,
+  limit: 50,
+  filters: {},
+  total: 0,
+};
+
+let charts = {};
+let statsData = null;
+let analyticsData = null;
+let analyticsPeriod = 'weekly';
+let _positionsData  = [];   // last-loaded open positions
+let _legDetailCache = {};   // trade_id → fetched detail payload
+let scannerLoaded = false;
+
+// ── Utilities ──────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+
+function fmt(v, prefix='', suffix='', decimals=2) {
+  if (v === null || v === undefined || v === '') return '—';
+  const n = parseFloat(v);
+  if (isNaN(n)) return '—';
+  return prefix + n.toFixed(decimals) + suffix;
+}
+
+function fmtMoney(v) {
+  if (v === null || v === undefined) return '—';
+  const n = parseFloat(v);
+  if (isNaN(n)) return '—';
+  const sign = n > 0 ? '+' : n < 0 ? '-' : '';
+  return sign + '$' + Math.abs(n).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+
+function fmtDollars(v) {
+  const s = fmtMoney(v);
+  return s.startsWith('+') ? s.substring(1) : s;
+}
+
+function fmtPct(v) {
+  if (v === null || v === undefined) return '—';
+  return parseFloat(v).toFixed(1) + '%';
+}
+
+function fmtRatio(v) {
+  if (v === null || v === undefined) return '—';
+  if (v === 'Infinity' || v === Infinity) return '∞';
+  const n = parseFloat(v);
+  if (isNaN(n)) return '—';
+  return n.toFixed(2) + '×';
+}
+
+function colorClass(v) {
+  const n = parseFloat(v);
+  if (isNaN(n) || n === 0) return 'neu';
+  return n > 0 ? 'pos' : 'neg';
+}
+
+function statusBadge(s) {
+  const key = (s || '').toLowerCase().replace(/_/g, '_');
+  return `<span class="badge badge-${key}">${s || '—'}</span>`;
+}
+
+function stratBadge(s) {
+  return `<span class="strat-badge strat-${s || ''}">${s || '—'}</span>`;
+}
+
+function setInnerHTML(id, html) {
+  const el = $(id);
+  if (el) el.innerHTML = html;
+}
+
+function setText(id, text, cls) {
+  const el = $(id);
+  if (!el) return;
+  el.textContent = text;
+  if (cls) { el.className = 'stat-value ' + cls; }
+}
+
+// ── API calls ──────────────────────────────────────────────────────────────────
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+// ── Tab switching ──────────────────────────────────────────────────────────────
+let positionsLoaded = false;
+
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  const panel = $('tab-' + name);
+  if (panel) panel.classList.add('active');
+  if (name === 'analytics' && !analyticsData) loadAnalytics();
+  else if (name === 'analytics' && analyticsData) renderAnalyticsCharts(analyticsData);
+  if (name === 'scanner' && !scannerLoaded) {
+    scannerLoaded = true;
+    loadScannerPicks();
+  }
+  // Auto-load live marks the first time the positions tab is opened
+  if (name === 'positions' && !positionsLoaded) {
+    positionsLoaded = true;
+    loadPositions();
+  }
+  // Auto-load risk data the first time the risk tab is opened
+  if (name === 'risk' && !riskLoaded) {
+    riskLoaded = true;
+    loadRisk();
+  }
+}
+
+// ── Stats ──────────────────────────────────────────────────────────────────────
+async function loadStats() {
+  try {
+    const data = await fetchJSON('/api/stats');
+    statsData = data;
+    const s = data.summary;
+
+    setText('s-total',   s.total_trades || 0, 'acc');
+    const pnl = parseFloat(s.total_pnl) || 0;
+    setText('s-pnl',     fmtMoney(pnl), 'stat-value ' + colorClass(pnl));
+    setText('s-winrate',  fmtPct(s.win_rate),  colorClass(s.win_rate));
+    setText('s-avgprem',  fmt(s.avg_premium, '$'), 'acc');
+    setText('s-totprem',  fmt(s.total_premium, '$'), 'acc');
+    setText('s-best',     fmtMoney(s.best_trade), 'pos');
+    setText('s-worst',    fmtMoney(s.worst_trade), 'neg');
+    const avg = parseFloat(s.avg_pnl) || 0;
+    setText('s-avgpnl',   fmtMoney(avg), colorClass(avg));
+
+    renderPnlChart(data.timeline);
+    renderStratPieChart(data.by_strategy);
+    renderStrategyCards(data.by_strategy);
+
+  } catch(e) {
+    console.error('loadStats error:', e);
+  }
+}
+
+async function loadAnalytics() {
+  const msg = $('analyticsLoadMsg');
+  if (msg) msg.textContent = 'Loading analytics…';
+  try {
+    const data = await fetchJSON('/api/stats?period=' + encodeURIComponent(analyticsPeriod));
+    analyticsData = data;
+    renderAnalyticsCharts(data);
+    if (msg) msg.textContent = `Showing ${analyticsPeriodLabel(analyticsPeriod).toLowerCase()} realized P&L`;
+  } catch(e) {
+    console.error('loadAnalytics error:', e);
+    if (msg) msg.textContent = `Error loading analytics: ${e.message}`;
+  }
+}
+
+function analyticsPeriodLabel(period) {
+  return {
+    daily: 'Daily',
+    weekly: 'Weekly',
+    quarterly: 'Quarterly',
+    '6m': '6 months',
+    yearly: 'Yearly',
+    all: 'All-time',
+  }[period] || 'Selected';
+}
+
+function setAnalyticsPeriod(period, btn) {
+  analyticsPeriod = period;
+  document.querySelectorAll('#analyticsPeriod .seg-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  loadAnalytics();
+}
+
+// ── Strategy cards ────────────────────────────────────────────────────────────
+function renderStrategyCards(byStrategy) {
+  if (!byStrategy || byStrategy.length === 0) {
+    $('stratGrid').innerHTML = '<div class="empty-state"><p>No trade data yet.</p></div>';
+    return;
+  }
+
+  const stratColors = { IC:'#58a6ff', IFLY:'#bc8cff', PCS:'#3fb950', CCS:'#ffa657', CSP:'#d29922', CC:'#f85149', STRANGLE:'#8b949e' };
+
+  $('stratGrid').innerHTML = byStrategy.map(s => {
+    const winrate = s.trades > 0 ? (s.wins / s.trades * 100).toFixed(1) : 0;
+    const pnl     = parseFloat(s.total_pnl) || 0;
+    const clr     = stratColors[s.strategy] || '#8b949e';
+    return `
+      <div class="strat-card" style="border-left:3px solid ${clr}">
+        <div class="strat-name" style="color:${clr}">${s.strategy || '?'}</div>
+        <div class="strat-row"><span>Trades</span><span class="val">${s.trades}</span></div>
+        <div class="strat-row"><span>Win Rate</span><span class="val">${winrate}%</span></div>
+        <div class="strat-row"><span>Total P&amp;L</span><span class="val ${colorClass(pnl)}">${fmtMoney(pnl)}</span></div>
+        <div class="strat-row"><span>Avg Premium</span><span class="val">$${parseFloat(s.avg_premium).toFixed(2)}</span></div>
+      </div>`;
+  }).join('');
+}
+
+// ── Charts ────────────────────────────────────────────────────────────────────
+const chartDefaults = {
+  responsive: true,
+  maintainAspectRatio: false,
+  plugins: {
+    legend: { labels: { color: '#8b949e', font: { size: 11 } } },
+    tooltip: { backgroundColor: '#1c2130', borderColor: '#30363d', borderWidth: 1, titleColor: '#e6edf3', bodyColor: '#8b949e' }
+  },
+  scales: {
+    x: { grid: { color: '#21262d' }, ticks: { color: '#8b949e', font: { size: 10 } } },
+    y: { grid: { color: '#21262d' }, ticks: { color: '#8b949e', font: { size: 10 } } }
+  }
+};
+
+function destroyChart(key) {
+  if (charts[key]) { charts[key].destroy(); delete charts[key]; }
+}
+
+function renderPnlChart(timeline) {
+  destroyChart('pnl');
+  if (!timeline || timeline.length === 0) return;
+
+  const labels = timeline.map(r => r.date);
+  const data   = timeline.map(r => r.cumulative_pnl);
+
+  const ctx = $('pnlChart').getContext('2d');
+  const gradient = ctx.createLinearGradient(0, 0, 0, 220);
+  gradient.addColorStop(0,   'rgba(88,166,255,0.3)');
+  gradient.addColorStop(1,   'rgba(88,166,255,0.0)');
+
+  charts.pnl = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Cumulative P&L',
+        data,
+        borderColor: '#58a6ff',
+        backgroundColor: gradient,
+        borderWidth: 2,
+        pointRadius: data.length > 60 ? 0 : 3,
+        pointHoverRadius: 5,
+        fill: true,
+        tension: 0.3,
+      }]
+    },
+    options: {
+      ...chartDefaults,
+      plugins: {
+        ...chartDefaults.plugins,
+        legend: { display: false },
+        tooltip: {
+          ...chartDefaults.plugins.tooltip,
+          callbacks: { label: ctx => ' $' + ctx.parsed.y.toFixed(2) }
+        }
+      }
+    }
+  });
+}
+
+function renderStratPieChart(byStrategy) {
+  destroyChart('stratPie');
+  if (!byStrategy || byStrategy.length === 0) return;
+
+  const colors = ['#58a6ff','#bc8cff','#3fb950','#ffa657','#d29922','#f85149','#8b949e'];
+  charts.stratPie = new Chart($('stratChart').getContext('2d'), {
+    type: 'doughnut',
+    data: {
+      labels: byStrategy.map(s => s.strategy),
+      datasets: [{ data: byStrategy.map(s => s.trades), backgroundColor: colors, borderColor: '#161b22', borderWidth: 2 }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'right', labels: { color: '#8b949e', font: { size: 11 }, boxWidth: 12, padding: 8 } },
+        tooltip: chartDefaults.plugins.tooltip
+      }
+    }
+  });
+}
+
+function renderAnalyticsCharts(data) {
+  const title = $('dailyPnlTitle');
+  if (title) title.textContent = `${analyticsPeriodLabel(analyticsPeriod)} Realized P&L`;
+  renderAnalyticsCapital(data);
+
+  // Daily P&L bar
+  destroyChart('daily');
+  if (data.timeline && data.timeline.length) {
+    const barColors = data.timeline.map(r => (r.daily_pnl || 0) >= 0 ? 'rgba(63,185,80,0.7)' : 'rgba(248,81,73,0.7)');
+    charts.daily = new Chart($('dailyPnlChart').getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels: data.timeline.map(r => r.date),
+        datasets: [{ label: 'Daily P&L', data: data.timeline.map(r => r.daily_pnl || 0), backgroundColor: barColors }]
+      },
+      options: { ...chartDefaults, plugins: { ...chartDefaults.plugins, legend: { display: false } } }
+    });
+  }
+
+  // P&L by strategy bar
+  destroyChart('stratPnl');
+  if (data.by_strategy && data.by_strategy.length) {
+    const clrs = data.by_strategy.map(s => (s.total_pnl || 0) >= 0 ? 'rgba(63,185,80,0.7)' : 'rgba(248,81,73,0.7)');
+    charts.stratPnl = new Chart($('stratPnlChart').getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels: data.by_strategy.map(s => s.strategy),
+        datasets: [{ label: 'Total P&L', data: data.by_strategy.map(s => s.total_pnl || 0), backgroundColor: clrs }]
+      },
+      options: { ...chartDefaults, plugins: { ...chartDefaults.plugins, legend: { display: false } } }
+    });
+  }
+
+  // Win/Loss by strategy stacked
+  destroyChart('winLoss');
+  if (data.by_strategy && data.by_strategy.length) {
+    charts.winLoss = new Chart($('winLossChart').getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels: data.by_strategy.map(s => s.strategy),
+        datasets: [
+          { label: 'Wins',   data: data.by_strategy.map(s => s.wins),               backgroundColor: 'rgba(63,185,80,0.7)' },
+          { label: 'Losses', data: data.by_strategy.map(s => s.trades - s.wins),     backgroundColor: 'rgba(248,81,73,0.5)' },
+        ]
+      },
+      options: { ...chartDefaults, scales: { ...chartDefaults.scales, x: { ...chartDefaults.scales.x, stacked: true }, y: { ...chartDefaults.scales.y, stacked: true } } }
+    });
+  }
+
+  // Status pie
+  destroyChart('statusPie');
+  if (data.by_status && data.by_status.length) {
+    const statusColors = { EXECUTED: '#3fb950', DRY_RUN: '#58a6ff', PENDING: '#d29922', CLOSED: '#8b949e', CANCELLED: '#f85149' };
+    charts.statusPie = new Chart($('statusChart').getContext('2d'), {
+      type: 'pie',
+      data: {
+        labels: data.by_status.map(s => s.status),
+        datasets: [{
+          data: data.by_status.map(s => s.count),
+          backgroundColor: data.by_status.map(s => statusColors[s.status] || '#8b949e'),
+          borderColor: '#161b22', borderWidth: 2
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'right', labels: { color: '#8b949e', font: { size: 11 }, boxWidth: 12, padding: 8 } },
+          tooltip: chartDefaults.plugins.tooltip
+        }
+      }
+    });
+  }
+}
+
+function renderAnalyticsCapital(data) {
+  const cap = data.capital || {};
+  const deployed = parseFloat(cap.deployed || 0);
+  const remaining = cap.remaining;
+  const budget = cap.budget;
+  const s = data.summary || {};
+  const verified = parseFloat(s.verified_pnl || 0);
+  const unverified = parseFloat(s.unverified_pnl || 0);
+
+  setText('a-cap-deployed', fmtDollars(deployed), 'acc');
+  setText('a-cap-remaining', remaining == null ? '—' : fmtDollars(remaining), remaining != null && remaining < 0 ? 'neg' : 'pos');
+  setText('a-cap-budget', budget == null ? '—' : fmtDollars(budget), 'acc');
+  setText('a-verified-pnl', fmtMoney(verified), colorClass(verified));
+  setText('a-unverified-pnl', fmtMoney(unverified), unverified === 0 ? 'neu' : colorClass(unverified));
+
+  const rows = cap.by_strategy || [];
+  const el = $('capitalByStrategy');
+  if (!el) return;
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty-state" style="padding:24px"><p>No live capital deployed.</p></div>';
+    return;
+  }
+  el.innerHTML = `
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Strategy</th><th>Open Positions</th><th style="text-align:right">Capital</th></tr></thead>
+        <tbody>
+          ${rows.map(r => `
+            <tr>
+              <td>${stratBadge(r.strategy)}</td>
+              <td>${r.positions}</td>
+              <td style="text-align:right;font-weight:700">${fmtDollars(r.capital_deployed)}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+// ── Scanner pick audit ───────────────────────────────────────────────────────
+async function loadScannerPicks() {
+  const msg = $('scannerLoadMsg');
+  if (msg) msg.textContent = 'Loading latest scanner audit…';
+  try {
+    const data = await fetchJSON('/api/scanner-picks');
+    renderScannerPicks(data);
+    if (msg) msg.textContent = data.generated_at ? 'Latest scanner audit loaded.' : 'No scanner audit found yet.';
+  } catch(e) {
+    console.error('loadScannerPicks error:', e);
+    if (msg) msg.textContent = `Error loading scanner picks: ${e.message}`;
+  }
+}
+
+function fmtProb(v) {
+  if (v === null || v === undefined || v === '') return '—';
+  const n = parseFloat(v);
+  if (isNaN(n)) return '—';
+  return (n * 100).toFixed(1) + '%';
+}
+
+function fmtRoi(v) {
+  if (v === null || v === undefined || v === '') return '—';
+  const n = parseFloat(v);
+  if (isNaN(n)) return '—';
+  return (n * 100).toFixed(1) + '%';
+}
+
+function renderScannerPicks(data) {
+  const selected = data.selected || [];
+  const rejected = data.rejected || [];
+  setText('sp-selected', selected.length, 'acc');
+  setText('sp-rejected', rejected.length, rejected.length ? 'neg' : 'neu');
+  const stamp = data.generated_at ? new Date(data.generated_at).toLocaleString() : '—';
+  setText('sp-updated', stamp, 'acc');
+  const basis = $('sp-basis');
+  if (basis) basis.textContent = data.score_basis || 'mispricing score is informational';
+
+  const selectedCount = $('scannerSelectedCount');
+  if (selectedCount) selectedCount.textContent = `${selected.length} candidate${selected.length !== 1 ? 's' : ''}`;
+  const rejectedCount = $('scannerRejectedCount');
+  if (rejectedCount) rejectedCount.textContent = `${rejected.length} rejected candidate${rejected.length !== 1 ? 's' : ''}`;
+
+  const selectedBody = $('scannerSelectedTbody');
+  if (selectedBody) {
+    selectedBody.innerHTML = selected.length
+      ? selected.map(row => `
+          <tr>
+            <td><strong>${row.symbol || '—'}</strong></td>
+            <td>${stratBadge(row.strategy)}</td>
+            <td>${row.expiry || '—'}</td>
+            <td style="font-family:monospace;font-size:0.78rem">${row.legs || '—'}</td>
+            <td>${parseInt(row.quantity || 1, 10).toLocaleString()}</td>
+            <td>${fmtDollars(row.total_credit || 0)}</td>
+            <td>${fmtProb(row.prob_win)}</td>
+            <td>${fmtRoi(row.roi)}</td>
+            <td class="acc" style="font-weight:700">${fmt(row.mispricing_score, '', '', 4)}</td>
+          </tr>`).join('')
+      : '<tr><td colspan="9"><div class="empty-state"><p>No picked candidates in the latest scanner audit.</p></div></td></tr>';
+  }
+
+  const rejectedBody = $('scannerRejectedTbody');
+  if (rejectedBody) {
+    rejectedBody.innerHTML = rejected.length
+      ? rejected.map(row => `
+          <tr>
+            <td><strong>${row.symbol || '—'}</strong></td>
+            <td>${stratBadge(row.strategy)}</td>
+            <td>${row.expiry || '—'}</td>
+            <td style="font-family:monospace;font-size:0.78rem">${row.legs || '—'}</td>
+            <td>${fmtDollars(row.total_credit || 0)}</td>
+            <td>${fmtProb(row.prob_win)}</td>
+            <td class="acc" style="font-weight:700">${fmt(row.mispricing_score, '', '', 4)}</td>
+            <td>${row.filtered_stage || '—'}</td>
+            <td style="color:var(--text-muted);white-space:normal;min-width:220px">${row.reject_reason || '—'}</td>
+          </tr>`).join('')
+      : '<tr><td colspan="9"><div class="empty-state"><p>No high-scoring risk rejections in the latest scanner audit.</p></div></td></tr>';
+  }
+}
+
+// ── Filter dropdowns ──────────────────────────────────────────────────────────
+async function loadFilters() {
+  try {
+    const data = await fetchJSON('/api/filters');
+    const strat = $('f-strategy');
+    data.strategies.forEach(s => {
+      const o = document.createElement('option');
+      o.value = s; o.textContent = s;
+      strat.appendChild(o);
+    });
+    const stat = $('f-status');
+    data.statuses.forEach(s => {
+      const o = document.createElement('option');
+      o.value = s; o.textContent = s;
+      stat.appendChild(o);
+    });
+  } catch(e) {
+    console.error('loadFilters error:', e);
+  }
+}
+
+// ── Trades table ──────────────────────────────────────────────────────────────
+function buildQuery() {
+  const p = new URLSearchParams();
+  const f = state.filters;
+  if (f.symbol)   p.set('symbol',   f.symbol);
+  if (f.strategy) p.set('strategy', f.strategy);
+  if (f.status)   p.set('status',   f.status);
+  if (f.start)    p.set('start',    f.start);
+  if (f.end)      p.set('end',      f.end);
+  p.set('sort',   state.sort);
+  p.set('dir',    state.dir);
+  p.set('limit',  state.limit);
+  p.set('offset', state.page * state.limit);
+  return p.toString();
+}
+
+async function loadTrades() {
+  $('tradesTbody').innerHTML = '<tr><td colspan="12" class="loading">Loading…</td></tr>';
+  try {
+    const data = await fetchJSON('/api/trades?' + buildQuery());
+    state.total = data.total;
+    renderTable(data.trades);
+    renderPagination();
+    $('tableCount').textContent = `${data.total.toLocaleString()} trade${data.total !== 1 ? 's' : ''}`;
+  } catch(e) {
+    $('tradesTbody').innerHTML = `<tr><td colspan="12" class="loading">Error loading trades: ${e.message}</td></tr>`;
+  }
+}
+
+function renderTable(trades) {
+  if (!trades || trades.length === 0) {
+    $('tradesTbody').innerHTML = '<tr><td colspan="12"><div class="empty-state"><p>No trades found. Run the agent to populate the database.</p></div></td></tr>';
+    return;
+  }
+
+  $('tradesTbody').innerHTML = trades.map(t => {
+    const pnl  = parseFloat(t.pnl)  || 0;
+    const prob = parseFloat(t.prob_expiry) || 0;
+    const prem = parseFloat(t.premium) || 0;
+    const contracts = parseInt(t.contracts || 1, 10) || 1;
+    const totalPrem = prem * 100 * contracts;
+    const date = t.timestamp ? t.timestamp.substring(0, 16).replace('T', ' ') : '—';
+
+    return `<tr>
+      <td style="color:var(--text-muted)">${t.id}</td>
+      <td>${date}</td>
+      <td><strong>${t.symbol || '—'}</strong></td>
+      <td>${stratBadge(t.type)}</td>
+      <td>${t.expiry || '—'}</td>
+      <td>${t.strike != null ? '$' + parseFloat(t.strike).toFixed(2) : '—'}</td>
+      <td>${contracts.toLocaleString()}</td>
+      <td>$${totalPrem.toFixed(2)}</td>
+      <td>${prob > 0 ? (prob * 100).toFixed(1) + '%' : '—'}</td>
+      <td class="${colorClass(pnl)}">${pnl !== 0 ? fmtMoney(pnl) : '—'}</td>
+      <td>${statusBadge(t.status)}</td>
+      <td style="color:var(--text-muted);font-size:0.75rem">${t.order_id || '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Sorting ───────────────────────────────────────────────────────────────────
+function sortBy(col) {
+  if (state.sort === col) {
+    state.dir = state.dir === 'desc' ? 'asc' : 'desc';
+  } else {
+    state.sort = col;
+    state.dir = 'desc';
+  }
+  state.page = 0;
+  // Update header visual
+  document.querySelectorAll('thead th').forEach(th => th.classList.remove('sorted'));
+  const th = $('th-' + col);
+  if (th) th.classList.add('sorted');
+  loadTrades();
+}
+
+// ── Pagination ────────────────────────────────────────────────────────────────
+function renderPagination() {
+  const totalPages = Math.ceil(state.total / state.limit);
+  if (totalPages <= 1) { $('pagination').innerHTML = ''; return; }
+
+  const pg = $('pagination');
+  let html = '';
+  html += `<button class="page-btn" onclick="goPage(${state.page-1})" ${state.page === 0 ? 'disabled' : ''}>‹ Prev</button>`;
+
+  // Show limited page buttons
+  const start = Math.max(0, state.page - 2);
+  const end   = Math.min(totalPages - 1, state.page + 2);
+  for (let i = start; i <= end; i++) {
+    html += `<button class="page-btn ${i === state.page ? 'active' : ''}" onclick="goPage(${i})">${i + 1}</button>`;
+  }
+
+  html += `<button class="page-btn" onclick="goPage(${state.page+1})" ${state.page >= totalPages-1 ? 'disabled' : ''}>Next ›</button>`;
+  html += `<span style="color:var(--text-muted);font-size:0.75rem;margin-left:4px">${state.page+1} / ${totalPages}</span>`;
+  pg.innerHTML = html;
+}
+
+function goPage(p) {
+  state.page = p;
+  loadTrades();
+}
+
+// ── Filters ───────────────────────────────────────────────────────────────────
+function applyFilters() {
+  state.filters = {
+    symbol:   $('f-symbol').value.trim(),
+    strategy: $('f-strategy').value,
+    status:   $('f-status').value,
+    start:    $('f-start').value,
+    end:      $('f-end').value,
+  };
+  state.page = 0;
+  loadTrades();
+}
+
+function clearFilters() {
+  $('f-symbol').value = '';
+  $('f-strategy').value = '';
+  $('f-status').value = '';
+  $('f-start').value = '';
+  $('f-end').value = '';
+  state.filters = {};
+  state.page = 0;
+  loadTrades();
+}
+
+// Enter key on filter inputs
+['f-symbol','f-start','f-end'].forEach(id => {
+  const el = $(id);
+  if (el) el.addEventListener('keydown', e => { if (e.key === 'Enter') applyFilters(); });
+});
+
+// ── Open Positions ────────────────────────────────────────────────────────────
+
+function legsLabel(pos) {
+  // Build a short leg description from the legs dict and strategy type
+  const strat = (pos.type || '').toUpperCase();
+  const legs  = pos.legs || {};
+  const str   = (v) => v != null ? v : '?';
+
+  if (strat === 'CSP') return str(legs.short_strike || pos.strike) + 'P';
+  if (strat === 'PCS') {
+    const ss = legs.short_strike || pos.strike;
+    const ls = legs.long_strike;
+    return `${str(ss)}/${str(ls)} P`;
+  }
+  if (strat === 'CCS') {
+    const ss = legs.short_strike || pos.strike;
+    const ls = legs.long_strike;
+    return `${str(ss)}/${str(ls)} C`;
+  }
+  if (strat === 'IC') {
+    return `${str(legs.long_put)}/${str(legs.short_put)} P  ${str(legs.short_call)}/${str(legs.long_call)} C`;
+  }
+  if (strat === 'IFLY') {
+    return `${str(legs.long_put)}/${str(legs.short_put)}(ATM)/${str(legs.long_call)}`;
+  }
+  if (strat === 'CC') return str(legs.short_strike || pos.strike) + 'C';
+  if (strat === 'STRANGLE') return `${str(legs.short_put || pos.strike)}P / ${str(legs.short_call)}C`;
+  return pos.strike != null ? '$' + parseFloat(pos.strike).toFixed(2) : '?';
+}
+
+function dteColor(dte) {
+  if (dte == null) return '';
+  if (dte <= 5)  return 'style="color:var(--red)"';
+  if (dte <= 14) return 'style="color:var(--yellow)"';
+  return '';
+}
+
+function renderPositionsTable(positions) {
+  if (!positions || positions.length === 0) {
+    $('posTbody').innerHTML = '<tr><td colspan="15"><div class="empty-state"><p>No open positions found.</p></div></td></tr>';
+    return;
+  }
+
+  // Cache for leg detail lookups; reset on each positions reload so marks stay fresh
+  _positionsData  = positions;
+  _legDetailCache = {};
+
+  $('posTbody').innerHTML = positions.map(p => {
+    const prem    = parseFloat(p.premium) || 0;
+    const mark    = p.current_mark != null ? parseFloat(p.current_mark) : null;
+    const upnl    = p.unrealized_pnl != null ? parseFloat(p.unrealized_pnl) : null;
+    const pnlPct  = p.pnl_pct != null ? parseFloat(p.pnl_pct) : null;
+    const dte     = p.dte;
+    const contracts = parseInt(p.contracts || 1, 10) || 1;
+    const date    = (p.timestamp || '').substring(0, 10);
+    const spot    = p.spot_price != null ? '$' + parseFloat(p.spot_price).toFixed(2) : '—';
+
+    const markStr = mark != null ? '$' + (mark * 100).toFixed(2) : '<span style="color:var(--text-muted)">fetching…</span>';
+    const upnlStr = upnl != null
+      ? `<span class="${colorClass(upnl)}">${fmtMoney(upnl)}</span>`
+      : '<span style="color:var(--text-muted)">—</span>';
+    const pctStr  = pnlPct != null
+      ? `<span class="${colorClass(pnlPct)}">${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%</span>`
+      : '—';
+    const dteStr  = dte != null
+      ? `<span ${dteColor(dte)}>${dte}d</span>`
+      : '—';
+
+    return `<tr id="pos-row-${p.id}" class="pos-row" onclick="toggleLegDetail(${p.id})">
+      <td style="color:var(--text-muted)"><span id="chevron-${p.id}" class="pos-chevron">▶</span>${p.id}</td>
+      <td><strong>${p.symbol || '—'}</strong></td>
+      <td>${stratBadge(p.type)}</td>
+      <td>${contracts.toLocaleString()}</td>
+      <td style="color:var(--accent)">${spot}</td>
+      <td style="color:var(--text-muted)">${date}</td>
+      <td>${p.expiry || '—'}</td>
+      <td>${dteStr}</td>
+      <td style="font-family:monospace;font-size:0.78rem">${legsLabel(p)}</td>
+      <td>$${(prem * 100).toFixed(2)}</td>
+      <td style="font-family:monospace">${markStr}</td>
+      <td>${upnlStr}</td>
+      <td>${pctStr}</td>
+      <td>${statusBadge(p.status)}</td>
+      <td onclick="event.stopPropagation()">
+        <button class="btn btn-close-pos"
+                style="padding:3px 10px;font-size:0.75rem;background:transparent;border:1px solid var(--red);color:var(--red);border-radius:var(--radius);cursor:pointer"
+                onclick="closePosition(${p.id}, '${p.symbol || ''}', '${p.type || ''}')">
+          Close
+        </button>
+      </td>
+    </tr>
+    <tr id="pos-detail-${p.id}" class="pos-detail-row" style="display:none">
+      <td colspan="15">
+        <div class="leg-detail-panel" id="leg-panel-${p.id}">
+          <div class="leg-detail-msg">Loading leg details…</div>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Manual close helpers ──────────────────────────────────────────────────────
+
+/**
+ * Show a confirmation modal and return a Promise that resolves to
+ * { confirmed: bool, dryRun: bool }.
+ */
+function _confirmClose(title, body) {
+  return new Promise(resolve => {
+    // Build modal if not already present
+    let overlay = $('closeModal');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'closeModal';
+      overlay.style.cssText = [
+        'display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);',
+        'z-index:9999;align-items:center;justify-content:center',
+      ].join('');
+      overlay.innerHTML = `
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+                    padding:28px 32px;max-width:460px;width:90%;box-shadow:var(--shadow)">
+          <h3 id="closeModalTitle" style="margin-bottom:10px;color:var(--red)"></h3>
+          <p  id="closeModalBody"  style="color:var(--text-muted);margin-bottom:18px;line-height:1.5"></p>
+          <label style="display:flex;align-items:center;gap:8px;margin-bottom:18px;cursor:pointer">
+            <input type="checkbox" id="closeModalDryRun" checked
+                   style="width:15px;height:15px;accent-color:var(--accent)">
+            <span style="font-size:0.9rem">Dry-run only (no real broker order)</span>
+          </label>
+          <div style="display:flex;gap:10px;justify-content:flex-end">
+            <button id="closeModalCancel" class="btn btn-secondary">Cancel</button>
+            <button id="closeModalConfirm"
+                    style="background:var(--red);color:#fff;border:none;border-radius:var(--radius);
+                           padding:7px 20px;cursor:pointer;font-size:0.9rem">
+              Confirm Close
+            </button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+    }
+
+    // Populate content
+    $('closeModalTitle').textContent = title;
+    $('closeModalBody').textContent  = body;
+    $('closeModalDryRun').checked    = true;   // default to dry-run safe mode
+
+    overlay.style.display = 'flex';
+
+    function cleanup(confirmed) {
+      overlay.style.display = 'none';
+      $('closeModalCancel').onclick  = null;
+      $('closeModalConfirm').onclick = null;
+      resolve({ confirmed, dryRun: $('closeModalDryRun').checked });
+    }
+
+    $('closeModalCancel').onclick  = () => cleanup(false);
+    $('closeModalConfirm').onclick = () => cleanup(true);
+  });
+}
+
+async function closePosition(tradeId, symbol, strat) {
+  const { confirmed, dryRun } = await _confirmClose(
+    `Close ${strat} ${symbol} (ID ${tradeId})?`,
+    `This will send a buy-to-close order for position #${tradeId} (${strat} ${symbol}).`
+  );
+  if (!confirmed) return;
+
+  const row = $(`pos-row-${tradeId}`);
+  if (row) row.style.opacity = '0.4';
+
+  try {
+    const resp = await fetch(`/api/close-position/${tradeId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dry_run: dryRun }),
+    });
+    const data = await resp.json();
+    if (data.success) {
+      const effectiveDryRun = dryRun || data.forced_dry_run;
+      const tag    = effectiveDryRun ? ' [DRY RUN]' : '';
+      const pnlFmt = data.pnl != null ? ` | P&L: ${fmtMoney(data.pnl)}` : '';
+      const note   = data.forced_dry_run
+        ? '\n⚠ Paper-trade position — no exchange order was sent.' : '';
+      alert(`✓ Position #${tradeId} closed${tag}.${pnlFmt}\nOrder: ${data.order_id || '—'}${note}`);
+      loadPositions();   // refresh table
+    } else {
+      alert(`✗ Close failed: ${data.error || 'Unknown error'}`);
+      if (row) row.style.opacity = '1';
+    }
+  } catch(e) {
+    alert(`✗ Request error: ${e.message}`);
+    if (row) row.style.opacity = '1';
+  }
+}
+
+// ── Leg detail expand / collapse ─────────────────────────────────────────────
+
+async function toggleLegDetail(id) {
+  const detailRow = $(`pos-detail-${id}`);
+  const chevron   = $(`chevron-${id}`);
+  if (!detailRow) return;
+
+  const isOpen = detailRow.style.display !== 'none';
+  if (isOpen) {
+    detailRow.style.display = 'none';
+    if (chevron) chevron.textContent = '▶';
+    return;
+  }
+
+  // open
+  detailRow.style.display = 'table-row';
+  if (chevron) chevron.textContent = '▼';
+
+  // already fetched — just show
+  if (_legDetailCache[id]) return;
+
+  const panel = $(`leg-panel-${id}`);
+  if (panel) panel.innerHTML = '<div class="leg-detail-msg">Fetching live option chain…</div>';
+
+  try {
+    const data = await fetchJSON(`/api/position-detail/${id}`);
+    _legDetailCache[id] = data;
+    renderLegDetail(id, data);
+  } catch (e) {
+    if (panel) panel.innerHTML = `<div class="leg-detail-err">Failed to load: ${e.message}</div>`;
+  }
+}
+
+function renderLegDetail(id, data) {
+  const panel = $(`leg-panel-${id}`);
+  if (!panel) return;
+
+  const legs = data.legs || [];
+  if (legs.length === 0) {
+    panel.innerHTML = '<div class="leg-detail-err">No leg data available for this position.</div>';
+    return;
+  }
+
+  // pull summary data from in-memory positions cache
+  const pos    = (_positionsData || []).find(p => p.id === id) || {};
+  const prem   = parseFloat(pos.premium)      || 0;
+  const mark   = pos.current_mark != null ? parseFloat(pos.current_mark) : null;
+  const upnl   = pos.unrealized_pnl != null   ? parseFloat(pos.unrealized_pnl) : null;
+  const pnlPct = pos.pnl_pct != null          ? parseFloat(pos.pnl_pct)        : null;
+
+  const legRows = legs.map(leg => {
+    const isShort = leg.label.startsWith('Short');
+    const lblCls  = isShort ? 'leg-label-short' : 'leg-label-long';
+    const bidStr  = leg.bid    != null ? `$${parseFloat(leg.bid).toFixed(2)}`  : '—';
+    const askStr  = leg.ask    != null ? `$${parseFloat(leg.ask).toFixed(2)}`  : '—';
+    const midStr  = leg.mid    != null ? `$${parseFloat(leg.mid).toFixed(2)}`  : '—';
+    const lastStr = leg.last   != null ? `$${parseFloat(leg.last).toFixed(2)}` : '—';
+    const ivStr   = leg.iv     != null ? `${parseFloat(leg.iv).toFixed(1)}%`   : '—';
+    const oiStr   = leg.oi     != null ? leg.oi.toLocaleString()               : '—';
+    const volStr  = leg.volume != null ? leg.volume.toLocaleString()           : '—';
+    return `<tr>
+      <td><span class="${lblCls}">${leg.label}</span></td>
+      <td>$${parseFloat(leg.strike).toFixed(2)}</td>
+      <td>${bidStr}</td>
+      <td>${askStr}</td>
+      <td class="leg-mid">${midStr}</td>
+      <td>${lastStr}</td>
+      <td class="leg-iv">${ivStr}</td>
+      <td class="leg-oi">${oiStr}</td>
+      <td class="leg-vol">${volStr}</td>
+    </tr>`;
+  }).join('');
+
+  const markStr = mark != null ? `$${(mark * 100).toFixed(2)}` : '—';
+  const pnlStr  = upnl != null
+    ? `<span class="${colorClass(upnl)}">${fmtMoney(upnl)}&thinsp;` +
+      `(${pnlPct >= 0 ? '+' : ''}${pnlPct != null ? pnlPct.toFixed(1) : '?'}%)</span>`
+    : '—';
+
+  panel.innerHTML = `
+    <div class="leg-detail-header">
+      <span class="leg-detail-title">
+        ${data.type} &middot; <strong style="color:var(--text)">${data.symbol}</strong>
+        &middot; Expiry <strong style="color:var(--text)">${data.expiry}</strong>
+      </span>
+    </div>
+    <div class="leg-detail-scroll">
+      <table class="leg-detail-table">
+        <thead>
+          <tr>
+            <th>Leg</th><th>Strike</th><th>Bid</th><th>Ask</th>
+            <th>Mid</th><th>Last</th><th>IV</th><th>OI</th><th>Volume</th>
+          </tr>
+        </thead>
+        <tbody>${legRows}</tbody>
+      </table>
+    </div>
+    <div class="leg-detail-footer">
+      <span>Entry Premium: <strong>$${(prem * 100).toFixed(2)}</strong></span>
+      <span class="leg-detail-sep">·</span>
+      <span>Current Mark: <strong>${markStr}</strong></span>
+      <span class="leg-detail-sep">·</span>
+      <span>Unrealized P&amp;L: <strong>${pnlStr}</strong></span>
+    </div>`;
+}
+
+async function closeAllPositions() {
+  const countEl = $('posTableCount');
+  const countTxt = countEl ? countEl.textContent : 'all open';
+  const { confirmed, dryRun } = await _confirmClose(
+    'Close ALL open positions?',
+    `This will send buy-to-close orders for ${countTxt}. ` +
+    'Each position will be priced from the live option chain before sending.'
+  );
+  if (!confirmed) return;
+
+  const btn = $('closeAllBtn');
+  if (btn) btn.disabled = true;
+  if ($('posLoadMsg')) $('posLoadMsg').textContent = 'Closing all positions…';
+
+  try {
+    const resp = await fetch('/api/close-all-positions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dry_run: dryRun }),
+    });
+    const data = await resp.json();
+    const tag  = dryRun ? ' [DRY RUN]' : '';
+    const forcedCount = (data.results || []).filter(r => r.forced_dry_run).length;
+    const forcedNote  = forcedCount > 0
+      ? `\n⚠ ${forcedCount} paper-trade position(s) closed locally — no exchange order sent.` : '';
+    alert(
+      `✓ Closed ${data.closed} / ${data.total} position(s)${tag}.\n` +
+      `Total P&L: ${fmtMoney(data.total_pnl || 0)}${forcedNote}`
+    );
+    loadPositions();
+  } catch(e) {
+    alert(`✗ Request error: ${e.message}`);
+  } finally {
+    if (btn) btn.disabled = false;
+    if ($('posLoadMsg')) $('posLoadMsg').textContent = '';
+  }
+}
+
+async function loadPositions() {
+  const btn = $('posRefreshBtn');
+  const msg = $('posLoadMsg');
+  if (btn) btn.disabled = true;
+  if (msg) msg.textContent = 'Fetching live option chain data… (may take a moment)';
+  $('posTbody').innerHTML = '<tr><td colspan="15" class="loading">Loading live marks from yfinance…</td></tr>';
+
+  try {
+    const data = await fetchJSON('/api/open-positions');
+    const positions = data.positions || [];
+
+    // Update stat cards
+    const priced = positions.filter(p => p.current_mark != null).length;
+    const avgDte  = positions.length > 0
+      ? Math.round(positions.filter(p => p.dte != null).reduce((s, p) => s + p.dte, 0)
+          / Math.max(1, positions.filter(p => p.dte != null).length))
+      : null;
+
+    setText('ps-count',  positions.length, 'acc');
+    const upnl = parseFloat(data.total_unrealized_pnl) || 0;
+    setText('ps-upnl',   fmtMoney(upnl), 'stat-value ' + colorClass(upnl));
+    setText('ps-priced', `${priced} / ${positions.length}`, 'acc');
+    setText('ps-dte',    avgDte != null ? avgDte + 'd' : '—', 'acc');
+
+    // Tab badge
+    const badge = $('posTabBadge');
+    if (badge && positions.length > 0) {
+      badge.textContent = positions.length;
+      badge.style.display = 'inline';
+    }
+
+    $('posTableCount').textContent = `${positions.length} position${positions.length !== 1 ? 's' : ''}`;
+    renderPositionsTable(positions);
+
+    const now = new Date().toLocaleTimeString();
+    if (msg) msg.textContent = `Live marks loaded at ${now}`;
+  } catch(e) {
+    $('posTbody').innerHTML = `<tr><td colspan="15" class="loading">Error loading positions: ${e.message}</td></tr>`;
+    if (msg) msg.textContent = 'Failed to load — check that yfinance is installed.';
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ── Risk Monitor ──────────────────────────────────────────────────────────────
+
+let riskLoaded = false;
+let _riskData  = [];
+
+/** Return a coloured CSS class for a gamma/theta ratio value. */
+function ratioClass(v) {
+  if (v === null || v === undefined) return '';
+  const n = parseFloat(v);
+  if (isNaN(n)) return '';
+  if (n < 0.8)  return 'ratio-safe';
+  if (n < 1.5)  return 'ratio-watch';
+  if (n < 2.0)  return 'ratio-danger';
+  return 'ratio-alert';
+}
+
+/** Return a coloured CSS class for an absolute short delta value. */
+function deltaClass(v) {
+  if (v === null || v === undefined) return '';
+  const n = parseFloat(v);
+  if (isNaN(n)) return '';
+  if (n < 0.10) return 'ratio-safe';
+  if (n < 0.20) return 'ratio-watch';
+  if (n < 0.30) return 'ratio-danger';
+  return 'ratio-alert';
+}
+
+/** Mini gauge bar HTML. fill: 0–100, color: CSS colour string. */
+function gaugeBar(fill, color) {
+  const pct = Math.min(100, Math.max(0, fill));
+  return `<span class="gauge-bar"><span class="gauge-fill" style="width:${pct}%;background:${color}"></span></span>`;
+}
+
+/** Gauge colour based on risk score value. */
+function riskScoreColor(v) {
+  if (v < 0.8)  return 'var(--green)';
+  if (v < 1.5)  return 'var(--yellow)';
+  if (v < 2.0)  return 'var(--orange)';
+  return 'var(--red)';
+}
+
+/** Render the config threshold pills strip. */
+function renderRiskConfigPills(thresholds) {
+  if (!thresholds) return;
+  const el = $('riskCfgPills');
+  if (!el) return;
+  el.innerHTML = `
+    <span class="cfg-pill">SL mult: <strong>${thresholds.stop_loss_multiplier}×</strong></span>
+    <span class="cfg-pill">γ/θ threshold: <strong>${thresholds.gamma_theta_ratio_threshold}</strong></span>
+    <span class="cfg-pill">Min Δ: <strong>${thresholds.min_delta_to_trigger}</strong></span>
+    <span class="cfg-pill">Urgent Δ: <strong>${thresholds.urgent_delta_threshold}</strong></span>
+    <span class="cfg-pill">Stress cap: <strong>${(thresholds.portfolio_stress_cap_pct * 100).toFixed(0)}%</strong></span>
+    <span class="cfg-pill">Stress floor: <strong>${fmtDollars(thresholds.min_stress_loss_dollars || 0)}</strong></span>
+    <span class="cfg-pill">Symbol cap: <strong>${(thresholds.symbol_stress_cap_pct * 100).toFixed(0)}%</strong></span>
+    <span class="cfg-pill">Symbol floor: <strong>${fmtDollars(thresholds.min_symbol_stress_dollars || 0)}</strong></span>
+    <span class="cfg-pill">Min profit: <strong>${(thresholds.min_profit_captured_pct * 100).toFixed(0)}%</strong></span>`;
+}
+
+function renderRegime(regime) {
+  const labelEl = $('rs-regime');
+  const subEl = $('rs-regime-sub');
+  if (!labelEl || !subEl) return;
+  const label = (regime && regime.label) ? String(regime.label).toUpperCase() : 'UNKNOWN';
+  labelEl.innerHTML = `<span class="risk-badge regime-${label}">${label}</span>`;
+
+  if (!regime || (regime.metrics && regime.metrics.enabled === false)) {
+    subEl.textContent = 'filter disabled';
+    return;
+  }
+  if (regime.pause_new_trades) {
+    subEl.textContent = 'new trades paused';
+    return;
+  }
+  const qty = Math.round((regime.quantity_multiplier ?? 1) * 100);
+  const topN = Math.round((regime.top_n_multiplier ?? 1) * 100);
+  const reason = Array.isArray(regime.reasons) && regime.reasons.length
+    ? ` · ${regime.reasons[0]}`
+    : '';
+  subEl.textContent = `qty ${qty}% · top-N ${topN}%${reason}`;
+}
+
+function renderPortfolioRisk(summary) {
+  if (!summary) return;
+  const limits = summary.limits || {};
+  const worst = parseFloat(summary.worst_stress_loss || 0);
+  const worstLimit = parseFloat(limits.max_stress_loss || 0);
+  const near = parseFloat(summary.near_expiry_stress_loss || 0);
+  const nearLimit = parseFloat(limits.near_expiry_stress || 0);
+  const bucket = parseFloat(summary.max_expiry_bucket_loss || 0);
+  const bucketLimit = parseFloat(limits.expiry_bucket || 0);
+  const symbol = parseFloat(summary.max_symbol_stress_loss || 0);
+  const symbolLimit = parseFloat(limits.symbol_stress || 0);
+  const ratio = summary.gamma_loss_to_daily_theta;
+  const ratioLimit = parseFloat(limits.gamma_loss_to_theta || 0);
+
+  setText('prs-worst', fmtDollars(-worst), worstLimit && worst > worstLimit ? 'neg' : 'pos');
+  setText('prs-onepct', fmtDollars(-summary.one_pct_stress_loss), 'neu');
+  setText('prs-theta', fmtMoney(summary.daily_theta), parseFloat(summary.daily_theta || 0) >= 0 ? 'pos' : 'neg');
+  setText('prs-ratio', fmtRatio(ratio), (ratio === Infinity || parseFloat(ratio || 0) > ratioLimit) ? 'neg' : 'pos');
+  setText('prs-near', fmtDollars(-near), nearLimit && near > nearLimit ? 'neg' : 'pos');
+  setText('prs-bucket', fmtDollars(-bucket), bucketLimit && bucket > bucketLimit ? 'neg' : 'pos');
+  setText('prs-symbol', fmtDollars(-symbol), symbolLimit && symbol > symbolLimit ? 'neg' : 'pos');
+
+  const wl = $('prs-worst-limit');
+  if (wl) wl.textContent = worstLimit ? `limit ${fmtDollars(worstLimit)}` : 'shock + IV expansion';
+  const rl = $('prs-ratio-limit');
+  if (rl) rl.textContent = ratioLimit ? `limit ${ratioLimit.toFixed(2)}×` : 'budget ratio';
+  const nl = $('prs-near-limit');
+  if (nl) nl.textContent = nearLimit ? `limit ${fmtDollars(nearLimit)}` : 'DTE bucket';
+  const bl = $('prs-bucket-limit');
+  if (bl) bl.textContent = bucketLimit ? `limit ${fmtDollars(bucketLimit)}` : 'concentration cap';
+  const sl = $('prs-symbol-limit');
+  if (sl) sl.textContent = symbolLimit ? `limit ${fmtDollars(symbolLimit)}` : 'per-symbol cap';
+
+  const scenarios = Object.entries(summary.scenario_losses || {});
+  const scenarioRows = $('portfolioScenarioRows');
+  if (scenarioRows) {
+    scenarioRows.innerHTML = scenarios.length
+      ? scenarios.map(([move, loss]) => `<tr><td>${move}</td><td class="${parseFloat(loss) > 0 ? 'neg' : 'neu'}">${fmtDollars(-loss)}</td></tr>`).join('')
+      : '<tr><td colspan="2" class="loading">No stress scenarios available.</td></tr>';
+  }
+
+  const buckets = Object.entries(summary.expiry_bucket_losses || {});
+  const bucketRows = $('portfolioBucketRows');
+  if (bucketRows) {
+    bucketRows.innerHTML = buckets.length
+      ? buckets.sort((a, b) => a[0].localeCompare(b[0]))
+          .map(([expiry, loss]) => `<tr><td>${expiry}</td><td class="${parseFloat(loss) > bucketLimit ? 'neg' : 'neu'}">${fmtDollars(-loss)}</td></tr>`).join('')
+      : '<tr><td colspan="2" class="loading">No expiry bucket risk available.</td></tr>';
+  }
+
+  const symbols = Object.entries(summary.symbol_bucket_losses || {});
+  const symbolRows = $('portfolioSymbolRows');
+  if (symbolRows) {
+    symbolRows.innerHTML = symbols.length
+      ? symbols.sort((a, b) => parseFloat(b[1]) - parseFloat(a[1]))
+          .map(([sym, loss]) => `<tr><td>${sym}</td><td class="${parseFloat(loss) > symbolLimit ? 'neg' : 'neu'}">${fmtDollars(-loss)}</td></tr>`).join('')
+      : '<tr><td colspan="2" class="loading">No symbol bucket risk available.</td></tr>';
+  }
+}
+
+function renderRiskTable(positions) {
+  const tbody = $('riskTbody');
+  if (!positions || positions.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="14"><div class="empty-state"><p>No open positions found.</p></div></td></tr>';
+    return;
+  }
+
+  _riskData = positions;
+
+  tbody.innerHTML = positions.map(p => {
+    // ── basic fields ──────────────────────────────────────────────────────
+    const date   = (p.timestamp || '').substring(0, 10);
+    const spot   = p.spot_price  != null ? '$' + parseFloat(p.spot_price).toFixed(2) : '—';
+    const mark   = p.current_mark != null ? parseFloat(p.current_mark) : null;
+    const prem   = parseFloat(p.premium) || 0;
+
+    const dteStr = p.dte != null
+      ? `<span ${p.dte <= 5 ? 'style="color:var(--red)"' : p.dte <= 14 ? 'style="color:var(--yellow)"' : ''}>${p.dte}d</span>`
+      : '—';
+
+    // ── Greeks columns ────────────────────────────────────────────────────
+    const delta    = p.short_delta       != null ? parseFloat(p.short_delta)       : null;
+    const ratio    = p.gamma_theta_ratio != null ? parseFloat(p.gamma_theta_ratio) : null;
+    const score    = p.risk_score        != null ? parseFloat(p.risk_score)        : null;
+    const theta    = p.net_theta_per_day != null ? parseFloat(p.net_theta_per_day) : null;
+    const profCap  = p.profit_captured_pct != null ? parseFloat(p.profit_captured_pct) : null;
+    const slDist   = p.sl_distance_pct  != null ? parseFloat(p.sl_distance_pct)   : null;
+    const upnl     = p.unrealized_pnl   != null ? parseFloat(p.unrealized_pnl)    : null;
+
+    // ── formatted strings ─────────────────────────────────────────────────
+    const deltaStr = delta != null
+      ? `<span class="${deltaClass(delta)}" title="Short delta: rising means position is moving in-the-money">${delta.toFixed(3)}</span>`
+      : '—';
+
+    const ratioStr = ratio != null
+      ? `<span class="${ratioClass(ratio)}" title="γ/θ ratio: ${ratio.toFixed(3)}">${ratio.toFixed(3)}</span>`
+      : '—';
+
+    const scoreStr = !p.greeks_available
+      ? '<span style="color:var(--text-muted);font-size:0.75rem">no IV</span>'
+      : score != null
+        ? `<span class="gauge-wrap">
+             ${gaugeBar(Math.min(score / 3.0 * 100, 100), riskScoreColor(score))}
+             <span style="color:${riskScoreColor(score)};font-weight:600">${score.toFixed(2)}</span>
+           </span>`
+        : '—';
+
+    const thetaStr = theta != null
+      ? `<span style="color:${theta >= 0 ? 'var(--green)' : 'var(--red)'}">${theta >= 0 ? '+' : ''}$${Math.abs(theta).toFixed(3)}</span>`
+      : '—';
+
+    const profCapStr = profCap != null
+      ? `<span class="${colorClass(profCap)}">${profCap >= 0 ? '+' : ''}${profCap.toFixed(1)}%</span>`
+      : '—';
+
+    const slDistStr = slDist != null
+      ? slDist >= 0
+        ? `<span style="color:var(--text-muted)">${slDist.toFixed(1)}%</span>`
+        : `<span style="color:var(--red);font-weight:600">${slDist.toFixed(1)}%</span>`
+      : '—';
+
+    const upnlStr = upnl != null
+      ? `<span class="${colorClass(upnl)}">${fmtMoney(upnl)}</span>`
+      : '—';
+
+    const statusBadgeHtml = `<span class="risk-badge risk-${p.trigger_status || 'UNKNOWN'}">${
+      p.trigger_status === 'STOP_LOSS' ? 'Stop Loss'
+      : p.trigger_status === 'TRIGGER' ? 'Trigger'
+      : (p.trigger_status || 'Unknown')
+    }</span>`;
+
+    // ── error row (chain unavailable) ─────────────────────────────────────
+    if (p.error) {
+      return `<tr>
+        <td style="color:var(--text-muted)">${p.id}</td>
+        <td><strong>${p.symbol || '—'}</strong></td>
+        <td>${stratBadge(p.type)}</td>
+        <td>${dteStr}</td>
+        <td colspan="9" style="color:var(--text-muted);font-size:0.78rem;font-style:italic">${p.error}</td>
+        <td>${statusBadgeHtml}</td>
+        <td></td>
+      </tr>`;
+    }
+
+    return `<tr>
+      <td style="color:var(--text-muted)">${p.id}</td>
+      <td><strong>${p.symbol || '—'}</strong></td>
+      <td>${stratBadge(p.type)}</td>
+      <td>${dteStr}</td>
+      <td style="color:var(--accent)">${spot}</td>
+      <td>${deltaStr}</td>
+      <td>${ratioStr}</td>
+      <td>${scoreStr}</td>
+      <td>${thetaStr}</td>
+      <td>${profCapStr}</td>
+      <td>${slDistStr}</td>
+      <td>${upnlStr}</td>
+      <td>${statusBadgeHtml}</td>
+      <td onclick="event.stopPropagation()">
+        <button class="btn"
+                style="padding:3px 10px;font-size:0.75rem;background:transparent;border:1px solid var(--red);color:var(--red);border-radius:var(--radius);cursor:pointer"
+                onclick="closePosition(${p.id}, '${p.symbol || ''}', '${p.type || ''}')">
+          Close
+        </button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function loadRisk() {
+  const btn = $('riskRefreshBtn');
+  const msg = $('riskLoadMsg');
+  if (btn) btn.disabled = true;
+  if (msg) msg.textContent = 'Computing live Greeks from option chains… (may take a moment)';
+  $('riskTbody').innerHTML = '<tr><td colspan="14" class="loading">Fetching option chains and computing Black-Scholes Greeks…</td></tr>';
+
+  try {
+    const data = await fetchJSON('/api/risk-monitor');
+    const positions = data.positions || [];
+    const sc        = data.status_counts || {};
+
+    // ── Update summary cards ──────────────────────────────────────────────
+    setText('rs-total',   data.count || 0, 'acc');
+    const atRisk = (data.at_risk_count || 0);
+    setText('rs-atrisk',  atRisk, atRisk > 0 ? 'neg' : 'neu');
+    const warnN = sc.WARNING || 0;
+    setText('rs-warning', warnN, warnN > 0 ? 'stat-value' : 'neu');
+    $('rs-warning').style.color = warnN > 0 ? 'var(--yellow)' : '';
+    setText('rs-watch',   sc.WATCH   || 0, 'acc');
+    setText('rs-safe',    sc.SAFE    || 0, 'pos');
+
+    const avgR = parseFloat(data.avg_ratio) || 0;
+    const avgREl = $('rs-avgratio');
+    if (avgREl) {
+      avgREl.textContent = avgR.toFixed(3);
+      avgREl.className   = 'stat-value ' + ratioClass(avgR);
+    }
+
+    // ── Alert badge on tab ────────────────────────────────────────────────
+    const alertBadge = $('riskAlertBadge');
+    if (alertBadge) {
+      if (atRisk > 0) {
+        alertBadge.textContent = atRisk;
+        alertBadge.style.display = 'inline';
+      } else {
+        alertBadge.style.display = 'none';
+      }
+    }
+
+    // ── Config pills ──────────────────────────────────────────────────────
+    renderRiskConfigPills(data.thresholds);
+    renderRegime(data.regime);
+    renderPortfolioRisk(data.portfolio_risk);
+
+    // ── Table count ───────────────────────────────────────────────────────
+    const tc = $('riskTableCount');
+    if (tc) tc.textContent = `${positions.length} position${positions.length !== 1 ? 's' : ''}`;
+
+    renderRiskTable(positions);
+
+    const now = new Date().toLocaleTimeString();
+    if (msg) msg.textContent = `Greeks computed at ${now}`;
+  } catch(e) {
+    $('riskTbody').innerHTML = `<tr><td colspan="14" class="loading">Error loading risk data: ${e.message}</td></tr>`;
+    if (msg) msg.textContent = 'Failed to load — check Flask logs.';
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ── Refresh all ───────────────────────────────────────────────────────────────
+function refreshAll() {
+  const now = new Date().toLocaleTimeString();
+  $('lastUpdated').textContent = 'Updated ' + now;
+  loadStats();
+  loadTrades();
+  if ($('tab-analytics') && $('tab-analytics').classList.contains('active')) {
+    loadAnalytics();
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+(async function init() {
+  await loadFilters();
+  await loadStats();
+  await loadTrades();
+  $('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+})();
+</script>
+</body>
+</html>
