@@ -1,18 +1,21 @@
 """
-OptionWheel Agent — Main Entry Point
-=====================================
+OptionMind Agent — Main Entry Point
+===================================
 
-Scans the option universe, presents a ranked plan of trades, and
-optionally executes approved picks via Alpaca.
+Runs the ML scanner hook, applies deterministic risk controls, presents a
+ranked plan of model-suggested trades, and optionally executes approved picks
+via Alpaca.
 
 Execution modes
 ---------------
   approve   (default)  Show the plan table, ask for user approval, then
                         execute only the approved subset.
   auto                 Execute automatically any pick whose prob_win
-                        exceeds auto_execute_prob in config.json
+                        exceeds auto_execute_prob in config.json. Model
+                        candidates can populate prob_win from
+                        probability_of_profit.
                         (useful for scheduled / headless runs).
-  scan-only            Scan and print the plan but never execute anything.
+  scan-only            Score and print the plan but never execute anything.
                         Picks are also saved to data/pending_picks.json.
 
 Trade safety
@@ -32,7 +35,7 @@ Usage examples
   # Auto-execute high-confidence picks (live):
   python agent.py --mode auto --live
 
-  # Scan only — no execution, no prompts:
+  # Score only — no execution, no prompts:
   python agent.py --mode scan-only
 
   # Use full index universe instead of the default 10-ticker sample:
@@ -71,19 +74,18 @@ from src.position_reconciler import PositionReconciler
 from src.position_monitor import PositionMonitor
 from src.portfolio_risk import PortfolioRiskService
 from src.regime import RegimeResult, RegimeService
-from src.scanner import OptionScanner
-from src.sentiment import SentimentAnalyzer
+from src.model_scanner import ModelScanner
 from src.utils import get_logger, load_config
 
 log = get_logger()
 
-SCAN_AUDIT_PATH = os.path.join('data', 'scanner_picks.json')
+SCAN_AUDIT_PATH = os.path.join('data', 'model_candidates.json')
 
 
 # ── Pick formatting ────────────────────────────────────────────────────────────
 
 def _capital_for_pick(pick: dict) -> float:
-    """Estimate the capital requirement for a scanner pick."""
+    """Estimate the capital requirement for a model candidate."""
     strat = pick.get('strategy', '')
     price = pick.get('current_price', 0.0) or 0.0
 
@@ -160,7 +162,7 @@ def _max_loss_multiple_for_pick(pick: dict) -> float:
 
 
 def _pick_key(pick: dict) -> tuple:
-    """Stable identity for one scanner candidate across risk-gate lists."""
+    """Stable identity for one model candidate across risk-gate lists."""
     def _num(value) -> float:
         try:
             return float(value or 0)
@@ -181,12 +183,10 @@ def _pick_key(pick: dict) -> tuple:
 
 def _mispricing_score_for_pick(pick: dict) -> float:
     """
-    Practical premium-richness score from currently available scanner data.
+    Practical model score adapter for existing risk/audit displays.
 
-    This mirrors the scanner's yield-normalized score where available:
-    higher means more credit collected per unit of strategy width after
-    probability weighting. It is an edge candidate signal, not an arbitrage
-    fair-value proof.
+    New candidates should provide ``model_score``. Legacy ``score`` remains
+    accepted only so old fixtures and execution code can share the same shape.
     """
     try:
         return round(float(pick.get('mispricing_score', pick.get('score', 0.0)) or 0.0), 4)
@@ -199,7 +199,7 @@ def _annotate_mispricing_scores(picks: list[dict]) -> list[dict]:
         pick['mispricing_score'] = _mispricing_score_for_pick(pick)
         pick.setdefault(
             'mispricing_score_basis',
-            'scanner premium-richness score: credit/width weighted by probability',
+            'ML model score: expected utility / P&L-centered inference',
         )
     return picks
 
@@ -256,7 +256,7 @@ def _write_scan_audit(
     path: str = SCAN_AUDIT_PATH,
     max_rejected: int = 25,
 ) -> None:
-    """Persist latest scanner plan/rejections for the dashboard."""
+    """Persist latest model-candidate plan/rejections for the dashboard."""
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
     selected_rows = [_pick_audit_row(p, 'SELECTED') for p in selected]
     selected_floor = min(
@@ -277,7 +277,7 @@ def _write_scan_audit(
     rejected_rows = [_pick_audit_row(p, 'REJECTED') for p in interesting_rejected]
     payload = {
         'generated_at': datetime.now().isoformat(),
-        'score_basis': 'Higher is richer premium per unit of width after probability weighting; not used as a filter.',
+        'score_basis': 'Higher means the ML inference layer ranked the candidate as more attractive; deterministic risk gates still apply.',
         'selected': selected_rows,
         'rejected': rejected_rows,
     }
@@ -692,7 +692,7 @@ def _fmt_mcap(v) -> str:
 
 def _legs_from_pick(pick: dict) -> dict:
     """
-    Extract leg strikes from a scanner pick dict into a flat dict suitable
+    Extract leg strikes from a model candidate dict into a flat dict suitable
     for storage in the database's 'legs' JSON column.
     Used by PositionMonitor to price the position for stop-loss checks.
     Extra keys (market_cap, short_oi, short_volume) are stored alongside
@@ -905,7 +905,7 @@ def _approval_gate(picks: list[dict]):
     a          Approve ALL picks
     n          Reject ALL picks (exit without executing)
     q          Quit the agent entirely
-    replan     Discard this plan and rescan with current prices
+    replan     Discard this plan and request fresh model candidates
     1,3,5      Approve picks by comma-separated number
     1-5        Approve a range of picks
     1,3-5,8   Mix of individual numbers and ranges
@@ -919,7 +919,7 @@ def _approval_gate(picks: list[dict]):
         return []
 
     print("  Enter the numbers of the trades to approve, 'a' for all, 'n' for none,")
-    print("  or 'replan' to discard this plan and rescan with current prices.")
+    print("  or 'replan' to discard this plan and request fresh model candidates.")
     print("  Examples:  a   |   n   |   1,3,5   |   1-5   |   2,4-7,10   |   replan")
     print()
 
@@ -943,7 +943,7 @@ def _approval_gate(picks: list[dict]):
             return picks
 
         if raw in ('replan', 'rescan', 'retry'):
-            print("  REPLAN requested — will rescan with current prices...")
+            print("  REPLAN requested — will request fresh model candidates...")
             return 'REPLAN'
 
         # Parse individual numbers and ranges
@@ -1152,7 +1152,7 @@ def _load_tickers(args, config: dict) -> list[str]:
     # default / full: fall through to get_ticker_universe (NASDAQ/NYSE by market cap)
     from src.universe import get_ticker_universe
     min_cap = config.get('market_cap_min', 1_000_000_000)
-    print(f"Universe: scanning NASDAQ/NYSE for tickers with market cap >= ${min_cap:,.0f} ...")
+    print(f"Universe: loading NASDAQ/NYSE tickers with market cap >= ${min_cap:,.0f} ...")
     tickers = get_ticker_universe(min_cap, log=log)
     print(f"Universe: {len(tickers)} tickers loaded")
     return tickers
@@ -1163,7 +1163,7 @@ def _load_tickers(args, config: dict) -> list[str]:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog='agent.py',
-        description='OptionWheel Agent — scan, approve, and execute option trades',
+        description='OptionMind Agent — score model candidates, approve, and execute option trades',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -1176,7 +1176,7 @@ def _parse_args() -> argparse.Namespace:
             'Execution mode: '
             '"approve" (default) — show plan, ask for approval, execute approved picks; '
             '"auto" — execute picks above auto_execute_prob without prompting; '
-            '"scan-only" — print plan and save to data/pending_picks.json, never execute.'
+            '"scan-only" — print model-ranked plan and save to data/pending_picks.json, never execute.'
         ),
     )
     parser.add_argument(
@@ -1209,8 +1209,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--top-n', type=int, default=None, metavar='N', dest='top_n',
         help=(
-            'Total number of picks to surface across all strategies '
-            '(overrides config top_n_per_strategy; default: top_n_per_strategy × num_enabled_strategies).'
+            'Total number of model candidates to surface '
+            '(overrides config ml_scanner.top_n).'
         ),
     )
     parser.add_argument(
@@ -1226,10 +1226,10 @@ def _parse_args() -> argparse.Namespace:
         help='Path to the SQLite trades database (default: data/trades.db).',
     )
 
-    # ── Manual close options (short-circuit the normal scan flow) ─────────────
+    # ── Manual close options (short-circuit the normal candidate flow) ────────
     close_group = parser.add_argument_group(
         'manual close',
-        'Close open positions immediately without running a full scan.',
+        'Close open positions immediately without requesting model candidates.',
     )
     close_group.add_argument(
         '--close', nargs='+', type=int, metavar='ID', dest='close_ids',
@@ -1477,7 +1477,7 @@ def run_daemon(args) -> None:
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def _run_once(args, headless: bool = False) -> None:
-    """Single agent cycle: scan → monitor → approve → execute."""
+    """Single agent cycle: monitor → score candidates → approve → execute."""
     # ── Load config ───────────────────────────────────────────────────────────
     config = load_config(args.config)
 
@@ -1502,13 +1502,16 @@ def _run_once(args, headless: bool = False) -> None:
         dry_run = True   # --dry-run or neither flag → always safe default
 
     # ── Resolve top-n and capital cap ─────────────────────────────────────────
-    # top_n is the *total* picks passed to the scanner; to get top_n_per_strategy
-    # picks per strategy we multiply by the number of enabled strategies.
+    # top_n is the max number of model-ranked candidates requested from the
+    # ML scanner hook. Legacy per-strategy quotas are no longer used for
+    # candidate generation.
     if args.top_n:
         top_n = args.top_n  # CLI value is treated as the raw total
     else:
-        per_strat = config.get('top_n_per_strategy', config.get('top_n_picks', 10))
-        top_n = per_strat * _count_enabled_strategies(config)
+        top_n = config.get('ml_scanner', {}).get(
+            'top_n',
+            config.get('top_n_picks', config.get('top_n_per_strategy', 10)),
+        )
     capital_budget = args.max_capital or config.get('max_capital_per_period')
 
     # ── Bootstrap components ──────────────────────────────────────────────────
@@ -1523,38 +1526,19 @@ def _run_once(args, headless: bool = False) -> None:
         log.warning("[agent] Corrected %d open position(s) with negative entry "
                     "premium (Alpaca MLEG sign convention).", _fixed)
 
-    scanner  = OptionScanner(config)
+    scanner  = ModelScanner(config)
     executor = AlpacaExecutor(args.config)
 
-    # ── Attach sentiment analyzer to scanner ──────────────────────────────────
-    sent_cfg = config.get('sentiment', {})
-    if sent_cfg.get('enabled', True):
-        scanner.sentiment_analyzer = SentimentAnalyzer(config)
-        log.info("Sentiment analyzer enabled — delta limits will be adjusted per ticker.")
-    else:
-        log.info("Sentiment analyzer disabled (set sentiment.enabled=true to enable).")
-
-    # ── Fetch current VIX and inject into scanner ─────────────────────────────
+    # ── Fetch current VIX for account-level regime controls ───────────────────
     current_vix: Optional[float] = None
     vix_cfg = config.get('risk_parameters', {}).get('vix_filter', {})
     if vix_cfg.get('enabled', False):
         _vix = _fetch_vix(config, log)
         if _vix is not None:
             current_vix = _vix
-            scanner.current_vix = _vix
-            ic_thresh = float(vix_cfg.get('ic_pause_threshold', 20.0))
-            if scanner.current_vix >= ic_thresh:
-                log.warning(
-                    f"VIX filter active: VIX={scanner.current_vix:.1f} >= "
-                    f"{ic_thresh:.0f} — Iron Condor scans PAUSED this session."
-                )
-            else:
-                log.info(
-                    f"VIX={scanner.current_vix:.1f} (below {ic_thresh:.0f} threshold) — "
-                    f"Iron Condor scans enabled."
-                )
+            log.info("VIX=%0.1f captured for regime/risk controls.", current_vix)
         else:
-            log.warning("Could not fetch VIX level from any source — VIX filter will not apply.")
+            log.warning("Could not fetch VIX level from any source — VIX-based regime controls will not apply.")
 
     # ── Settle expired positions first (pure bookkeeping, no orders) ─────────
     monitor  = PositionMonitor(db, executor, config)
@@ -1574,7 +1558,7 @@ def _run_once(args, headless: bool = False) -> None:
     # pass and before using DB rows for dedup and budget.
     _reconcile_positions_before_budget(db, executor, config)
 
-    # ── Stop-loss monitor: check open positions before scanning new ones ───────
+    # ── Stop-loss monitor: check open positions before considering new ones ───
     closed_positions = monitor.run(dry_run=dry_run)
     for _cp in closed_positions:
         notifier.send_position_closed(_cp, _cp.get('reason_tag', 'STOP_LOSS'))
@@ -1610,7 +1594,7 @@ def _run_once(args, headless: bool = False) -> None:
     if regime.top_n_multiplier < 1.0:
         scan_top_n = max(1, int(top_n * regime.top_n_multiplier))
         log.info(
-            "Regime filter reduced scan top-N from %d to %d.",
+            "Regime filter reduced candidate top-N from %d to %d.",
             top_n, scan_top_n,
         )
 
@@ -1620,14 +1604,18 @@ def _run_once(args, headless: bool = False) -> None:
         log.error("No tickers loaded — exiting.")
         return
 
-    # ── Scan ──────────────────────────────────────────────────────────────────
-    log.info(f"Scanning {len(tickers)} tickers for top-{scan_top_n} picks per strategy ...")
+    # ── Model candidate scoring ───────────────────────────────────────────────
+    log.info(f"Requesting up to {scan_top_n} ML-ranked candidates from {len(tickers)} tickers ...")
     picks = scanner.get_top_picks(tickers, n=scan_top_n)
     risk_rejected: list[dict] = []
     _annotate_mispricing_scores(picks)
 
     if not picks:
-        log.info("No suitable option picks found for today.")
+        log.info(
+            "No model candidates returned. This is expected until ml_scanner.provider "
+            "points at a trained inference provider."
+        )
+        _write_scan_audit([], [])
         return
 
     # ── Deduplicate against open positions ───────────────────────────────────
@@ -1812,9 +1800,9 @@ def _run_once(args, headless: bool = False) -> None:
         return
 
     # ── approve mode — replan loop ────────────────────────────────────────────
-    # The loop runs once normally, but on a REPLAN signal it rescans with
-    # current prices, re-prints the plan, and waits for a new approval.
-    # max_replan_attempts (default 3) caps the number of rescans per cycle.
+    # The loop runs once normally, but on a REPLAN signal it requests fresh
+    # model candidates, re-prints the plan, and waits for a new approval.
+    # max_replan_attempts (default 3) caps the number of fresh requests.
     max_replans = int(config.get('email', {}).get('max_replan_attempts', 3))
     replan_count = 0
 
@@ -1869,33 +1857,33 @@ def _run_once(args, headless: bool = False) -> None:
                 )
                 return
             log.info(
-                "[agent] REPLAN requested (attempt %d/%d) — rescanning with current prices...",
+                "[agent] REPLAN requested (attempt %d/%d) — requesting fresh model candidates...",
                 replan_count, max_replans,
             )
-            print(f"\n  Rescanning with current prices (attempt {replan_count}/{max_replans}) ...\n")
+            print(f"\n  Requesting fresh model candidates (attempt {replan_count}/{max_replans}) ...\n")
 
             new_picks = scanner.get_top_picks(tickers, n=top_n)
             if not new_picks:
-                log.info("[agent] Rescan returned no picks — aborting cycle.")
+                log.info("[agent] Fresh model request returned no picks — aborting cycle.")
                 return
             if open_keys:
                 new_picks = [p for p in new_picks
                              if (p['symbol'], p['strategy']) not in open_keys]
             if not new_picks:
-                log.info("[agent] All rescan picks already held as open positions — aborting.")
+                log.info("[agent] All fresh model candidates already held as open positions — aborting.")
                 return
             new_picks, _ = executor.preflight_check_picks(new_picks)
             if not new_picks:
-                log.info("[agent] No picks survived pre-flight after rescan — aborting.")
+                log.info("[agent] No picks survived pre-flight after fresh model request — aborting.")
                 return
             new_picks = _filter_max_loss_multiple(new_picks, config)
             if not new_picks:
-                log.info("[agent] No picks survived max-loss multiple filtering after rescan — aborting.")
+                log.info("[agent] No picks survived max-loss multiple filtering after fresh model request — aborting.")
                 return
             if capital_budget is not None:
                 remaining_budget = capital_budget - deployed_capital
                 if remaining_budget <= 0:
-                    log.info("[agent] No remaining capital budget after rescan — aborting.")
+                    log.info("[agent] No remaining capital budget after fresh model request — aborting.")
                     return
                 _sorted = sorted(new_picks, key=lambda x: x.get('score', 0.0), reverse=True)
                 budgeted: list[dict] = []
@@ -1907,19 +1895,19 @@ def _run_once(args, headless: bool = False) -> None:
                         _new_dep += _cap
                 new_picks = budgeted
             if not new_picks:
-                log.info("[agent] No picks fit within capital budget after rescan — aborting.")
+                log.info("[agent] No picks fit within capital budget after fresh model request — aborting.")
                 return
             new_picks = _apply_directional_exposure_caps(
                 new_picks, capital_positions, config, account_capital,
             )
             if not new_picks:
-                log.info("[agent] No picks survived directional exposure caps after rescan — aborting.")
+                log.info("[agent] No picks survived directional exposure caps after fresh model request — aborting.")
                 return
             new_picks = _apply_portfolio_gamma_risk(
                 new_picks, capital_positions, config, account_capital, monitor,
             )
             if not new_picks:
-                log.info("[agent] No picks survived portfolio gamma-risk controls after rescan — aborting.")
+                log.info("[agent] No picks survived portfolio gamma-risk controls after fresh model request — aborting.")
                 return
 
             picks = new_picks

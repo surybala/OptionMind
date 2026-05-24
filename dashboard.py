@@ -1,5 +1,5 @@
 """
-OptionWheel Dashboard
+OptionMind Dashboard
 =====================
 A local web dashboard for browsing, filtering, and analysing past trades
 stored in data/trades.db.
@@ -42,7 +42,7 @@ from src.regime import RegimeResult, RegimeService
 app = Flask(__name__, template_folder="templates")
 DB_PATH: str = "data/trades.db"
 CONFIG_PATH: str = "config.json"
-SCAN_AUDIT_PATH: str = "data/scanner_picks.json"
+SCAN_AUDIT_PATH: str = "data/model_candidates.json"
 
 
 # ── DB helpers ─────────────────────────────────────────────────────────────────
@@ -391,14 +391,14 @@ def api_filters():
 
 @app.route("/api/scanner-picks")
 def api_scanner_picks():
-    """Return the latest scanner pick/rejection audit snapshot."""
+    """Return the latest ML candidate/rejection audit snapshot."""
     try:
         with open(SCAN_AUDIT_PATH, "r", encoding="utf-8") as fh:
             payload = json.load(fh)
     except FileNotFoundError:
         payload = {
             "generated_at": None,
-            "score_basis": "Run the scanner to populate latest pick candidates.",
+            "score_basis": "Run the ML scanner hook after configuring a model provider to populate candidate rankings.",
             "selected": [],
             "rejected": [],
         }
@@ -1079,7 +1079,7 @@ def _ensure_db():
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="OptionWheel Dashboard — view and analyse your trade history"
+        description="OptionMind Dashboard — view and analyse your trade history"
     )
     p.add_argument("--port",   type=int, default=5000,           help="Port to listen on (default: 5000)")
     p.add_argument("--host",   default="127.0.0.1",              help="Host to bind to (default: 127.0.0.1)")
@@ -1125,5 +1125,5 @@ if __name__ == "__main__":
                 threaded=True)
     else:
         url = f"http://{args.host}:{args.port}"
-        print(f"\n  OptionWheel Dashboard  →  {url}\n")
+        print(f"\n  OptionMind Dashboard  →  {url}\n")
         app.run(host=args.host, port=args.port, debug=args.debug)

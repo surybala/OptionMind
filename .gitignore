@@ -17,6 +17,7 @@ tests/test_trades*.db
 # Backtest results
 results_*.json
 backtest-output/
+artifacts/
 
 # Runtime data (generated, not source)
 data/

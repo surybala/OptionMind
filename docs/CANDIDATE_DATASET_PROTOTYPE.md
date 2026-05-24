@@ -1,0 +1,81 @@
+# Candidate Dataset Prototype
+
+Last updated: 2026-05-24
+
+The first historical candidate dataset builder lives in:
+
+```text
+ml/datasets/candidate_dataset.py
+```
+
+It consumes the provider protocols from `ml/providers` and emits one row per historical option candidate. This is the first thin slice of the ML training pipeline.
+
+## What It Builds
+
+Each row contains:
+
+- Option identity: symbol, underlying, option type, strike, expiration, DTE
+- Entry-time underlying features: close, 1-day return, range percentage, volume
+- Option entry price and volume
+- Forward-simulated exit price and timestamp
+- P&L-centered labels:
+  - `realized_pnl_per_contract`
+  - `profit_label`
+  - `stop_loss_hit`
+  - `large_loss_label`
+  - `max_adverse_excursion`
+  - `max_favorable_excursion`
+  - `exit_reason`
+
+The prototype labels a short-option sale with simple rules:
+
+- Profit take when the option cost falls by `profit_take_pct`.
+- Stop loss when the option cost rises to `stop_loss_multiple * entry_price`.
+- Otherwise exit at the end of the forward window.
+
+## Why This Shape Matters
+
+This is not the final model dataset. It is the first reliable contract between data providers, feature engineering, and model training.
+
+The important ML-system lesson: once this row shape is stable, we can add richer features and better labels without coupling the model pipeline to Alpaca or the old deterministic scanner.
+
+## Next Improvements
+
+- Add current/historical IV and Greeks when available.
+- Add opening-window candle features from minute bars.
+- Add market regime features.
+- Add event features such as earnings, CPI, FOMC, and ex-dividend dates.
+- Write rows to parquet.
+- Build walk-forward dataset splits.
+
+## Prototype CLI
+
+The CLI writes partitioned Parquet rows and a manifest to `artifacts/`:
+
+```bash
+.venv/bin/python -m ml.datasets.build_candidate_dataset \
+  --provider alpaca \
+  --underlyings SPY \
+  --entry-start 2025-05-14 \
+  --entry-end 2025-05-15 \
+  --contract-status inactive \
+  --max-contracts 10 \
+  --dataset-version candidate_rows_v001 \
+  --output-dir artifacts/datasets
+```
+
+The output layout is:
+
+```text
+artifacts/datasets/candidate_rows/
+  dataset_version=candidate_rows_v001/
+    _manifest.json
+    source=alpaca/
+      underlying=SPY/
+        entry_date=2025-05-14/
+          part-00000.parquet
+```
+
+Use `--jsonl-output artifacts/datasets/sample.jsonl` only when you want a small inspection copy.
+
+`artifacts/` is git-ignored because generated datasets should not be committed.

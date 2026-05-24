@@ -1,6 +1,14 @@
 {
   "market_cap_min": 1000000000,
   "expiry_days_max": 14,
+  "_ml_scanner_note": "Active candidate-generation path. The legacy deterministic scanner is not used by agent.py. Keep enabled=false until a trained model/inference provider is ready.",
+  "ml_scanner": {
+    "enabled": false,
+    "provider": "",
+    "top_n": 10,
+    "min_score": 0.0
+  },
+  "_legacy_scanner_note": "The following scanner/strategy settings are retained for legacy tests/reference and old risk/execution compatibility. They are not the north-star candidate-generation path.",
   "top_n_per_strategy": 5,
   "max_picks_per_ticker": 1,
 
@@ -10,10 +18,10 @@
   "_universe_note": "etf = all ETFs on NASDAQ/NYSE/NYSE Arca (default). Options: etf | index (S&P500+NDX100+Dow30) | default (NASDAQ/NYSE stocks by market cap) | full (alias for default).",
   "universe": "etf",
 
-  "_perf_note": "skip_market_cap_check_in_scanner=true avoids a redundant ticker.fast_info call per scan when the ticker list was already filtered (universe.py). Always true for etf/index universes which have no market-cap pre-filter.",
+  "_perf_note": "Legacy deterministic scanner setting retained for reference/tests.",
   "skip_market_cap_check_in_scanner": true,
 
-  "_blacklist_note": "Tickers in this list are permanently excluded from scanning — the scanner will never generate picks for them regardless of universe or strategy.",
+  "_blacklist_note": "Legacy deterministic scanner setting retained for reference/tests. Future ML candidate filtering should be model/provider driven.",
   "ticker_blacklist": [],
 
   "alpaca": {
@@ -100,7 +108,7 @@
     "vix_filter": {
       "enabled": true,
       "ic_pause_threshold": 18,
-      "_note": "When VIX >= ic_pause_threshold, skip Iron Condor scans for that period. Lowered to 18 for ETF/index universe — indices are more sensitive to VIX spikes than individual stocks."
+      "_note": "Legacy scanner note. VIX is now primarily used by account-level regime/risk controls, not deterministic candidate generation."
     },
     "regime_filter": {
       "enabled": true,

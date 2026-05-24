@@ -1,3 +1,10 @@
+"""Legacy deterministic scanner.
+
+This module is retained for historical reference and legacy tests only.
+The app-facing scanner path is ``src.model_scanner.ModelScanner``. Do not add
+new candidate-generation work here unless explicitly migrating legacy behavior.
+"""
+
 import logging
 import math
 import time
