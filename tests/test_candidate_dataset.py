@@ -15,14 +15,14 @@ class FakeProvider:
             day = self.entry - timedelta(days=offset)
             close = 501 - offset
             spy_bars.append(PriceBar("SPY", day, close - 1, close + 1, close - 2, close, volume=1000 + offset))
-            vix_bars.append(PriceBar("VIX", day, 17.0, 18.0, 16.0, 17.0 + offset * 0.05))
+            vix_bars.append(PriceBar("I:VIX", day, 17.0, 18.0, 16.0, 17.0 + offset * 0.05))
         spy_bars.append(PriceBar("SPY", self.entry, 500, 505, 499, 504, volume=1200))
-        vix_bars.append(PriceBar("VIX", self.entry, 18.0, 19.0, 17.0, 18.5))
+        vix_bars.append(PriceBar("I:VIX", self.entry, 18.0, 19.0, 17.0, 18.5))
         result = {}
         for symbol in symbols:
             if symbol == "SPY":
                 result[symbol] = spy_bars
-            elif symbol == "VIX":
+            elif symbol == "I:VIX":
                 result[symbol] = vix_bars
         return result
 

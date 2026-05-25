@@ -32,6 +32,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample-every-n-bars", type=int, default=1)
     parser.add_argument("--stock-lookback-days", type=int, default=60)
     parser.add_argument("--market-regime-symbol", default="SPY", help="Benchmark symbol used for market regime features.")
+    parser.add_argument(
+        "--vix-symbol",
+        default="I:VIX",
+        help=(
+            "Ticker used to fetch VIX index bars. "
+            "Polygon/Massive requires 'I:VIX' (default). "
+            "Alpaca uses 'VIX'."
+        ),
+    )
     parser.add_argument("--forward-days", type=int, default=30)
     parser.add_argument("--build-window-days", type=int, default=45, help="Entry-window size for contract fetching. Smaller values fetch more targeted contracts per period for long date ranges.")
     parser.add_argument("--dataset-version", default="candidate_rows_v001")
@@ -89,6 +98,7 @@ def main() -> int:
         sample_every_n_bars=args.sample_every_n_bars,
         stock_lookback_days=args.stock_lookback_days,
         market_regime_symbol=args.market_regime_symbol.upper(),
+        vix_symbol=args.vix_symbol,
         forward_days=args.forward_days,
         build_window_days=args.build_window_days,
     )

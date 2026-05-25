@@ -40,7 +40,7 @@ class CandidateDatasetConfig:
     large_loss_multiple: float = 1.0
     label_version: str = "short_option_labels_v001"
     build_window_days: int = 45
-    vix_symbol: str = "VIX"
+    vix_symbol: str = "I:VIX"
     risk_free_rate: float = 0.045
     option_lookback_days: int = 10
 

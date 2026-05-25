@@ -42,9 +42,9 @@ Each feature group in CandidateDatasetRow comes from a distinct data source:
 │ iv_vs_hv5d, iv_vs_hv20d            │ Algorithm: Newton-Raphson B-S IV + analytic Greeks│
 ├─────────────────────────────────────┼──────────────────────────────────────────────────┤
 │ vix_close, vix_return_5d,           │ MarketDataProvider.get_stock_bars()              │
-│ vix_realized_vol_5d,                │ for vix_symbol (default "VIX").                 │
-│ vix_above_20, vix_above_30          │ ⚠ Polygon/Massive uses ticker "I:VIX" for the    │
-│                                     │   CBOE index — set vix_symbol="I:VIX" in prod.  │
+│ vix_realized_vol_5d,                │ for vix_symbol (default "I:VIX").               │
+│ vix_above_20, vix_above_30          │ Polygon/Massive: "I:VIX". Alpaca: "VIX".        │
+│                                     │ Override via --vix-symbol in build script.       │
 ├─────────────────────────────────────┼──────────────────────────────────────────────────┤
 │ days_to_earnings,                   │ EventDataProvider.get_earnings_calendar()        │
 │ has_earnings_in_forward_days        │ ⚠ STUBBED — MassiveProvider always returns {}.  │
@@ -97,8 +97,8 @@ def _make_vix_bars() -> list[PriceBar]:
     for offset in range(25, 0, -1):
         day = _ENTRY - timedelta(days=offset)
         close = 18.0 + offset * 0.1  # 20.5 → 18.1 as we approach entry
-        bars.append(PriceBar("VIX", day, close - 0.5, close + 0.5, close - 1, close))
-    bars.append(PriceBar("VIX", _ENTRY, 21.0, 23.0, 20.5, _VIX_CLOSE))
+        bars.append(PriceBar("I:VIX", day, close - 0.5, close + 0.5, close - 1, close))
+    bars.append(PriceBar("I:VIX", _ENTRY, 21.0, 23.0, 20.5, _VIX_CLOSE))
     return bars
 
 
@@ -136,7 +136,7 @@ class FullDataProvider:
         for sym in symbols:
             if sym == "SPY":
                 result[sym] = spy
-            elif sym == "VIX":
+            elif sym == "I:VIX":
                 result[sym] = vix
         return result
 
@@ -405,9 +405,8 @@ class TestBlackScholesSource:
 
 class TestVixSource:
     """Source: MarketDataProvider.get_stock_bars() for vix_symbol.
-    NOTE: Polygon/Massive exposes the CBOE VIX index as ticker 'I:VIX',
-    not bare 'VIX'. Set vix_symbol='I:VIX' in CandidateDatasetConfig
-    when using MassiveProvider in production.
+    Default vix_symbol is 'I:VIX' (Polygon/Massive CBOE index ticker).
+    Use 'VIX' for Alpaca via --vix-symbol flag in the build script.
     """
 
     def test_vix_close(self, complete_row):
