@@ -11,13 +11,13 @@ from dotenv import load_dotenv
 
 from ml.datasets import CandidateDatasetConfig, HistoricalCandidateDatasetBuilder
 from ml.datasets.candidate_dataset import CandidateDatasetRow
-from ml.providers import AlpacaProvider
+from ml.providers import AlpacaProvider, MassiveProvider
 from ml.storage import ParquetDatasetWriter
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build prototype option candidate dataset rows.")
-    parser.add_argument("--provider", default="alpaca", choices=["alpaca"], help="Provider adapter to use.")
+    parser.add_argument("--provider", default="alpaca", choices=["alpaca", "massive"], help="Provider adapter to use.")
     parser.add_argument("--underlyings", default="SPY", help="Comma-separated underlying symbols.")
     parser.add_argument("--entry-start", required=True, help="Entry window start, ISO datetime or YYYY-MM-DD.")
     parser.add_argument("--entry-end", required=True, help="Entry window end, ISO datetime or YYYY-MM-DD.")
@@ -36,9 +36,7 @@ def main() -> int:
     args = parse_args()
     load_dotenv()
 
-    provider = AlpacaProvider.from_env() if args.provider == "alpaca" else None
-    if provider is None:
-        raise ValueError(f"Unsupported provider: {args.provider}")
+    provider = _provider_from_args(args.provider)
 
     config = CandidateDatasetConfig(
         underlyings=[item.strip().upper() for item in args.underlyings.split(",") if item.strip()],
@@ -66,7 +64,7 @@ def main() -> int:
             "max_dte": config.max_dte,
             "forward_days": config.forward_days,
             "feature_set_version": "features_v001",
-            "label_version": "short_option_labels_v001",
+            "label_version": config.label_version,
         },
     )
 
@@ -92,6 +90,14 @@ def _parse_datetime(value: str) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed
+
+
+def _provider_from_args(provider_name: str):
+    if provider_name == "alpaca":
+        return AlpacaProvider.from_env()
+    if provider_name == "massive":
+        return MassiveProvider.from_env()
+    raise ValueError(f"Unsupported provider: {provider_name}")
 
 
 if __name__ == "__main__":

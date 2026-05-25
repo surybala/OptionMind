@@ -90,7 +90,10 @@ def test_candidate_dataset_builder_emits_profit_take_rows():
     assert row.underlying_close == 504
     assert row.underlying_return_1d == 0.008
     assert row.exit_reason == "profit_take"
+    assert row.expected_pnl == 210.0
     assert row.realized_pnl_per_contract == 210.0
+    assert row.days_to_exit == 2.0
+    assert row.label_version == "short_option_labels_v001"
     assert row.profit_label == 1
     assert row.stop_loss_hit == 0
     assert row.missing_fields == ()
@@ -113,6 +116,8 @@ def test_candidate_dataset_builder_labels_stop_loss_rows():
     assert rows[0].stop_loss_hit == 1
     assert rows[0].profit_label == 0
     assert rows[0].realized_pnl_per_contract == -430.0
+    assert rows[0].expected_pnl == -430.0
+    assert rows[0].days_to_exit == 1.0
 
 
 def test_candidate_dataset_builder_skips_contracts_without_option_bars():

@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
+from ml.labels import ShortOptionLabelConfig, label_short_option_path
 from ml.providers.models import OptionContract, PriceBar
 from ml.providers.protocols import MarketDataProvider, OptionContractProvider, OptionPriceProvider
 
@@ -30,6 +31,8 @@ class CandidateDatasetConfig:
     stop_loss_multiple: float = 2.0
     option_timeframe: str = "1Day"
     stock_timeframe: str = "1Day"
+    large_loss_multiple: float = 1.0
+    label_version: str = "short_option_labels_v001"
 
 
 @dataclass(frozen=True)
@@ -54,12 +57,15 @@ class CandidateDatasetRow:
     exit_timestamp: datetime
     exit_reason: str
 
+    expected_pnl: float
     realized_pnl_per_contract: float
     profit_label: int
     stop_loss_hit: int
     large_loss_label: int
     max_adverse_excursion: float
     max_favorable_excursion: float
+    days_to_exit: float
+    label_version: str
     missing_fields: tuple[str, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
@@ -127,11 +133,15 @@ class HistoricalCandidateDatasetBuilder:
                 if not future_path:
                     continue
                 underlying_features = _underlying_features(stock_bars.get(underlying, []), entry_bar.timestamp)
-                label = _simulate_short_option_path(
+                label = label_short_option_path(
                     entry_bar,
                     future_path,
-                    profit_take_pct=config.profit_take_pct,
-                    stop_loss_multiple=config.stop_loss_multiple,
+                    ShortOptionLabelConfig(
+                        profit_take_pct=config.profit_take_pct,
+                        stop_loss_multiple=config.stop_loss_multiple,
+                        large_loss_multiple=config.large_loss_multiple,
+                        label_version=config.label_version,
+                    ),
                 )
                 missing = _missing_fields(contract, underlying_features)
                 rows.append(
@@ -148,17 +158,20 @@ class HistoricalCandidateDatasetBuilder:
                         underlying_return_1d=underlying_features["underlying_return_1d"],
                         underlying_range_pct=underlying_features["underlying_range_pct"],
                         underlying_volume=underlying_features["underlying_volume"],
-                        option_entry_price=label["entry_price"],
+                        option_entry_price=label.entry_price,
                         option_entry_volume=entry_bar.volume,
-                        option_exit_price=label["exit_price"],
-                        exit_timestamp=label["exit_timestamp"],
-                        exit_reason=label["exit_reason"],
-                        realized_pnl_per_contract=label["realized_pnl_per_contract"],
-                        profit_label=label["profit_label"],
-                        stop_loss_hit=label["stop_loss_hit"],
-                        large_loss_label=label["large_loss_label"],
-                        max_adverse_excursion=label["max_adverse_excursion"],
-                        max_favorable_excursion=label["max_favorable_excursion"],
+                        option_exit_price=label.exit_price,
+                        exit_timestamp=label.exit_timestamp,
+                        exit_reason=label.exit_reason,
+                        expected_pnl=label.expected_pnl,
+                        realized_pnl_per_contract=label.realized_pnl_per_contract,
+                        profit_label=label.profit_label,
+                        stop_loss_hit=label.stop_loss_hit,
+                        large_loss_label=label.large_loss_label,
+                        max_adverse_excursion=label.max_adverse_excursion,
+                        max_favorable_excursion=label.max_favorable_excursion,
+                        days_to_exit=label.days_to_exit,
+                        label_version=label.label_version,
                         missing_fields=tuple(missing),
                     )
                 )
@@ -179,52 +192,6 @@ def _candidate_contracts(
         and contract.option_type in {"call", "put"}
     ]
     return filtered[: config.max_contracts_per_underlying]
-
-
-def _simulate_short_option_path(
-    entry_bar: PriceBar,
-    path: list[PriceBar],
-    profit_take_pct: float,
-    stop_loss_multiple: float,
-) -> dict[str, Any]:
-    entry_price = max(float(entry_bar.close), 0.0)
-    profit_take_price = entry_price * (1.0 - profit_take_pct)
-    stop_price = entry_price * stop_loss_multiple
-
-    exit_bar = path[-1]
-    exit_reason = "horizon"
-    max_cost = entry_price
-    min_cost = entry_price
-
-    for bar in path[1:]:
-        cost = float(bar.close)
-        max_cost = max(max_cost, cost)
-        min_cost = min(min_cost, cost)
-        if cost >= stop_price:
-            exit_bar = bar
-            exit_reason = "stop_loss"
-            break
-        if cost <= profit_take_price:
-            exit_bar = bar
-            exit_reason = "profit_take"
-            break
-
-    exit_price = float(exit_bar.close)
-    realized = round((entry_price - exit_price) * 100, 4)
-    max_adverse = round(max(0.0, (max_cost - entry_price) * 100), 4)
-    max_favorable = round(max(0.0, (entry_price - min_cost) * 100), 4)
-    return {
-        "entry_price": entry_price,
-        "exit_price": exit_price,
-        "exit_timestamp": exit_bar.timestamp,
-        "exit_reason": exit_reason,
-        "realized_pnl_per_contract": realized,
-        "profit_label": 1 if realized > 0 else 0,
-        "stop_loss_hit": 1 if exit_reason == "stop_loss" else 0,
-        "large_loss_label": 1 if realized <= -(entry_price * 100) else 0,
-        "max_adverse_excursion": max_adverse,
-        "max_favorable_excursion": max_favorable,
-    }
 
 
 def _underlying_features(bars: list[PriceBar], entry_timestamp: datetime) -> dict[str, float | None]:

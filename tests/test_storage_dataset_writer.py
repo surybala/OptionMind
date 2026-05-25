@@ -28,12 +28,15 @@ def _row(underlying="SPY", source="fake"):
         option_exit_price=2.0,
         exit_timestamp=datetime(2026, 5, 15, tzinfo=UTC),
         exit_reason="profit_take",
+        expected_pnl=200.0,
         realized_pnl_per_contract=200.0,
         profit_label=1,
         stop_loss_hit=0,
         large_loss_label=0,
         max_adverse_excursion=0.0,
         max_favorable_excursion=200.0,
+        days_to_exit=1.0,
+        label_version="short_option_labels_v001",
     )
 
 

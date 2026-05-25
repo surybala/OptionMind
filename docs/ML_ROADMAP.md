@@ -72,6 +72,16 @@ Initial labels:
 
 The first labels should use standardized exit rules so the model learns against a stable definition.
 
+Current implementation:
+
+- `ml/labels/short_option.py`
+- `ShortOptionLabelConfig`
+- `label_short_option_path`
+
+The candidate dataset builder now uses this engine instead of inline label
+logic, and each row records `label_version` so future label definitions can be
+compared without mixing training targets.
+
 ## Phase 4: Baseline Model
 
 Goal: train a simple, inspectable model before neural networks.
