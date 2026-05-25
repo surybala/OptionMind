@@ -15,7 +15,7 @@ FMPProvider.get_economic_calendar
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -204,6 +204,48 @@ class TestFREDFromEnv:
         monkeypatch.setenv("FRED_API_KEY", "abc123")
         provider = FREDProvider.from_env()
         assert provider.api_key == "abc123"
+
+
+class TestFREDProviderVolatilitySeries:
+    def test_vix_observations_are_normalized_to_price_bars(self):
+        session = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "observations": [
+                {"date": "2026-01-02", "value": "16.24"},
+                {"date": "2026-01-05", "value": "."},
+                {"date": "2026-01-06", "value": "17.10"},
+            ]
+        }
+        mock_resp.raise_for_status = MagicMock()
+        session.get.return_value = mock_resp
+        provider = FREDProvider(api_key="test", session=session)
+
+        series = provider.get_volatility_series(
+            ["I:VIX"],
+            datetime(2026, 1, 1, tzinfo=UTC),
+            datetime(2026, 1, 31, tzinfo=UTC),
+        )
+
+        bars = series["I:VIX"]
+        assert [bar.close for bar in bars] == [16.24, 17.10]
+        assert bars[0].timestamp == datetime(2026, 1, 2, tzinfo=UTC)
+        assert bars[0].open == bars[0].high == bars[0].low == bars[0].close
+        assert bars[0].source == "fred"
+        params = session.get.call_args.kwargs["params"]
+        assert params["series_id"] == "VIXCLS"
+        assert params["observation_start"] == "2026-01-01"
+        assert params["observation_end"] == "2026-01-31"
+
+    def test_unknown_volatility_symbol_returns_empty_series(self):
+        provider = FREDProvider(api_key="test", session=MagicMock())
+        series = provider.get_volatility_series(
+            ["VVIX"],
+            datetime(2026, 1, 1, tzinfo=UTC),
+            datetime(2026, 1, 31, tzinfo=UTC),
+        )
+
+        assert series == {"VVIX": []}
 
 
 # ---------------------------------------------------------------------------

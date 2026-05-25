@@ -43,6 +43,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--forward-days", type=int, default=30)
     parser.add_argument("--build-window-days", type=int, default=45, help="Entry-window size for contract fetching. Smaller values fetch more targeted contracts per period for long date ranges.")
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=8,
+        help=(
+            "Number of parallel threads for option contract + bar fetches "
+            "(one thread per window × underlying pair). "
+            "Increase to 16-32 for large builds if the provider supports it. "
+            "Set to 1 to disable parallelism for debugging."
+        ),
+    )
     parser.add_argument("--dataset-version", default="candidate_rows_v001")
     parser.add_argument("--output-dir", default="artifacts/datasets")
     parser.add_argument("--jsonl-output", default=None, help="Optional JSONL inspection copy.")
@@ -71,6 +82,16 @@ def parse_args() -> argparse.Namespace:
         choices=["fmp", "none"],
         help="Source for ex-dividend calendar (requires FMP_API_KEY when set to 'fmp').",
     )
+    parser.add_argument(
+        "--volatility-provider",
+        default="market",
+        choices=["fred", "market", "none"],
+        help=(
+            "Source for VIX regime bars. "
+            "'market' fetches vix-symbol through the main market provider; "
+            "'fred' maps I:VIX/VIX/VIXCLS to FRED VIXCLS observations."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -82,6 +103,7 @@ def main() -> int:
     event_provider = _event_provider_from_args(args.event_provider)
     dividend_provider = _dividend_provider_from_args(args.dividend_provider)
     economic_provider = _economic_provider_from_args(args.economic_calendar)
+    volatility_provider = _volatility_provider_from_args(args.volatility_provider, economic_provider)
 
     config = CandidateDatasetConfig(
         underlyings=[item.strip().upper() for item in args.underlyings.split(",") if item.strip()],
@@ -100,6 +122,7 @@ def main() -> int:
         market_regime_symbol=args.market_regime_symbol.upper(),
         vix_symbol=args.vix_symbol,
         forward_days=args.forward_days,
+        max_workers=args.max_workers,
         build_window_days=args.build_window_days,
     )
     rows = HistoricalCandidateDatasetBuilder(
@@ -109,6 +132,7 @@ def main() -> int:
         event_provider=event_provider,
         dividend_provider=dividend_provider,
         economic_provider=economic_provider,
+        volatility_provider=volatility_provider,
     ).build(config)
     result = ParquetDatasetWriter(root_dir=args.output_dir).write(
         rows,
@@ -136,6 +160,7 @@ def main() -> int:
             "economic_calendar": args.economic_calendar,
             "event_provider": args.event_provider,
             "dividend_provider": args.dividend_provider,
+            "volatility_provider": args.volatility_provider,
         },
     )
 
@@ -206,6 +231,17 @@ def _economic_provider_from_args(name: str):
     if name == "none":
         return None
     raise ValueError(f"Unsupported economic calendar provider: {name}")
+
+
+def _volatility_provider_from_args(name: str, economic_provider=None):
+    """Return a VolatilityDataProvider or None."""
+    if name == "fred":
+        if isinstance(economic_provider, FREDProvider):
+            return economic_provider
+        return FREDProvider.from_env()
+    if name in {"market", "none"}:
+        return None
+    raise ValueError(f"Unsupported volatility provider: {name}")
 
 
 if __name__ == "__main__":

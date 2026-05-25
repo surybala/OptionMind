@@ -38,12 +38,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime, time
 from typing import Any
 
 import requests
 
-from ml.providers.models import EconomicEvent
+from ml.providers.models import EconomicEvent, PriceBar
 
 # Release IDs and human-readable names as published on FRED.
 # Add more entries here to expand coverage — no other code changes needed.
@@ -59,7 +59,7 @@ _BASE_URL = "https://api.stlouisfed.org/fred"
 
 @dataclass
 class FREDProvider:
-    """EconomicCalendarProvider backed by the St. Louis FRED API.
+    """EconomicCalendarProvider and VolatilityDataProvider backed by FRED.
 
     Fetches all historical release dates for CPI, NFP, GDP, and PPI in a
     single call per series, then filters to the requested date range locally.
@@ -122,6 +122,33 @@ class FREDProvider:
         events.sort(key=lambda e: e.event_date)
         return events
 
+    def get_volatility_series(
+        self,
+        symbols: list[str],
+        start: datetime,
+        end: datetime,
+    ) -> dict[str, list[PriceBar]]:
+        """Return VIX-like daily bars from FRED observations.
+
+        FRED publishes CBOE VIX close values as the ``VIXCLS`` series.  The
+        dataset builder consumes bars, so each observation is normalized with
+        open/high/low/close all set to the published close value.
+        """
+        result: dict[str, list[PriceBar]] = {}
+        for symbol in symbols:
+            normalized = symbol.upper()
+            series_id = _volatility_series_id(normalized)
+            if series_id is None:
+                result[normalized] = []
+                continue
+            result[normalized] = self._series_observations(
+                series_id,
+                normalized,
+                start.date(),
+                end.date(),
+            )
+        return result
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -153,6 +180,45 @@ class FREDProvider:
         self._cache[release_id] = dates
         return dates
 
+    def _series_observations(
+        self,
+        series_id: str,
+        symbol: str,
+        start: date,
+        end: date,
+    ) -> list[PriceBar]:
+        url = f"{self.base_url}/series/observations"
+        params = {
+            "series_id": series_id,
+            "api_key": self.api_key,
+            "file_type": "json",
+            "observation_start": start.isoformat(),
+            "observation_end": end.isoformat(),
+        }
+        resp = self.session.get(url, params=params, timeout=self.timeout)
+        resp.raise_for_status()
+        data = resp.json()
+
+        bars: list[PriceBar] = []
+        for item in data.get("observations", []):
+            observation_date = _parse_date(item.get("date"))
+            value = _float_or_none(item.get("value"))
+            if observation_date is None or value is None:
+                continue
+            timestamp = datetime.combine(observation_date, time.min, tzinfo=UTC)
+            bars.append(
+                PriceBar(
+                    symbol=symbol,
+                    timestamp=timestamp,
+                    open=value,
+                    high=value,
+                    low=value,
+                    close=value,
+                    source=self.source,
+                )
+            )
+        return bars
+
 
 def _parse_date(value: str | None) -> date | None:
     if not value:
@@ -161,3 +227,22 @@ def _parse_date(value: str | None) -> date | None:
         return date.fromisoformat(str(value)[:10])
     except ValueError:
         return None
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value in (None, "."):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _volatility_series_id(symbol: str) -> str | None:
+    aliases = {
+        "I:VIX": "VIXCLS",
+        "VIX": "VIXCLS",
+        "VIXCLS": "VIXCLS",
+        "^VIX": "VIXCLS",
+    }
+    return aliases.get(symbol.upper())

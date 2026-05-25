@@ -7,13 +7,15 @@ written to parquet/csv and used by feature, label, and model code.
 from __future__ import annotations
 
 import math
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 from ml.labels import ShortOptionLabelConfig, label_short_option_path
 from ml.providers.models import DividendEvent, EarningsEvent, EconomicEvent, OptionContract, PriceBar
-from ml.providers.protocols import DividendDataProvider, EconomicCalendarProvider, EventDataProvider, MarketDataProvider, OptionContractProvider, OptionPriceProvider
+from ml.providers.protocols import DividendDataProvider, EconomicCalendarProvider, EventDataProvider, MarketDataProvider, OptionContractProvider, OptionPriceProvider, VolatilityDataProvider
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,7 @@ class CandidateDatasetConfig:
     vix_symbol: str = "I:VIX"
     risk_free_rate: float = 0.045
     option_lookback_days: int = 10
+    max_workers: int = 8  # parallel threads for option contract + bar fetches
 
 
 @dataclass(frozen=True)
@@ -158,6 +161,7 @@ class HistoricalCandidateDatasetBuilder:
         event_provider: EventDataProvider | None = None,
         dividend_provider: DividendDataProvider | None = None,
         economic_provider: EconomicCalendarProvider | None = None,
+        volatility_provider: VolatilityDataProvider | None = None,
     ) -> None:
         self.market_provider = market_provider
         self.contract_provider = contract_provider
@@ -165,13 +169,30 @@ class HistoricalCandidateDatasetBuilder:
         self.event_provider = event_provider
         self.dividend_provider = dividend_provider
         self.economic_provider = economic_provider
+        self.volatility_provider = volatility_provider
 
     def build(self, config: CandidateDatasetConfig) -> list[CandidateDatasetRow]:
-        rows: list[CandidateDatasetRow] = []
-        underlying_row_counts: dict[str, int] = {u: 0 for u in config.underlyings}
+        """Build candidate rows for the full entry window.
 
+        Upfront bulk fetches (stock bars, VIX, earnings, dividends, macro) are
+        done once. Option-contract and option-bar fetches — the real bottleneck
+        for large date ranges — are parallelised across (window × underlying)
+        pairs using a ThreadPoolExecutor. The shared read-only data structures
+        are safe to access from multiple threads without locks.
+        """
+        # ------------------------------------------------------------------
+        # 1. Bulk upfront fetches (sequential — each is already one batched call)
+        # ------------------------------------------------------------------
         stock_start = config.entry_start - timedelta(days=config.stock_lookback_days)
         stock_symbols = _stock_symbols(config)
+        if self.volatility_provider is not None:
+            stock_symbols = _without_dedicated_volatility_symbol(stock_symbols, config)
+
+        print(
+            f"Fetching stock bars for {stock_symbols} "
+            f"({stock_start.date()} → {config.entry_end.date()}) …",
+            flush=True,
+        )
         stock_bars = self.market_provider.get_stock_bars(
             stock_symbols,
             stock_start,
@@ -179,186 +200,271 @@ class HistoricalCandidateDatasetBuilder:
             config.stock_timeframe,
         )
         market_history = stock_bars.get(config.market_regime_symbol.upper(), [])
-        vix_bars = stock_bars.get(config.vix_symbol.upper(), [])
+
+        if self.volatility_provider is not None:
+            vix_bars = self.volatility_provider.get_volatility_series(
+                [config.vix_symbol],
+                stock_start,
+                config.entry_end,
+            ).get(config.vix_symbol.upper(), [])
+        else:
+            vix_bars = stock_bars.get(config.vix_symbol.upper(), [])
 
         event_horizon = (config.entry_end + timedelta(days=config.forward_days)).date()
 
-        # Fetch earnings calendar for the full entry window (stub returns {} if not wired).
         earnings_events: dict[str, list[EarningsEvent]] = {}
         if self.event_provider is not None:
+            print("Fetching earnings calendar …", flush=True)
             earnings_events = self.event_provider.get_earnings_calendar(
                 config.underlyings,
                 config.entry_start.date(),
                 event_horizon,
             )
 
-        # Fetch ex-dividend events (empty dict if provider not wired).
         dividend_events: dict[str, list[DividendEvent]] = {}
         if self.dividend_provider is not None:
+            print("Fetching dividend calendar …", flush=True)
             dividend_events = self.dividend_provider.get_dividends(
                 config.underlyings,
                 config.entry_start.date(),
                 event_horizon,
             )
 
-        # Fetch economic calendar events (FOMC always included via fomc_events helper).
-        # Search 90 days ahead for FOMC/macro so days_to_* always resolves even
-        # when the nearest event falls just outside the 30-day forward window.
+        # FOMC always included via hardcoded calendar; 90-day lookahead so
+        # days_to_fomc resolves even when the meeting is outside forward_days.
         macro_search_end = (config.entry_end + timedelta(days=90)).date()
         from ml.providers.calendar import fomc_events as _fomc_events
         fomc_list: list[EconomicEvent] = _fomc_events(config.entry_start.date(), macro_search_end)
         macro_events: list[EconomicEvent] = list(fomc_list)
         if self.economic_provider is not None:
+            print("Fetching economic calendar …", flush=True)
             macro_events.extend(
                 self.economic_provider.get_economic_calendar(
                     config.entry_start.date(),
                     macro_search_end,
                 )
             )
-        # Deduplicate by (name, date) and sort chronologically
         macro_events = sorted(
             {(e.event_name, e.event_date): e for e in macro_events}.values(),
             key=lambda e: e.event_date,
         )
 
-        for window_start, window_end, is_last_window in _date_windows(
-            config.entry_start, config.entry_end, config.build_window_days
-        ):
-            # Stop early if all underlyings have hit their row cap.
-            if config.max_rows_per_underlying is not None and all(
-                underlying_row_counts[u] >= config.max_rows_per_underlying for u in config.underlyings
-            ):
-                break
+        # ------------------------------------------------------------------
+        # 2. Build task list: one task per (window × underlying) pair
+        # ------------------------------------------------------------------
+        tasks = [
+            (window_start, window_end, is_last_window, underlying)
+            for window_start, window_end, is_last_window in _date_windows(
+                config.entry_start, config.entry_end, config.build_window_days
+            )
+            for underlying in config.underlyings
+        ]
+        total_tasks = len(tasks)
+        print(
+            f"Processing {total_tasks} tasks "
+            f"({len(config.underlyings)} underlying(s) × "
+            f"{total_tasks // max(len(config.underlyings), 1)} window(s)) "
+            f"with {config.max_workers} worker thread(s) …",
+            flush=True,
+        )
 
-            expiration_gte = _datetime_to_date(window_start) + timedelta(days=config.min_dte)
-            expiration_lte = _datetime_to_date(window_end) + timedelta(days=config.max_dte)
+        # ------------------------------------------------------------------
+        # 3. Parallel execution — option contracts + bars per (window, underlying)
+        # ------------------------------------------------------------------
+        all_rows: list[CandidateDatasetRow] = []
+        completed = 0
 
-            for underlying in config.underlyings:
-                if (
-                    config.max_rows_per_underlying is not None
-                    and underlying_row_counts[underlying] >= config.max_rows_per_underlying
-                ):
-                    continue
-
-                contracts = self.contract_provider.get_option_contracts(
-                    [underlying],
-                    expiration_gte=expiration_gte,
-                    expiration_lte=expiration_lte,
-                    status=config.contract_status,
-                    limit=config.option_limit,
-                )
-                underlying_history = stock_bars.get(underlying, [])
-                reference_features = _underlying_features(underlying_history, window_start)
-                contracts = _candidate_contracts(
-                    contracts,
+        with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
+            future_to_key = {
+                executor.submit(
+                    self._process_window_underlying,
+                    window_start,
+                    window_end,
+                    is_last_window,
                     underlying,
                     config,
-                    reference_close=reference_features["underlying_close"],
-                )
-                if not contracts:
+                    stock_bars,
+                    market_history,
+                    vix_bars,
+                    earnings_events,
+                    dividend_events,
+                    fomc_list,
+                    macro_events,
+                ): (underlying, window_start, window_end)
+                for window_start, window_end, is_last_window, underlying in tasks
+            }
+
+            for future in as_completed(future_to_key):
+                underlying, w_start, w_end = future_to_key[future]
+                completed += 1
+                try:
+                    window_rows = future.result()
+                    all_rows.extend(window_rows)
+                    print(
+                        f"  [{completed}/{total_tasks}] {underlying} "
+                        f"{w_start.date()}→{w_end.date()} "
+                        f"→ {len(window_rows)} rows  (running total: {len(all_rows)})",
+                        flush=True,
+                    )
+                except Exception as exc:
+                    print(
+                        f"  [{completed}/{total_tasks}] {underlying} "
+                        f"{w_start.date()}→{w_end.date()} FAILED: {exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
+        # ------------------------------------------------------------------
+        # 4. Apply per-underlying row cap post-collection, sorted by timestamp
+        #    so the cap always takes the earliest rows (consistent with the
+        #    original sequential behaviour).
+        # ------------------------------------------------------------------
+        if config.max_rows_per_underlying is not None:
+            rows_by_underlying: dict[str, list[CandidateDatasetRow]] = {}
+            for row in all_rows:
+                rows_by_underlying.setdefault(row.underlying, []).append(row)
+            all_rows = []
+            for u_rows in rows_by_underlying.values():
+                u_rows.sort(key=lambda r: r.entry_timestamp)
+                all_rows.extend(u_rows[: config.max_rows_per_underlying])
+
+        print(f"Build complete — {len(all_rows)} total rows.", flush=True)
+        return all_rows
+
+    def _process_window_underlying(
+        self,
+        window_start: datetime,
+        window_end: datetime,
+        is_last_window: bool,
+        underlying: str,
+        config: CandidateDatasetConfig,
+        stock_bars: dict[str, list[PriceBar]],
+        market_history: list[PriceBar],
+        vix_bars: list[PriceBar],
+        earnings_events: dict[str, list[EarningsEvent]],
+        dividend_events: dict[str, list[DividendEvent]],
+        fomc_list: list[EconomicEvent],
+        macro_events: list[EconomicEvent],
+    ) -> list[CandidateDatasetRow]:
+        """Fetch option contracts + bars for one (window, underlying) and build rows.
+
+        This method is called from multiple threads. It reads only from shared
+        read-only data structures; the only mutable state is the local ``rows``
+        list it builds and returns.
+        """
+        rows: list[CandidateDatasetRow] = []
+
+        expiration_gte = _datetime_to_date(window_start) + timedelta(days=config.min_dte)
+        expiration_lte = _datetime_to_date(window_end) + timedelta(days=config.max_dte)
+
+        contracts = self.contract_provider.get_option_contracts(
+            [underlying],
+            expiration_gte=expiration_gte,
+            expiration_lte=expiration_lte,
+            status=config.contract_status,
+            limit=config.option_limit,
+        )
+        underlying_history = stock_bars.get(underlying, [])
+        reference_features = _underlying_features(underlying_history, window_start)
+        contracts = _candidate_contracts(
+            contracts,
+            underlying,
+            config,
+            reference_close=reference_features["underlying_close"],
+        )
+        if not contracts:
+            return rows
+
+        option_fetch_start = window_start - timedelta(days=config.option_lookback_days)
+        option_bars = self.price_provider.get_option_bars(
+            [contract.symbol for contract in contracts],
+            option_fetch_start,
+            window_end + timedelta(days=config.forward_days),
+            config.option_timeframe,
+            limit=None,
+        )
+
+        for contract in contracts:
+            path = sorted(option_bars.get(contract.symbol, []), key=lambda bar: bar.timestamp)
+            if is_last_window:
+                window_bars = [b for b in path if window_start <= b.timestamp <= config.entry_end]
+            else:
+                window_bars = [b for b in path if window_start <= b.timestamp < window_end]
+
+            for entry_bar in window_bars[:: config.sample_every_n_bars]:
+                entry_dte = _dte(entry_bar.timestamp, contract.expiration)
+                if entry_dte is None or entry_dte < config.min_dte or entry_dte > config.max_dte:
+                    continue
+                future_path = [
+                    bar
+                    for bar in path
+                    if entry_bar.timestamp <= bar.timestamp
+                    <= entry_bar.timestamp + timedelta(days=config.forward_days)
+                ]
+                if len(future_path) < config.min_forward_bars:
                     continue
 
-                # Extend lookback start so _option_lookback_features has pre-entry bars.
-                option_fetch_start = window_start - timedelta(days=config.option_lookback_days)
-                option_bars = self.price_provider.get_option_bars(
-                    [contract.symbol for contract in contracts],
-                    option_fetch_start,
-                    window_end + timedelta(days=config.forward_days),
-                    config.option_timeframe,
-                    limit=None,
+                underlying_features = _underlying_features(underlying_history, entry_bar.timestamp)
+                market_features = _market_regime_features(
+                    market_history,
+                    entry_bar.timestamp,
+                    config.market_regime_symbol,
                 )
-
-                for contract in contracts:
-                    path = sorted(option_bars.get(contract.symbol, []), key=lambda bar: bar.timestamp)
-                    # Use exclusive upper bound except on the last window to avoid
-                    # emitting duplicate rows when windows share a boundary timestamp.
-                    if is_last_window:
-                        window_bars = [b for b in path if window_start <= b.timestamp <= config.entry_end]
-                    else:
-                        window_bars = [b for b in path if window_start <= b.timestamp < window_end]
-                    for entry_bar in window_bars[:: config.sample_every_n_bars]:
-                        entry_dte = _dte(entry_bar.timestamp, contract.expiration)
-                        if entry_dte is None or entry_dte < config.min_dte or entry_dte > config.max_dte:
-                            continue
-                        future_path = [
-                            bar
-                            for bar in path
-                            if entry_bar.timestamp <= bar.timestamp <= entry_bar.timestamp + timedelta(days=config.forward_days)
-                        ]
-                        if len(future_path) < config.min_forward_bars:
-                            continue
-                        underlying_features = _underlying_features(underlying_history, entry_bar.timestamp)
-                        market_features = _market_regime_features(
-                            market_history,
-                            entry_bar.timestamp,
-                            config.market_regime_symbol,
-                        )
-                        greeks_features = _option_greeks_features(
-                            entry_bar,
-                            underlying_features["underlying_close"],
-                            contract.strike,
-                            contract.option_type,
-                            entry_dte,
-                            config.risk_free_rate,
-                            underlying_features["underlying_realized_vol_5d"],
-                            underlying_features["underlying_realized_vol_20d"],
-                        )
-                        lookback_features = _option_lookback_features(path, entry_bar.timestamp)
-                        vix_feat = _vix_features(vix_bars, entry_bar.timestamp)
-                        event_feat = _event_features(
-                            earnings_events.get(underlying.upper(), []),
-                            entry_bar.timestamp,
-                            config.forward_days,
-                        )
-                        dividend_feat = _dividend_features(
-                            dividend_events.get(underlying.upper(), []),
-                            entry_bar.timestamp,
-                            config.forward_days,
-                        )
-                        macro_feat = _macro_event_features(
-                            fomc_list,
-                            macro_events,
-                            entry_bar.timestamp,
-                            config.forward_days,
-                        )
-                        label = label_short_option_path(
-                            entry_bar,
-                            future_path,
-                            ShortOptionLabelConfig(
-                                profit_take_pct=config.profit_take_pct,
-                                stop_loss_multiple=config.stop_loss_multiple,
-                                large_loss_multiple=config.large_loss_multiple,
-                                label_version=config.label_version,
-                            ),
-                        )
-                        rows.append(
-                            _row_from_label(
-                                contract,
-                                underlying,
-                                entry_bar,
-                                entry_dte,
-                                underlying_features,
-                                market_features,
-                                greeks_features,
-                                lookback_features,
-                                vix_feat,
-                                event_feat,
-                                dividend_feat,
-                                macro_feat,
-                                label,
-                            )
-                        )
-                        underlying_row_counts[underlying] += 1
-                        if (
-                            config.max_rows_per_underlying is not None
-                            and underlying_row_counts[underlying] >= config.max_rows_per_underlying
-                        ):
-                            break
-                    if (
-                        config.max_rows_per_underlying is not None
-                        and underlying_row_counts[underlying] >= config.max_rows_per_underlying
-                    ):
-                        break
+                greeks_features = _option_greeks_features(
+                    entry_bar,
+                    underlying_features["underlying_close"],
+                    contract.strike,
+                    contract.option_type,
+                    entry_dte,
+                    config.risk_free_rate,
+                    underlying_features["underlying_realized_vol_5d"],
+                    underlying_features["underlying_realized_vol_20d"],
+                )
+                lookback_features = _option_lookback_features(path, entry_bar.timestamp)
+                vix_feat = _vix_features(vix_bars, entry_bar.timestamp)
+                event_feat = _event_features(
+                    earnings_events.get(underlying.upper(), []),
+                    entry_bar.timestamp,
+                    config.forward_days,
+                )
+                dividend_feat = _dividend_features(
+                    dividend_events.get(underlying.upper(), []),
+                    entry_bar.timestamp,
+                    config.forward_days,
+                )
+                macro_feat = _macro_event_features(
+                    fomc_list,
+                    macro_events,
+                    entry_bar.timestamp,
+                    config.forward_days,
+                )
+                label = label_short_option_path(
+                    entry_bar,
+                    future_path,
+                    ShortOptionLabelConfig(
+                        profit_take_pct=config.profit_take_pct,
+                        stop_loss_multiple=config.stop_loss_multiple,
+                        large_loss_multiple=config.large_loss_multiple,
+                        label_version=config.label_version,
+                    ),
+                )
+                rows.append(
+                    _row_from_label(
+                        contract,
+                        underlying,
+                        entry_bar,
+                        entry_dte,
+                        underlying_features,
+                        market_features,
+                        greeks_features,
+                        lookback_features,
+                        vix_feat,
+                        event_feat,
+                        dividend_feat,
+                        macro_feat,
+                        label,
+                    )
+                )
         return rows
 
 
@@ -409,6 +515,20 @@ def _stock_symbols(config: CandidateDatasetConfig) -> list[str]:
         if normalized not in symbols:
             symbols.append(normalized)
     return symbols
+
+
+def _without_dedicated_volatility_symbol(
+    symbols: list[str],
+    config: CandidateDatasetConfig,
+) -> list[str]:
+    volatility_symbol = config.vix_symbol.upper()
+    required_market_symbols = {symbol.upper() for symbol in config.underlyings}
+    required_market_symbols.add(config.market_regime_symbol.upper())
+    return [
+        symbol
+        for symbol in symbols
+        if symbol != volatility_symbol or symbol in required_market_symbols
+    ]
 
 
 def _date_windows(
