@@ -1,0 +1,435 @@
+"""Train a binary XGBoost classifier to predict large-loss trades.
+
+Purpose
+-------
+The main RoR-target ranker (train_xgboost.py) selects high-expected-return
+trades, but the top decile still carries tail risk — the five worst trades in
+the current 590k-row corpus are all the same SOXX option with losses exceeding
+$3,000/contract.  This classifier learns which trades are likely to hit the
+``large_loss_label`` flag (realized PnL < −max_loss, i.e. a loss worse than
+the max-loss boundary) and is used as a second-stage filter at inference time.
+
+Inference pattern
+-----------------
+1. Score all candidate spreads with the RoR ranker.
+2. Run each candidate through this classifier to obtain p(large_loss).
+3. Only take trades where rank score is high AND p(large_loss) < threshold
+   (e.g. 0.15).
+
+Usage
+-----
+python -m ml.models.train_large_loss_classifier \\
+    --input  artifacts/datasets/candidate_rows/... \\
+    --output artifacts/models/large_loss_classifier_v001.json \\
+    --test-fraction 0.25 \\
+    --walk-forward-folds 3 \\
+    --embargo-days 30
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from ml.datasets.audit_candidate_dataset import load_dataset
+from ml.models.train_baseline import (
+    _artifact_metadata,
+    _embargo_rows_from_days,
+    _engineer_features,
+    _select_feature_columns,
+    _split_index,
+    _walk_forward_splits,
+)
+
+try:
+    import xgboost as xgb
+except Exception:  # pragma: no cover
+    xgb = None
+
+
+TARGET_COLUMN = "large_loss_label"
+
+
+@dataclass(frozen=True)
+class LargeLossClassifierArtifact:
+    model_type: str
+    created_at: str
+    target_column: str
+    feature_version: str
+    label_version: str
+    data_range: dict[str, str | None]
+    model_path: str
+    feature_columns: list[str]
+    fill_values: dict[str, float]
+    train_rows: int
+    test_rows: int
+    train_positive_rate: float
+    test_positive_rate: float
+    params: dict[str, Any]
+    feature_importance: dict[str, float]
+    metrics: dict[str, Any]
+    walk_forward: list[dict[str, Any]]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Train a binary classifier to predict large-loss credit spread trades."
+    )
+    parser.add_argument("--input", required=True, help="Parquet dataset directory or file.")
+    parser.add_argument("--output", required=True, help="Output artifact JSON path.")
+    parser.add_argument("--model-output", default=None, help="XGBoost model output path.")
+    parser.add_argument("--test-fraction", type=float, default=0.25)
+    parser.add_argument("--walk-forward-folds", type=int, default=3)
+    parser.add_argument("--min-walk-forward-train-rows", type=int, default=None)
+    parser.add_argument("--embargo-days", type=int, default=30)
+    parser.add_argument("--num-boost-round", type=int, default=200)
+    parser.add_argument("--max-depth", type=int, default=4)
+    parser.add_argument("--eta", type=float, default=0.05)
+    parser.add_argument("--subsample", type=float, default=0.85)
+    parser.add_argument("--colsample-bytree", type=float, default=0.85)
+    parser.add_argument("--min-child-weight", type=float, default=20.0)
+    parser.add_argument("--reg-lambda", type=float, default=20.0)
+    parser.add_argument("--early-stopping-rounds", type=int, default=20)
+    parser.add_argument("--val-fraction", type=float, default=0.15)
+    parser.add_argument(
+        "--scale-pos-weight",
+        type=float,
+        default=None,
+        help=(
+            "XGBoost scale_pos_weight to rebalance the 12.5%% large-loss minority class. "
+            "Defaults to (negative_count / positive_count) from training data."
+        ),
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    output = Path(args.output)
+    model_output = (
+        Path(args.model_output)
+        if args.model_output
+        else output.with_name(f"{output.stem}.xgboost.json")
+    )
+    df = load_dataset(Path(args.input))
+    artifact = train_large_loss_classifier(
+        df,
+        model_output=model_output,
+        test_fraction=args.test_fraction,
+        walk_forward_folds=args.walk_forward_folds,
+        min_walk_forward_train_rows=args.min_walk_forward_train_rows,
+        embargo_days=args.embargo_days,
+        num_boost_round=args.num_boost_round,
+        val_fraction=args.val_fraction,
+        early_stopping_rounds=args.early_stopping_rounds,
+        scale_pos_weight=args.scale_pos_weight,
+        params={
+            "max_depth": args.max_depth,
+            "eta": args.eta,
+            "subsample": args.subsample,
+            "colsample_bytree": args.colsample_bytree,
+            "min_child_weight": args.min_child_weight,
+            "lambda": args.reg_lambda,
+        },
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(asdict(artifact), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps(asdict(artifact), indent=2, sort_keys=True))
+    return 0
+
+
+def train_large_loss_classifier(
+    df: pd.DataFrame,
+    *,
+    model_output: Path,
+    test_fraction: float = 0.25,
+    min_rows: int = 20,
+    walk_forward_folds: int = 3,
+    min_walk_forward_train_rows: int | None = None,
+    embargo_days: int = 30,
+    val_fraction: float = 0.15,
+    early_stopping_rounds: int = 20,
+    num_boost_round: int = 200,
+    scale_pos_weight: float | None = None,
+    params: dict[str, Any] | None = None,
+) -> LargeLossClassifierArtifact:
+    """Train and evaluate a binary large-loss classifier.
+
+    Args:
+        df: Candidate dataset with ``large_loss_label`` column.
+        model_output: Where to save the XGBoost booster.
+        test_fraction: Fraction of rows held out as chronological test set.
+        walk_forward_folds: Number of walk-forward CV folds.
+        embargo_days: Calendar days excluded between train and test in each fold.
+        val_fraction: Fraction of training data used for early stopping.
+        early_stopping_rounds: Patience for early stopping (0 = disabled).
+        num_boost_round: Maximum boosting rounds.
+        scale_pos_weight: Class weight for positive (large-loss) class.
+            Defaults to (negatives / positives) to handle the 12.5% prevalence.
+        params: XGBoost hyperparameter overrides.
+
+    Returns:
+        A ``LargeLossClassifierArtifact`` with metrics and walk-forward results.
+    """
+    if xgb is None:
+        raise ImportError("xgboost is required. Install xgboost and its native runtime dependencies.")
+    if TARGET_COLUMN not in df.columns:
+        raise ValueError(f"Missing target column '{TARGET_COLUMN}' in dataset.")
+
+    clean = df.copy()
+    clean[TARGET_COLUMN] = pd.to_numeric(clean[TARGET_COLUMN], errors="coerce")
+    clean = clean.dropna(subset=[TARGET_COLUMN])
+    if len(clean) < min_rows:
+        raise ValueError(f"Need at least {min_rows} labeled rows, found {len(clean)}")
+    if "entry_timestamp" in clean.columns:
+        clean = clean.sort_values("entry_timestamp")
+
+    clean = _engineer_features(clean)
+    feature_columns = _select_feature_columns(clean)
+    if not feature_columns:
+        raise ValueError("No usable numeric feature columns found.")
+
+    split_index = _split_index(len(clean), test_fraction)
+    y_all = clean[TARGET_COLUMN].to_numpy(dtype=float)
+    y_train, y_test = y_all[:split_index], y_all[split_index:]
+
+    # Auto-compute scale_pos_weight from training data if not provided.
+    neg = float(np.sum(y_train == 0))
+    pos = float(np.sum(y_train == 1))
+    spw = scale_pos_weight if scale_pos_weight is not None else (neg / pos if pos > 0 else 1.0)
+
+    model_params = _default_params(spw)
+    if params:
+        model_params.update(params)
+
+    fill_values = _compute_fill_values(clean.iloc[:split_index], feature_columns)
+    val_split_index = _split_index(split_index, val_fraction) if val_fraction > 0 and split_index > 1 else split_index
+
+    x_train_sub = _build_dmatrix(clean.iloc[:val_split_index], feature_columns, fill_values, y_all[:val_split_index])
+    x_val = _build_dmatrix(clean.iloc[val_split_index:split_index], feature_columns, fill_values, y_all[val_split_index:split_index])
+    x_train_full = _build_dmatrix(clean.iloc[:split_index], feature_columns, fill_values, y_train)
+    x_test_frame = _transform_frame(clean.iloc[split_index:], feature_columns, fill_values)
+
+    has_val = x_val.num_row() > 0 and early_stopping_rounds > 0
+    booster = xgb.train(
+        model_params,
+        x_train_sub,
+        num_boost_round=num_boost_round,
+        evals=[(x_val, "val")] if has_val else [],
+        early_stopping_rounds=early_stopping_rounds if has_val else None,
+        verbose_eval=False,
+    )
+    best_rounds = getattr(booster, "best_iteration", num_boost_round - 1) + 1
+
+    train_prob = _predict_prob(booster, _transform_frame(clean.iloc[:split_index], feature_columns, fill_values))
+    test_prob = _predict_prob(booster, x_test_frame) if len(x_test_frame) > 0 else np.array([])
+
+    metrics = _prefixed_clf_metrics("train", y_train, train_prob)
+    if len(test_prob):
+        metrics.update(_prefixed_clf_metrics("test", y_test, test_prob))
+
+    walk_forward = _walk_forward_clf(
+        clean,
+        feature_columns=feature_columns,
+        fold_count=walk_forward_folds,
+        min_train_rows=min_walk_forward_train_rows or max(min_rows, split_index),
+        params=model_params,
+        num_boost_round=best_rounds,
+        embargo_days=embargo_days,
+    )
+    metrics.update(_walk_forward_summary_clf(walk_forward))
+
+    model_output.parent.mkdir(parents=True, exist_ok=True)
+    booster.save_model(model_output)
+
+    artifact_metadata = _artifact_metadata(clean)
+    return LargeLossClassifierArtifact(
+        model_type="xgboost_binary_large_loss_v001",
+        created_at=datetime.now(UTC).isoformat(),
+        target_column=TARGET_COLUMN,
+        feature_version=artifact_metadata["feature_version"],
+        label_version=artifact_metadata["label_version"],
+        data_range=artifact_metadata["data_range"],
+        model_path=str(model_output),
+        feature_columns=feature_columns,
+        fill_values=fill_values,
+        train_rows=int(len(y_train)),
+        test_rows=int(len(y_test)),
+        train_positive_rate=round(float(np.mean(y_train)), 6),
+        test_positive_rate=round(float(np.mean(y_test)), 6) if len(y_test) else 0.0,
+        params={**model_params, "num_boost_round": int(best_rounds)},
+        feature_importance=_feature_importance(booster),
+        metrics=metrics,
+        walk_forward=walk_forward,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _default_params(scale_pos_weight: float = 1.0) -> dict[str, Any]:
+    return {
+        "objective": "binary:logistic",
+        "eval_metric": "auc",
+        "tree_method": "hist",
+        "max_depth": 4,
+        "eta": 0.05,
+        "subsample": 0.85,
+        "colsample_bytree": 0.85,
+        "min_child_weight": 20.0,
+        "lambda": 20.0,
+        "alpha": 0.0,
+        "scale_pos_weight": round(scale_pos_weight, 4),
+        "seed": 17,
+    }
+
+
+def _compute_fill_values(df: pd.DataFrame, feature_columns: list[str]) -> dict[str, float]:
+    frame = df[feature_columns].apply(pd.to_numeric, errors="coerce")
+    return {
+        col: round(float(frame[col].median()) if frame[col].notna().any() else 0.0, 10)
+        for col in feature_columns
+    }
+
+
+def _transform_frame(df: pd.DataFrame, feature_columns: list[str], fill_values: dict[str, float]) -> pd.DataFrame:
+    return df[feature_columns].apply(pd.to_numeric, errors="coerce").fillna(fill_values)
+
+
+def _build_dmatrix(df: pd.DataFrame, feature_columns: list[str], fill_values: dict[str, float], labels: np.ndarray):
+    frame = _transform_frame(df, feature_columns, fill_values)
+    return xgb.DMatrix(frame, label=labels, feature_names=feature_columns)
+
+
+def _predict_prob(booster, frame: pd.DataFrame) -> np.ndarray:
+    if len(frame) == 0:
+        return np.array([])
+    matrix = xgb.DMatrix(frame, feature_names=list(frame.columns))
+    return booster.predict(matrix)
+
+
+def _clf_metrics(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.15) -> dict[str, Any]:
+    """Classification metrics at a given probability threshold."""
+    y_pred = (y_prob >= threshold).astype(int)
+    tp = int(np.sum((y_pred == 1) & (y_true == 1)))
+    fp = int(np.sum((y_pred == 1) & (y_true == 0)))
+    fn = int(np.sum((y_pred == 0) & (y_true == 1)))
+    tn = int(np.sum((y_pred == 0) & (y_true == 0)))
+    precision = tp / (tp + fp) if (tp + fp) > 0 else None
+    recall = tp / (tp + fn) if (tp + fn) > 0 else None
+    f1 = (2 * precision * recall / (precision + recall)) if precision and recall else None
+
+    # AUC via Mann-Whitney U statistic — O(n_pos × n_neg), exact, no deprecated APIs.
+    try:
+        pos_probs = y_prob[y_true == 1]
+        neg_probs = y_prob[y_true == 0]
+        if len(pos_probs) == 0 or len(neg_probs) == 0:
+            auc = None
+        else:
+            # P(score(pos) > score(neg)); ties counted as 0.5
+            comparisons = (pos_probs[:, None] > neg_probs[None, :]).astype(float)
+            ties = (pos_probs[:, None] == neg_probs[None, :]).astype(float) * 0.5
+            auc = float(np.mean(comparisons + ties))
+    except Exception:
+        auc = None
+
+    return {
+        "rows": int(len(y_true)),
+        "positive_rate": round(float(np.mean(y_true)), 6),
+        "threshold": threshold,
+        "precision": round(precision, 6) if precision is not None else None,
+        "recall": round(recall, 6) if recall is not None else None,
+        "f1": round(f1, 6) if f1 is not None else None,
+        "auc": round(auc, 6) if auc is not None else None,
+        "tp": tp, "fp": fp, "fn": fn, "tn": tn,
+        "mean_prob_positive": round(float(np.mean(y_prob[y_true == 1])), 6) if np.any(y_true == 1) else None,
+        "mean_prob_negative": round(float(np.mean(y_prob[y_true == 0])), 6) if np.any(y_true == 0) else None,
+    }
+
+
+def _prefixed_clf_metrics(prefix: str, y_true: np.ndarray, y_prob: np.ndarray) -> dict[str, Any]:
+    return {f"{prefix}_{k}": v for k, v in _clf_metrics(y_true, y_prob).items()}
+
+
+def _walk_forward_clf(
+    df: pd.DataFrame,
+    *,
+    feature_columns: list[str],
+    fold_count: int,
+    min_train_rows: int,
+    params: dict[str, Any],
+    num_boost_round: int,
+    embargo_days: int,
+) -> list[dict[str, Any]]:
+    folds: list[dict[str, Any]] = []
+    y_all = df[TARGET_COLUMN].to_numpy(dtype=float)
+    embargo_rows = _embargo_rows_from_days(df, embargo_days)
+
+    for fold_number, train_start, train_end, test_start, test_end in _walk_forward_splits(
+        len(df),
+        fold_count=fold_count,
+        min_train_rows=min_train_rows,
+        embargo_rows=embargo_rows,
+    ):
+        train_df = df.iloc[train_start:train_end]
+        test_df = df.iloc[test_start:test_end]
+        fold_fill = _compute_fill_values(train_df, feature_columns)
+
+        # Recompute scale_pos_weight per fold from fold training labels.
+        y_fold_train = y_all[train_start:train_end]
+        neg_f = float(np.sum(y_fold_train == 0))
+        pos_f = float(np.sum(y_fold_train == 1))
+        fold_spw = neg_f / pos_f if pos_f > 0 else 1.0
+        fold_params = {**params, "scale_pos_weight": round(fold_spw, 4)}
+
+        dtrain = _build_dmatrix(train_df, feature_columns, fold_fill, y_fold_train)
+        booster = xgb.train(fold_params, dtrain, num_boost_round=num_boost_round, verbose_eval=False)
+
+        x_test_frame = _transform_frame(test_df, feature_columns, fold_fill)
+        prob = _predict_prob(booster, x_test_frame)
+        fold_metrics = _clf_metrics(y_all[test_start:test_end], prob)
+
+        from ml.models.train_baseline import _row_timestamp
+        folds.append({
+            "fold": fold_number,
+            "train_start": _row_timestamp(df, train_start),
+            "train_end": _row_timestamp(df, train_end - 1),
+            "embargo_rows": int(test_start - train_end),
+            "test_start": _row_timestamp(df, test_start),
+            "test_end": _row_timestamp(df, test_end - 1),
+            "train_rows": int(train_end - train_start),
+            "test_rows": int(test_end - test_start),
+            "metrics": fold_metrics,
+        })
+    return folds
+
+
+def _walk_forward_summary_clf(folds: list[dict[str, Any]]) -> dict[str, Any]:
+    summary: dict[str, Any] = {"walk_forward_folds": int(len(folds))}
+    if not folds:
+        return summary
+    for key in ("auc", "precision", "recall", "f1"):
+        vals = [fold["metrics"].get(key) for fold in folds]
+        numeric = [float(v) for v in vals if isinstance(v, (int, float))]
+        summary[f"walk_forward_{key}_mean"] = round(float(np.mean(numeric)), 6) if numeric else None
+    summary["walk_forward_test_rows"] = int(sum(f["test_rows"] for f in folds))
+    return summary
+
+
+def _feature_importance(booster) -> dict[str, float]:
+    scores = booster.get_score(importance_type="gain")
+    return {
+        key: round(float(val), 6)
+        for key, val in sorted(scores.items(), key=lambda x: (-x[1], x[0]))
+    }
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

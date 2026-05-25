@@ -5,7 +5,9 @@ import numpy as np
 from ml.models.train_xgboost import (
     AsymmetricLossConfig,
     _asymmetric_objective,
+    _cap_rows_per_underlying,
     _inverse_transform_target,
+    _oversample_high_vol,
     _transform_target,
     train_xgboost,
 )
@@ -119,3 +121,91 @@ def test_asymmetric_pseudo_huber_objective_clips_extreme_gradients():
     assert np.all(np.isfinite(hess))
     assert np.max(np.abs(grad)) <= config.gradient_clip
     assert np.min(hess) >= config.hessian_floor
+
+
+def test_cap_rows_per_underlying_enforces_limit():
+    df = pd.DataFrame(
+        [{"underlying": "SPY", "entry_timestamp": f"2026-01-{i:02d}", "dte": i} for i in range(1, 11)]
+        + [{"underlying": "QQQ", "entry_timestamp": f"2026-01-{i:02d}", "dte": i} for i in range(1, 6)]
+    )
+    capped = _cap_rows_per_underlying(df, max_rows=4)
+    assert (capped["underlying"] == "SPY").sum() == 4
+    assert (capped["underlying"] == "QQQ").sum() == 4
+
+
+def test_cap_rows_per_underlying_preserves_chronological_order():
+    df = pd.DataFrame(
+        [{"underlying": "SPY", "entry_timestamp": f"2026-01-{i:02d}", "dte": i} for i in range(1, 11)]
+    )
+    capped = _cap_rows_per_underlying(df, max_rows=3)
+    # Should keep the earliest 3 rows
+    assert list(capped["dte"]) == [1, 2, 3]
+
+
+def test_cap_rows_per_underlying_noop_when_none():
+    df = pd.DataFrame([{"underlying": "SPY", "dte": i} for i in range(20)])
+    result = _cap_rows_per_underlying(df, max_rows=100)
+    assert len(result) == 20
+
+
+def test_oversample_high_vol_replicates_correctly():
+    df = pd.DataFrame(
+        [{"vix_regime": 2.0, "expected_pnl": -200.0}] * 10
+        + [{"vix_regime": 1.0, "expected_pnl": 50.0}] * 90
+    )
+    oversampled = _oversample_high_vol(df, factor=3)
+    high_vol_count = (oversampled["vix_regime"] == 2.0).sum()
+    assert high_vol_count == 30  # 10 * 3
+    assert len(oversampled) == 90 + 30  # 90 normal + 10*3 high-vol
+
+
+def test_oversample_high_vol_factor_one_is_noop():
+    df = pd.DataFrame([{"vix_regime": 2.0, "expected_pnl": 0.0}] * 10)
+    result = _oversample_high_vol(df, factor=1)
+    assert len(result) == 10
+
+
+def test_train_xgboost_with_per_underlying_cap(tmp_path):
+    df = pd.DataFrame(
+        [{"entry_timestamp": f"2026-01-{i:02d}", "underlying": "SPY", "dte": i,
+          "underlying_close": 500, "option_entry_price": 4.0, "expected_pnl": 100 - i * 10}
+         for i in range(1, 13)]
+        + [{"entry_timestamp": f"2026-01-{i:02d}", "underlying": "QQQ", "dte": i,
+            "underlying_close": 400, "option_entry_price": 3.0, "expected_pnl": 80 - i * 5}
+           for i in range(1, 7)]
+    )
+    artifact = train_xgboost(
+        df,
+        model_output=tmp_path / "model.json",
+        min_rows=4,
+        test_fraction=0.25,
+        walk_forward_folds=0,
+        num_boost_round=5,
+        val_fraction=0.0,
+        max_rows_per_underlying=5,
+    )
+    # Cap of 5 per underlying: 5 SPY + 5 QQQ = 10 total rows, 25% test = 2-3 rows
+    assert artifact.train_rows + artifact.test_rows <= 10
+
+
+def test_train_xgboost_with_high_vol_oversampling(tmp_path):
+    rows = []
+    for i in range(1, 9):
+        rows.append({
+            "entry_timestamp": f"2026-01-{i:02d}", "dte": 30 - i,
+            "underlying_close": 500, "option_entry_price": 4.0,
+            "vix_close": 35.0 if i <= 2 else 18.0,  # 2 high-vol rows
+            "expected_pnl": 100 if i % 2 == 0 else -50,
+        })
+    df = pd.DataFrame(rows)
+    artifact = train_xgboost(
+        df,
+        model_output=tmp_path / "model.json",
+        min_rows=4,
+        test_fraction=0.25,
+        walk_forward_folds=0,
+        num_boost_round=5,
+        val_fraction=0.0,
+        high_vol_oversample_factor=3,
+    )
+    assert artifact.model_type is not None

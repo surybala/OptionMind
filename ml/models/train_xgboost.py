@@ -97,6 +97,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--huber-delta", type=float, default=1.0, help="Pseudo-Huber transition point in transformed target units.")
     parser.add_argument("--gradient-clip", type=float, default=10.0, help="Absolute custom-objective gradient clip.")
     parser.add_argument("--hessian-floor", type=float, default=1e-6, help="Minimum custom-objective hessian.")
+    parser.add_argument(
+        "--max-rows-per-underlying",
+        type=int,
+        default=None,
+        help=(
+            "Hard cap on training rows per underlying symbol before the train/test split. "
+            "Prevents any single ETF from dominating the training set (e.g. SMH at 22%%). "
+            "Set to e.g. 30000 for a roughly uniform distribution across 39 underlyings."
+        ),
+    )
+    parser.add_argument(
+        "--high-vol-oversample-factor",
+        type=int,
+        default=1,
+        help=(
+            "Replicate high-volatility training rows (vix_regime >= 2, i.e. VIX >= 30) "
+            "this many additional times. Factor=5 means high-vol rows appear 5x in training. "
+            "Applied only to the training split to avoid contaminating the test evaluation. "
+            "Interim measure until 2022-2023 high-vol data is added to the corpus."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -118,6 +139,8 @@ def main() -> int:
         early_stopping_rounds=args.early_stopping_rounds,
         params=_params_from_args(args),
         num_boost_round=args.num_boost_round,
+        max_rows_per_underlying=args.max_rows_per_underlying,
+        high_vol_oversample_factor=args.high_vol_oversample_factor,
         loss_config=AsymmetricLossConfig(
             downside_scale=args.downside_scale,
             error_scale=args.error_scale,
@@ -152,6 +175,8 @@ def train_xgboost(
     params: dict[str, Any] | None = None,
     num_boost_round: int = 300,
     loss_config: AsymmetricLossConfig | None = None,
+    max_rows_per_underlying: int | None = None,
+    high_vol_oversample_factor: int = 1,
 ) -> XGBoostModelArtifact:
     if xgb is None:
         raise ImportError("xgboost is required and must be loadable. Install xgboost and its native runtime dependencies.")
@@ -165,6 +190,11 @@ def train_xgboost(
         raise ValueError(f"Need at least {min_rows} labeled rows, found {len(clean)}")
     if "entry_timestamp" in clean:
         clean = clean.sort_values("entry_timestamp")
+
+    # Per-underlying row cap: prevents any single ETF from dominating training.
+    # Applied before train/test split so the holdout reflects the capped distribution.
+    if max_rows_per_underlying is not None and "underlying" in clean.columns:
+        clean = _cap_rows_per_underlying(clean, max_rows_per_underlying)
 
     clean = _engineer_features(clean)
     feature_columns = _select_feature_columns(clean)
@@ -180,12 +210,22 @@ def train_xgboost(
     # early stopping. Fill values are always derived from the full training set.
     _, fill_values = _fit_xgb_frame(clean.iloc[:split_index], feature_columns)
     val_split_index = _split_index(split_index, val_fraction) if val_fraction > 0 and split_index > 1 else split_index
-    x_train_sub = _transform_xgb_frame(clean.iloc[:val_split_index], feature_columns, fill_values)
+
+    # High-vol oversampling: replicate vix_regime >= 2 rows in the training split
+    # only. The test split is never oversampled so evaluation reflects real distribution.
+    train_df_sub = clean.iloc[:val_split_index]
+    if high_vol_oversample_factor > 1:
+        train_df_sub = _oversample_high_vol(train_df_sub, high_vol_oversample_factor)
+        y_sub_oversampled = train_df_sub[target_column].to_numpy(dtype=float)
+        y_train_sub = _transform_target(y_sub_oversampled, loss)
+    else:
+        y_train_sub = y_model_all[:val_split_index]
+
+    x_train_sub = _transform_xgb_frame(train_df_sub, feature_columns, fill_values)
     x_val = _transform_xgb_frame(clean.iloc[val_split_index:split_index], feature_columns, fill_values)
     x_train = _transform_xgb_frame(clean.iloc[:split_index], feature_columns, fill_values)
     x_test = _transform_xgb_frame(clean.iloc[split_index:], feature_columns, fill_values)
 
-    y_train_sub = y_model_all[:val_split_index]
     y_val = y_model_all[val_split_index:split_index]
     y_train = y_all[:split_index]
     y_test = y_all[split_index:]
@@ -432,6 +472,53 @@ def _feature_importance(booster) -> dict[str, float]:
         key: round(float(value), 6)
         for key, value in sorted(scores.items(), key=lambda item: (-item[1], item[0]))
     }
+
+
+def _cap_rows_per_underlying(df: pd.DataFrame, max_rows: int) -> pd.DataFrame:
+    """Return df with at most max_rows rows per underlying, preserving time order.
+
+    Rows are sorted by entry_timestamp before capping so the earliest trades are
+    kept — consistent with the dataset builder's own per-underlying cap logic.
+    """
+    if "entry_timestamp" in df.columns:
+        df = df.sort_values("entry_timestamp")
+    capped = (
+        df.groupby("underlying", sort=False)
+        .head(max_rows)
+        .sort_values("entry_timestamp" if "entry_timestamp" in df.columns else df.columns[0])
+        .reset_index(drop=True)
+    )
+    dropped = len(df) - len(capped)
+    if dropped > 0:
+        print(
+            f"Per-underlying cap ({max_rows:,} rows): removed {dropped:,} rows "
+            f"({dropped / len(df) * 100:.1f}%%), {len(capped):,} remaining.",
+            flush=True,
+        )
+    return capped
+
+
+def _oversample_high_vol(df: pd.DataFrame, factor: int) -> pd.DataFrame:
+    """Replicate high-volatility rows (vix_regime >= 2) in the training split.
+
+    factor=5 means high-vol rows appear 5× in the returned frame.  The original
+    order is preserved with oversampled rows appended at the end; XGBoost
+    training does not depend on row order within the DMatrix.
+    """
+    if "vix_regime" not in df.columns or factor <= 1:
+        return df
+    vix_regime = pd.to_numeric(df["vix_regime"], errors="coerce")
+    high_vol_mask = vix_regime >= 2.0
+    high_vol_rows = df[high_vol_mask]
+    if high_vol_rows.empty:
+        return df
+    replicated = pd.concat([df] + [high_vol_rows] * (factor - 1), ignore_index=True)
+    print(
+        f"High-vol oversampling (factor={factor}): {high_vol_mask.sum():,} high-vol rows "
+        f"→ training set grows from {len(df):,} to {len(replicated):,} rows.",
+        flush=True,
+    )
+    return replicated
 
 
 if __name__ == "__main__":

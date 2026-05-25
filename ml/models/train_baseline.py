@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -47,6 +48,8 @@ DEFAULT_FEATURE_COLUMNS = [
     "underlying_volatility_ratio_5d_20d",
     "underlying_volume",
     "underlying_skew_5d",
+    # Idiosyncratic vs market vol: ETF moving faster/slower than SPY
+    "underlying_vol_vs_market",
     # Market regime
     "market_return_5d",
     "market_return_20d",
@@ -64,6 +67,8 @@ DEFAULT_FEATURE_COLUMNS = [
     # Option lookback
     "option_volume_5d_avg",
     "option_trade_count_5d_avg",
+    # Unusual option activity today vs recent baseline
+    "option_activity_spike",
     # Black-Scholes Greeks and implied volatility
     "implied_volatility",
     "option_delta",
@@ -72,28 +77,25 @@ DEFAULT_FEATURE_COLUMNS = [
     "option_vega",
     "iv_vs_hv5d",
     "iv_vs_hv20d",
+    # IV term structure: long-leg IV minus short-leg IV (vol surface slope proxy)
+    "iv_skew_wing",
     # VIX market regime
     # vix_close (continuous) replaced by vix_regime (3-level bucket: 0=low <15,
     # 1=elevated 15-30, 2=high ≥30) to prevent memorising exact index levels.
     "vix_regime",
     "vix_return_5d",
     "vix_realized_vol_5d",
-    "vix_above_20",
-    "vix_above_30",
-    # Event risk — earnings
+    # vix_above_20 and vix_above_30 dropped: fully absorbed by vix_regime (zero importance)
+    # Event risk — earnings (continuous only; binary flags had zero importance)
     "days_to_earnings",
-    "has_earnings_in_forward_days",
     # Ex-dividend risk
     "days_to_ex_dividend",
-    "has_dividend_in_forward_days",
-    # Macro event risk
+    # Macro event risk (continuous only; binary flags had zero importance)
     "days_to_fomc",
-    "has_fomc_in_forward_days",
     "days_to_macro_event",
-    "has_macro_event_in_forward_days",
 ]
 
-DEFAULT_FEATURE_VERSION = "features_v003"
+DEFAULT_FEATURE_VERSION = "features_v004"
 DEFAULT_LABEL_VERSION = "short_option_labels_v001"
 
 
@@ -254,28 +256,125 @@ def _data_range(df: pd.DataFrame, manifest_metadata: dict[str, Any]) -> dict[str
 def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     """Derive engineered features from raw dataset columns.
 
-    Computes ``vix_regime`` — a 3-level ordinal bucket from ``vix_close``:
-      0 = low      (VIX < 15)
-      1 = elevated (15 ≤ VIX < 30)
-      2 = high     (VIX ≥ 30)
+    Existing:
+      - ``vix_regime``: 3-level ordinal bucket from ``vix_close`` (0=low <15,
+        1=elevated 15-30, 2=high ≥30).  Prevents memorising exact VIX levels.
+      - ``is_pcs`` / ``is_ccs``: one-hot from ``strategy`` column.
 
-    Using a bucketed regime instead of the raw continuous VIX value prevents
-    the model from memorising specific index levels that may not generalise
-    across market periods.  ``vix_close`` is retained in the DataFrame for
-    diagnostics and fill-value computation but is excluded from
-    ``DEFAULT_FEATURE_COLUMNS``.
+    New in features_v004:
+      - ``underlying_vol_vs_market``: underlying 5d realized vol divided by
+        market 5d realized vol.  Captures idiosyncratic ETF-level stress that
+        is independent of broad market turbulence.
+      - ``option_activity_spike``: today's option trade count divided by the
+        5-day average.  Detects unusual positioning activity on entry day.
+      - ``iv_skew_wing``: long-leg implied volatility minus short-leg IV,
+        computed via Newton-Raphson Black-Scholes.  Approximates the slope of
+        the vol surface between the two strikes — a wide positive spread on
+        PCS signals steep put skew (protective demand).
     """
     df = df.copy()
+
+    # vix_regime bucket
     if "vix_close" in df.columns:
         vix = pd.to_numeric(df["vix_close"], errors="coerce")
         df["vix_regime"] = (
             (vix >= 15).astype("Int64") + (vix >= 30).astype("Int64")
         ).astype(float)
+
+    # is_pcs / is_ccs flags
     if "strategy" in df.columns:
         strategy = df["strategy"].astype(str).str.upper()
         df["is_pcs"] = (strategy == "PCS").astype(float)
         df["is_ccs"] = (strategy == "CCS").astype(float)
+
+    # Idiosyncratic vol: ETF vs market
+    if "underlying_realized_vol_5d" in df.columns and "market_realized_vol_5d" in df.columns:
+        und_vol = pd.to_numeric(df["underlying_realized_vol_5d"], errors="coerce")
+        mkt_vol = pd.to_numeric(df["market_realized_vol_5d"], errors="coerce")
+        df["underlying_vol_vs_market"] = (und_vol / mkt_vol.replace(0.0, np.nan)).round(8)
+
+    # Unusual option activity relative to recent baseline
+    if "option_entry_trade_count" in df.columns and "option_trade_count_5d_avg" in df.columns:
+        today_cnt = pd.to_numeric(df["option_entry_trade_count"], errors="coerce")
+        avg_cnt = pd.to_numeric(df["option_trade_count_5d_avg"], errors="coerce")
+        df["option_activity_spike"] = (today_cnt / avg_cnt.replace(0.0, np.nan)).round(8)
+
+    # IV skew wing: long-leg IV minus short-leg IV.
+    # Requires columns present in credit-spread rows only; silently skipped for
+    # short-option datasets that lack long_strike / long_option_entry_price.
+    _iv_skew_required = {"long_option_entry_price", "underlying_close", "long_strike", "option_type", "dte"}
+    if _iv_skew_required.issubset(df.columns) and "iv_skew_wing" not in df.columns:
+        df["iv_skew_wing"] = _compute_iv_skew_wing(df)
+
     return df
+
+
+def _compute_iv_skew_wing(df: pd.DataFrame, risk_free_rate: float = 0.045) -> pd.Series:
+    """Return long-leg IV minus short-leg IV for each credit-spread row.
+
+    Uses the same Newton-Raphson Black-Scholes solver as the dataset builder.
+    Rows where computation fails (non-positive inputs, unconverged) yield NaN.
+    """
+    results = np.full(len(df), np.nan)
+    short_iv = pd.to_numeric(df.get("implied_volatility"), errors="coerce").to_numpy()
+    long_price = pd.to_numeric(df["long_option_entry_price"], errors="coerce").to_numpy()
+    spot = pd.to_numeric(df["underlying_close"], errors="coerce").to_numpy()
+    k_long = pd.to_numeric(df["long_strike"], errors="coerce").to_numpy()
+    dte_arr = pd.to_numeric(df["dte"], errors="coerce").to_numpy()
+    opt_type = df["option_type"].astype(str).str.lower().to_numpy()
+
+    for i in range(len(df)):
+        try:
+            S, K, T = float(spot[i]), float(k_long[i]), float(dte_arr[i]) / 365.0
+            price = float(long_price[i])
+            otype = str(opt_type[i])
+            siv = short_iv[i]
+            if not (S > 0 and K > 0 and T > 0 and price > 0 and otype in {"call", "put"}):
+                continue
+            liv = _bs_iv_simple(price, S, K, T, risk_free_rate, otype)
+            if liv is None or np.isnan(siv):
+                continue
+            results[i] = round(liv - float(siv), 8)
+        except Exception:
+            pass
+    return pd.Series(results, index=df.index)
+
+
+def _bs_iv_simple(
+    market_price: float,
+    S: float,
+    K: float,
+    T: float,
+    r: float,
+    option_type: str,
+    max_iter: int = 60,
+    tol: float = 1e-6,
+) -> float | None:
+    """Newton-Raphson Black-Scholes IV solver (training-time use only)."""
+    sigma = 0.25
+    for _ in range(max_iter):
+        try:
+            sqrt_T = math.sqrt(T)
+            d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * sqrt_T)
+            d2 = d1 - sigma * sqrt_T
+            nd1 = (1.0 + math.erf(d1 / math.sqrt(2.0))) / 2.0
+            nd2 = (1.0 + math.erf(d2 / math.sqrt(2.0))) / 2.0
+            pdf_d1 = math.exp(-0.5 * d1 * d1) / math.sqrt(2.0 * math.pi)
+            disc = math.exp(-r * T)
+            if option_type == "call":
+                price = S * nd1 - K * disc * nd2
+            else:
+                price = K * disc * (1.0 - nd2) - S * (1.0 - nd1)
+            vega = S * pdf_d1 * sqrt_T
+            if abs(vega) < 1e-10:
+                return None
+            diff = price - market_price
+            if abs(diff) < tol:
+                return round(max(0.001, min(sigma, 10.0)), 8)
+            sigma = max(0.001, min(sigma - diff / vega, 10.0))
+        except (ValueError, ZeroDivisionError):
+            return None
+    return None
 
 
 def _select_feature_columns(df: pd.DataFrame) -> list[str]:

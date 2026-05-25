@@ -143,6 +143,9 @@ class CandidateDatasetRow:
     option_vega: float | None = None
     iv_vs_hv5d: float | None = None
     iv_vs_hv20d: float | None = None
+    # IV term structure: long-leg IV minus short-leg IV.  Positive for PCS means
+    # cheaper further-OTM put protection; negative CCS skew signals call richness.
+    iv_skew_wing: float | None = None
 
     # Option historical context (pre-entry lookback)
     option_volume_5d_avg: float | None = None
@@ -1028,6 +1031,15 @@ def _row_from_credit_spread_label(
         option_vega=greeks_features.get("option_vega"),
         iv_vs_hv5d=greeks_features.get("iv_vs_hv5d"),
         iv_vs_hv20d=greeks_features.get("iv_vs_hv20d"),
+        iv_skew_wing=_iv_skew_wing(
+            long_price=float(long_entry_bar.close),
+            spot=underlying_features.get("underlying_close"),
+            long_strike=long_contract.strike,
+            option_type=short_contract.option_type,
+            dte=entry_dte,
+            risk_free_rate=0.045,
+            short_iv=greeks_features.get("implied_volatility"),
+        ),
         option_volume_5d_avg=lookback_features.get("option_volume_5d_avg"),
         option_trade_count_5d_avg=lookback_features.get("option_trade_count_5d_avg"),
         vix_close=vix_features.get("vix_close"),
@@ -1044,6 +1056,34 @@ def _row_from_credit_spread_label(
         days_to_macro_event=macro_features.get("days_to_macro_event"),
         has_macro_event_in_forward_days=macro_features.get("has_macro_event_in_forward_days"),
     )
+
+
+def _iv_skew_wing(
+    long_price: float,
+    spot: float | None,
+    long_strike: float | None,
+    option_type: str | None,
+    dte: int | None,
+    risk_free_rate: float,
+    short_iv: float | None,
+) -> float | None:
+    """Compute long-leg IV minus short-leg IV (vol surface slope proxy).
+
+    Returns None whenever any required input is missing or the solver fails.
+    A positive value on a PCS means the long (lower) put strike has *higher* IV
+    than the short put — steep put skew, indicating protective demand.
+    """
+    if (
+        spot is None or long_strike is None or option_type is None
+        or dte is None or dte <= 0 or short_iv is None
+        or long_price <= 0 or spot <= 0 or long_strike <= 0
+    ):
+        return None
+    T = dte / 365.0
+    long_iv = _implied_volatility(long_price, float(spot), float(long_strike), T, risk_free_rate, option_type)
+    if long_iv is None:
+        return None
+    return round(long_iv - float(short_iv), 8)
 
 
 def _underlying_features(bars: list[PriceBar], entry_timestamp: datetime) -> dict[str, Any]:
