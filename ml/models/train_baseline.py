@@ -72,6 +72,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-rows", type=int, default=2)
     parser.add_argument("--walk-forward-folds", type=int, default=3)
     parser.add_argument("--min-walk-forward-train-rows", type=int, default=None)
+    parser.add_argument("--embargo-days", type=int, default=0, help="Calendar days to exclude between train and test in each walk-forward fold.")
     return parser.parse_args()
 
 
@@ -85,6 +86,7 @@ def main() -> int:
         min_rows=args.min_rows,
         walk_forward_folds=args.walk_forward_folds,
         min_walk_forward_train_rows=args.min_walk_forward_train_rows,
+        embargo_days=args.embargo_days,
     )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -101,6 +103,7 @@ def train_baseline(
     min_rows: int = 2,
     walk_forward_folds: int = 3,
     min_walk_forward_train_rows: int | None = None,
+    embargo_days: int = 0,
 ) -> BaselineModelArtifact:
     if target_column not in df:
         raise ValueError(f"Missing target column: {target_column}")
@@ -139,6 +142,7 @@ def train_baseline(
         feature_columns=feature_columns,
         fold_count=walk_forward_folds,
         min_train_rows=min_walk_forward_train_rows or max(min_rows, split_index),
+        embargo_days=embargo_days,
     )
     metrics.update(_walk_forward_summary(walk_forward))
 
@@ -210,13 +214,16 @@ def _walk_forward_validation(
     feature_columns: list[str],
     fold_count: int,
     min_train_rows: int,
+    embargo_days: int = 0,
 ) -> list[dict[str, Any]]:
     folds: list[dict[str, Any]] = []
     y_all = df[target_column].to_numpy(dtype=float)
+    embargo_rows = _embargo_rows_from_days(df, embargo_days)
     for fold_number, train_start, train_end, test_start, test_end in _walk_forward_splits(
         len(df),
         fold_count=fold_count,
         min_train_rows=min_train_rows,
+        embargo_rows=embargo_rows,
     ):
         train_df = df.iloc[train_start:train_end]
         test_df = df.iloc[test_start:test_end]
@@ -230,6 +237,7 @@ def _walk_forward_validation(
                 "fold": fold_number,
                 "train_start": _row_timestamp(df, train_start),
                 "train_end": _row_timestamp(df, train_end - 1),
+                "embargo_rows": int(test_start - train_end),
                 "test_start": _row_timestamp(df, test_start),
                 "test_end": _row_timestamp(df, test_end - 1),
                 "train_rows": int(train_end - train_start),
@@ -245,6 +253,7 @@ def _walk_forward_splits(
     *,
     fold_count: int,
     min_train_rows: int,
+    embargo_rows: int = 0,
 ) -> list[tuple[int, int, int, int, int]]:
     if fold_count <= 0 or row_count <= min_train_rows:
         return []
@@ -253,10 +262,25 @@ def _walk_forward_splits(
     for fold_number, chunk in enumerate(test_indices, start=1):
         if len(chunk) == 0:
             continue
-        test_start = int(chunk[0])
+        train_end = int(chunk[0])
+        test_start = min(train_end + embargo_rows, int(chunk[-1]) + 1)
         test_end = int(chunk[-1]) + 1
-        splits.append((fold_number, 0, test_start, test_start, test_end))
+        if test_start >= test_end:
+            continue
+        splits.append((fold_number, 0, train_end, test_start, test_end))
     return splits
+
+
+def _embargo_rows_from_days(df: pd.DataFrame, embargo_days: int) -> int:
+    """Estimate how many rows correspond to embargo_days of calendar time."""
+    if embargo_days <= 0 or "entry_timestamp" not in df.columns:
+        return 0
+    ts = pd.to_datetime(df["entry_timestamp"], errors="coerce").dropna().sort_values()
+    if len(ts) < 2:
+        return 0
+    total_days = max(1.0, (ts.iloc[-1] - ts.iloc[0]).total_seconds() / 86400)
+    rows_per_day = len(ts) / total_days
+    return max(0, int(np.ceil(rows_per_day * embargo_days)))
 
 
 def _evaluation_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float | int | None]:

@@ -38,6 +38,7 @@ class CandidateDatasetConfig:
     stock_timeframe: str = "1Day"
     large_loss_multiple: float = 1.0
     label_version: str = "short_option_labels_v001"
+    build_window_days: int = 45
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,8 @@ class HistoricalCandidateDatasetBuilder:
 
     def build(self, config: CandidateDatasetConfig) -> list[CandidateDatasetRow]:
         rows: list[CandidateDatasetRow] = []
+        underlying_row_counts: dict[str, int] = {u: 0 for u in config.underlyings}
+
         stock_start = config.entry_start - timedelta(days=config.stock_lookback_days)
         stock_symbols = _stock_symbols(config)
         stock_bars = self.market_provider.get_stock_bars(
@@ -128,87 +131,108 @@ class HistoricalCandidateDatasetBuilder:
         )
         market_history = stock_bars.get(config.market_regime_symbol.upper(), [])
 
-        for underlying in config.underlyings:
-            underlying_row_count = 0
-            expiration_gte = _datetime_to_date(config.entry_start) + timedelta(days=config.min_dte)
-            expiration_lte = _datetime_to_date(config.entry_end) + timedelta(days=config.max_dte)
-            contracts = self.contract_provider.get_option_contracts(
-                [underlying],
-                expiration_gte=expiration_gte,
-                expiration_lte=expiration_lte,
-                status=config.contract_status,
-                limit=config.option_limit,
-            )
-            underlying_history = stock_bars.get(underlying, [])
-            reference_features = _underlying_features(underlying_history, config.entry_start)
-            contracts = _candidate_contracts(
-                contracts,
-                underlying,
-                config,
-                reference_close=reference_features["underlying_close"],
-            )
-            if not contracts:
-                continue
+        for window_start, window_end, is_last_window in _date_windows(
+            config.entry_start, config.entry_end, config.build_window_days
+        ):
+            # Stop early if all underlyings have hit their row cap.
+            if config.max_rows_per_underlying is not None and all(
+                underlying_row_counts[u] >= config.max_rows_per_underlying for u in config.underlyings
+            ):
+                break
 
-            option_bars = self.price_provider.get_option_bars(
-                [contract.symbol for contract in contracts],
-                config.entry_start,
-                config.entry_end + timedelta(days=config.forward_days),
-                config.option_timeframe,
-                limit=None,
-            )
+            expiration_gte = _datetime_to_date(window_start) + timedelta(days=config.min_dte)
+            expiration_lte = _datetime_to_date(window_end) + timedelta(days=config.max_dte)
 
-            for contract in contracts:
-                path = sorted(option_bars.get(contract.symbol, []), key=lambda bar: bar.timestamp)
-                for entry_bar in _entry_bars(path, config):
-                    entry_dte = _dte(entry_bar.timestamp, contract.expiration)
-                    if entry_dte is None or entry_dte < config.min_dte or entry_dte > config.max_dte:
-                        continue
-                    future_path = [
-                        bar
-                        for bar in path
-                        if entry_bar.timestamp <= bar.timestamp <= entry_bar.timestamp + timedelta(days=config.forward_days)
-                    ]
-                    if len(future_path) < config.min_forward_bars:
-                        continue
-                    underlying_features = _underlying_features(underlying_history, entry_bar.timestamp)
-                    market_features = _market_regime_features(
-                        market_history,
-                        entry_bar.timestamp,
-                        config.market_regime_symbol,
-                    )
-                    label = label_short_option_path(
-                        entry_bar,
-                        future_path,
-                        ShortOptionLabelConfig(
-                            profit_take_pct=config.profit_take_pct,
-                            stop_loss_multiple=config.stop_loss_multiple,
-                            large_loss_multiple=config.large_loss_multiple,
-                            label_version=config.label_version,
-                        ),
-                    )
-                    rows.append(
-                        _row_from_label(
-                            contract,
-                            underlying,
-                            entry_bar,
-                            entry_dte,
-                            underlying_features,
-                            market_features,
-                            label,
-                        )
-                    )
-                    underlying_row_count += 1
-                    if (
-                        config.max_rows_per_underlying is not None
-                        and underlying_row_count >= config.max_rows_per_underlying
-                    ):
-                        break
+            for underlying in config.underlyings:
                 if (
                     config.max_rows_per_underlying is not None
-                    and underlying_row_count >= config.max_rows_per_underlying
+                    and underlying_row_counts[underlying] >= config.max_rows_per_underlying
                 ):
-                    break
+                    continue
+
+                contracts = self.contract_provider.get_option_contracts(
+                    [underlying],
+                    expiration_gte=expiration_gte,
+                    expiration_lte=expiration_lte,
+                    status=config.contract_status,
+                    limit=config.option_limit,
+                )
+                underlying_history = stock_bars.get(underlying, [])
+                reference_features = _underlying_features(underlying_history, window_start)
+                contracts = _candidate_contracts(
+                    contracts,
+                    underlying,
+                    config,
+                    reference_close=reference_features["underlying_close"],
+                )
+                if not contracts:
+                    continue
+
+                option_bars = self.price_provider.get_option_bars(
+                    [contract.symbol for contract in contracts],
+                    window_start,
+                    window_end + timedelta(days=config.forward_days),
+                    config.option_timeframe,
+                    limit=None,
+                )
+
+                for contract in contracts:
+                    path = sorted(option_bars.get(contract.symbol, []), key=lambda bar: bar.timestamp)
+                    # Use exclusive upper bound except on the last window to avoid
+                    # emitting duplicate rows when windows share a boundary timestamp.
+                    if is_last_window:
+                        window_bars = [b for b in path if window_start <= b.timestamp <= config.entry_end]
+                    else:
+                        window_bars = [b for b in path if window_start <= b.timestamp < window_end]
+                    for entry_bar in window_bars[:: config.sample_every_n_bars]:
+                        entry_dte = _dte(entry_bar.timestamp, contract.expiration)
+                        if entry_dte is None or entry_dte < config.min_dte or entry_dte > config.max_dte:
+                            continue
+                        future_path = [
+                            bar
+                            for bar in path
+                            if entry_bar.timestamp <= bar.timestamp <= entry_bar.timestamp + timedelta(days=config.forward_days)
+                        ]
+                        if len(future_path) < config.min_forward_bars:
+                            continue
+                        underlying_features = _underlying_features(underlying_history, entry_bar.timestamp)
+                        market_features = _market_regime_features(
+                            market_history,
+                            entry_bar.timestamp,
+                            config.market_regime_symbol,
+                        )
+                        label = label_short_option_path(
+                            entry_bar,
+                            future_path,
+                            ShortOptionLabelConfig(
+                                profit_take_pct=config.profit_take_pct,
+                                stop_loss_multiple=config.stop_loss_multiple,
+                                large_loss_multiple=config.large_loss_multiple,
+                                label_version=config.label_version,
+                            ),
+                        )
+                        rows.append(
+                            _row_from_label(
+                                contract,
+                                underlying,
+                                entry_bar,
+                                entry_dte,
+                                underlying_features,
+                                market_features,
+                                label,
+                            )
+                        )
+                        underlying_row_counts[underlying] += 1
+                        if (
+                            config.max_rows_per_underlying is not None
+                            and underlying_row_counts[underlying] >= config.max_rows_per_underlying
+                        ):
+                            break
+                    if (
+                        config.max_rows_per_underlying is not None
+                        and underlying_row_counts[underlying] >= config.max_rows_per_underlying
+                    ):
+                        break
         return rows
 
 
@@ -261,11 +285,27 @@ def _stock_symbols(config: CandidateDatasetConfig) -> list[str]:
     return symbols
 
 
-def _entry_bars(path: list[PriceBar], config: CandidateDatasetConfig) -> list[PriceBar]:
-    if config.sample_every_n_bars <= 0:
-        raise ValueError("sample_every_n_bars must be positive")
-    bars = [bar for bar in path if config.entry_start <= bar.timestamp <= config.entry_end]
-    return bars[:: config.sample_every_n_bars]
+def _date_windows(
+    start: datetime,
+    end: datetime,
+    window_days: int,
+) -> list[tuple[datetime, datetime, bool]]:
+    """Non-overlapping entry windows covering [start, end].
+
+    Returns (window_start, window_end, is_last) triples. Windows are contiguous
+    with no overlap. The last window's is_last flag signals callers to use an
+    inclusive upper-bound filter so the final entry_end timestamp is included.
+    """
+    windows: list[tuple[datetime, datetime, bool]] = []
+    current = start
+    while current < end:
+        window_end = min(current + timedelta(days=window_days), end)
+        is_last = window_end >= end
+        windows.append((current, window_end, is_last))
+        if is_last:
+            break
+        current = window_end
+    return windows
 
 
 def _row_from_label(

@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stock-lookback-days", type=int, default=60)
     parser.add_argument("--market-regime-symbol", default="SPY", help="Benchmark symbol used for market regime features.")
     parser.add_argument("--forward-days", type=int, default=30)
+    parser.add_argument("--build-window-days", type=int, default=45, help="Entry-window size for contract fetching. Smaller values fetch more targeted contracts per period for long date ranges.")
     parser.add_argument("--dataset-version", default="candidate_rows_v001")
     parser.add_argument("--output-dir", default="artifacts/datasets")
     parser.add_argument("--jsonl-output", default=None, help="Optional JSONL inspection copy.")
@@ -61,6 +62,7 @@ def main() -> int:
         stock_lookback_days=args.stock_lookback_days,
         market_regime_symbol=args.market_regime_symbol.upper(),
         forward_days=args.forward_days,
+        build_window_days=args.build_window_days,
     )
     rows = HistoricalCandidateDatasetBuilder(provider, provider, provider).build(config)
     result = ParquetDatasetWriter(root_dir=args.output_dir).write(
@@ -83,6 +85,7 @@ def main() -> int:
             "sample_every_n_bars": config.sample_every_n_bars,
             "stock_lookback_days": config.stock_lookback_days,
             "market_regime_symbol": config.market_regime_symbol,
+            "build_window_days": config.build_window_days,
             "feature_set_version": "features_v002",
             "label_version": config.label_version,
         },

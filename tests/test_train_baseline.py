@@ -50,3 +50,24 @@ def test_train_baseline_uses_train_only_fill_values():
 def test_train_baseline_requires_labeled_rows():
     with pytest.raises(ValueError, match="Need at least"):
         train_baseline(pd.DataFrame([{"dte": 1, "expected_pnl": None}]))
+
+
+def test_train_baseline_embargo_excludes_rows_between_train_and_test():
+    from ml.models.train_baseline import _walk_forward_splits
+
+    # 10 rows; min_train_rows=6; 1 fold; embargo_rows=2
+    # Fold: train=[0,6), embargo=[6,8), test=[8,10)
+    splits = _walk_forward_splits(10, fold_count=1, min_train_rows=6, embargo_rows=2)
+    assert len(splits) == 1
+    fold_number, train_start, train_end, test_start, test_end = splits[0]
+    assert train_end == 6
+    assert test_start == 8
+    assert test_end == 10
+
+
+def test_train_baseline_embargo_skips_fold_when_embargo_consumes_all_test_rows():
+    from ml.models.train_baseline import _walk_forward_splits
+
+    # 8 rows; min_train_rows=6; fold chunk=[6,8) (2 rows); embargo=3 → test_start=9 >= test_end=8
+    splits = _walk_forward_splits(8, fold_count=1, min_train_rows=6, embargo_rows=3)
+    assert splits == []

@@ -13,6 +13,7 @@ import pandas as pd
 
 from ml.datasets.audit_candidate_dataset import load_dataset
 from ml.models.train_baseline import (
+    _embargo_rows_from_days,
     _empty_test_metrics,
     _evaluation_metrics,
     _prefixed_metrics,
@@ -65,6 +66,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-rows", type=int, default=20)
     parser.add_argument("--walk-forward-folds", type=int, default=3)
     parser.add_argument("--min-walk-forward-train-rows", type=int, default=None)
+    parser.add_argument("--embargo-days", type=int, default=30, help="Calendar days to exclude between train and test in each walk-forward fold (should match forward_days).")
+    parser.add_argument("--early-stopping-rounds", type=int, default=0, help="Stop training when val mae has not improved for this many rounds. 0 disables early stopping.")
+    parser.add_argument("--val-fraction", type=float, default=0.0, help="Fraction of training data held out as a validation set for early stopping. 0 disables.")
     parser.add_argument("--num-boost-round", type=int, default=300)
     parser.add_argument("--max-depth", type=int, default=3)
     parser.add_argument("--eta", type=float, default=0.05)
@@ -94,6 +98,9 @@ def main() -> int:
         min_rows=args.min_rows,
         walk_forward_folds=args.walk_forward_folds,
         min_walk_forward_train_rows=args.min_walk_forward_train_rows,
+        embargo_days=args.embargo_days,
+        val_fraction=args.val_fraction,
+        early_stopping_rounds=args.early_stopping_rounds,
         params=_params_from_args(args),
         num_boost_round=args.num_boost_round,
         loss_config=AsymmetricLossConfig(
@@ -119,6 +126,9 @@ def train_xgboost(
     min_rows: int = 20,
     walk_forward_folds: int = 3,
     min_walk_forward_train_rows: int | None = None,
+    embargo_days: int = 0,
+    val_fraction: float = 0.15,
+    early_stopping_rounds: int = 20,
     params: dict[str, Any] | None = None,
     num_boost_round: int = 300,
     loss_config: AsymmetricLossConfig | None = None,
@@ -142,15 +152,32 @@ def train_xgboost(
 
     y_all = clean[target_column].to_numpy(dtype=float)
     split_index = _split_index(len(clean), test_fraction)
-    y_train, y_test = y_all[:split_index], y_all[split_index:]
-    x_train, fill_values = _fit_xgb_frame(clean.iloc[:split_index], feature_columns)
+
+    # Hold out the last val_fraction of training rows as a validation set for
+    # early stopping. Fill values are always derived from the full training set.
+    _, fill_values = _fit_xgb_frame(clean.iloc[:split_index], feature_columns)
+    val_split_index = _split_index(split_index, val_fraction) if val_fraction > 0 and split_index > 1 else split_index
+    x_train_sub = _transform_xgb_frame(clean.iloc[:val_split_index], feature_columns, fill_values)
+    x_val = _transform_xgb_frame(clean.iloc[val_split_index:split_index], feature_columns, fill_values)
+    x_train = _transform_xgb_frame(clean.iloc[:split_index], feature_columns, fill_values)
     x_test = _transform_xgb_frame(clean.iloc[split_index:], feature_columns, fill_values)
+
+    y_train_sub = y_all[:val_split_index]
+    y_val = y_all[val_split_index:split_index]
+    y_train = y_all[:split_index]
+    y_test = y_all[split_index:]
 
     model_params = _default_params()
     if params:
         model_params.update(params)
     loss = loss_config or AsymmetricLossConfig()
-    booster = _fit_booster(x_train, y_train, model_params, num_boost_round, loss)
+    booster = _fit_booster(
+        x_train_sub, y_train_sub, model_params, num_boost_round, loss,
+        x_val=x_val if len(x_val) > 0 else None,
+        y_val=y_val if len(y_val) > 0 else None,
+        early_stopping_rounds=early_stopping_rounds,
+    )
+    best_iteration = getattr(booster, "best_iteration", num_boost_round - 1) + 1
     train_pred = _predict(booster, x_train)
     test_pred = _predict(booster, x_test) if len(x_test) else np.array([])
 
@@ -167,8 +194,9 @@ def train_xgboost(
         fold_count=walk_forward_folds,
         min_train_rows=min_walk_forward_train_rows or max(min_rows, split_index),
         params=model_params,
-        num_boost_round=num_boost_round,
+        num_boost_round=best_iteration,
         loss_config=loss,
+        embargo_days=embargo_days,
     )
     metrics.update(_walk_forward_summary(walk_forward))
 
@@ -183,7 +211,7 @@ def train_xgboost(
         fill_values=fill_values,
         train_rows=int(len(y_train)),
         test_rows=int(len(y_test)),
-        params={**model_params, "num_boost_round": int(num_boost_round)},
+        params={**model_params, "num_boost_round": int(best_iteration)},
         loss_config=asdict(loss),
         feature_importance=_feature_importance(booster),
         metrics=metrics,
@@ -224,13 +252,28 @@ def _fit_booster(
     params: dict[str, Any],
     num_boost_round: int,
     loss_config: AsymmetricLossConfig,
+    x_val: pd.DataFrame | None = None,
+    y_val: np.ndarray | None = None,
+    early_stopping_rounds: int | None = None,
 ):
     dtrain = xgb.DMatrix(x_train, label=y_train, feature_names=list(x_train.columns))
+    has_val = x_val is not None and y_val is not None and len(x_val) > 0 and early_stopping_rounds
+    evals = []
+    train_params = dict(params)
+    if has_val:
+        dval = xgb.DMatrix(x_val, label=y_val, feature_names=list(x_val.columns))
+        evals = [(dval, "val")]
+        # mae is more stable than rmse with the asymmetric custom objective because
+        # asymmetric gradients push predictions negative, inflating squared errors
+        # even when the model is improving on the actual loss.
+        train_params["eval_metric"] = "mae"
     return xgb.train(
-        params,
+        train_params,
         dtrain,
         num_boost_round=num_boost_round,
         obj=_asymmetric_objective(loss_config),
+        evals=evals,
+        early_stopping_rounds=early_stopping_rounds if has_val else None,
         verbose_eval=False,
     )
 
@@ -284,13 +327,16 @@ def _walk_forward_validation(
     params: dict[str, Any],
     num_boost_round: int,
     loss_config: AsymmetricLossConfig,
+    embargo_days: int = 0,
 ) -> list[dict[str, Any]]:
     folds: list[dict[str, Any]] = []
     y_all = df[target_column].to_numpy(dtype=float)
+    embargo_rows = _embargo_rows_from_days(df, embargo_days)
     for fold_number, train_start, train_end, test_start, test_end in _walk_forward_splits(
         len(df),
         fold_count=fold_count,
         min_train_rows=min_train_rows,
+        embargo_rows=embargo_rows,
     ):
         x_train, fold_fill_values = _fit_xgb_frame(df.iloc[train_start:train_end], feature_columns)
         x_test = _transform_xgb_frame(df.iloc[test_start:test_end], feature_columns, fold_fill_values)
@@ -308,6 +354,7 @@ def _walk_forward_validation(
                 "fold": fold_number,
                 "train_start": _row_timestamp(df, train_start),
                 "train_end": _row_timestamp(df, train_end - 1),
+                "embargo_rows": int(test_start - train_end),
                 "test_start": _row_timestamp(df, test_start),
                 "test_end": _row_timestamp(df, test_end - 1),
                 "train_rows": int(train_end - train_start),

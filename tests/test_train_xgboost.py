@@ -27,6 +27,8 @@ def test_train_xgboost_returns_asymmetric_artifact(tmp_path):
         test_fraction=0.25,
         walk_forward_folds=1,
         num_boost_round=5,
+        early_stopping_rounds=3,
+        val_fraction=0.15,
         loss_config=AsymmetricLossConfig(max_multiplier=5.0),
     )
 
@@ -35,11 +37,42 @@ def test_train_xgboost_returns_asymmetric_artifact(tmp_path):
     assert artifact.train_rows == 6
     assert artifact.test_rows == 2
     assert artifact.loss_config["max_multiplier"] == 5.0
-    assert artifact.params["num_boost_round"] == 5
+    assert artifact.params["num_boost_round"] <= 5
     assert "test_top_decile_actual_mean" in artifact.metrics
     assert artifact.metrics["walk_forward_folds"] == 1
     assert artifact.walk_forward[0]["test_rows"] == 2
     assert (tmp_path / "model.json").exists()
+
+
+def test_train_xgboost_early_stopping_reduces_rounds(tmp_path):
+    artifact = train_xgboost(
+        _frame(),
+        model_output=tmp_path / "model.json",
+        min_rows=4,
+        test_fraction=0.25,
+        walk_forward_folds=0,
+        num_boost_round=200,
+        early_stopping_rounds=5,
+        val_fraction=0.20,
+    )
+
+    # Early stopping should have fired well before 200 rounds on this tiny dataset.
+    assert artifact.params["num_boost_round"] <= 200
+
+
+def test_train_xgboost_embargo_reflected_in_walk_forward(tmp_path):
+    artifact = train_xgboost(
+        _frame(),
+        model_output=tmp_path / "model.json",
+        min_rows=4,
+        test_fraction=0.25,
+        walk_forward_folds=1,
+        num_boost_round=5,
+        embargo_days=0,
+        val_fraction=0.0,
+    )
+    # With embargo_days=0 each fold reports embargo_rows=0
+    assert artifact.walk_forward[0]["embargo_rows"] == 0
 
 
 def test_train_xgboost_requires_labeled_rows(tmp_path):

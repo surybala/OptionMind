@@ -179,3 +179,50 @@ def test_candidate_dataset_builder_enforces_actual_entry_window_and_dte():
     )
 
     assert rows == []
+
+
+def test_candidate_dataset_builder_uses_separate_contracts_per_window():
+    """Windows use their own reference close and expiration range."""
+    calls: list[dict] = []
+    provider = FakeProvider()
+    original_get_contracts = provider.get_option_contracts
+
+    def tracking_get_contracts(underlyings, expiration_gte=None, expiration_lte=None, status="inactive", limit=None):
+        calls.append({"expiration_gte": expiration_gte, "expiration_lte": expiration_lte})
+        return original_get_contracts(underlyings, expiration_gte=expiration_gte, expiration_lte=expiration_lte, status=status, limit=limit)
+
+    provider.get_option_contracts = tracking_get_contracts
+    builder = HistoricalCandidateDatasetBuilder(provider, provider, provider)
+
+    # Two windows: [entry, entry+10days] and [entry+10days, entry+20days]
+    builder.build(
+        CandidateDatasetConfig(
+            underlyings=["SPY"],
+            entry_start=provider.entry,
+            entry_end=provider.entry + timedelta(days=20),
+            build_window_days=10,
+            max_contracts_per_underlying=1,
+        )
+    )
+
+    assert len(calls) == 2
+    assert calls[0]["expiration_lte"] < calls[1]["expiration_lte"]
+
+
+def test_candidate_dataset_builder_no_duplicate_rows_across_windows():
+    """Entry bars are not double-counted when windows share a boundary."""
+    provider = FakeProvider()
+    builder = HistoricalCandidateDatasetBuilder(provider, provider, provider)
+
+    rows = builder.build(
+        CandidateDatasetConfig(
+            underlyings=["SPY"],
+            entry_start=provider.entry,
+            entry_end=provider.entry + timedelta(days=1),
+            build_window_days=1,
+            max_contracts_per_underlying=2,
+        )
+    )
+
+    timestamps = [r.entry_timestamp for r in rows]
+    assert len(timestamps) == len(set(str(t) + r.option_symbol for t, r in zip(timestamps, rows)))
