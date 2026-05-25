@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Protocol
 
-from ml.providers.models import EarningsEvent, OptionChainSnapshot, OptionContract, OptionTrade, PriceBar
+from ml.providers.models import DividendEvent, EarningsEvent, EconomicEvent, OptionChainSnapshot, OptionContract, OptionTrade, PriceBar
 
 
 class MarketDataProvider(Protocol):
@@ -85,3 +85,22 @@ class EventDataProvider(Protocol):
         end: date,
     ) -> dict[str, list[EarningsEvent]]:
         """Return earnings calendar events keyed by symbol."""
+
+
+class DividendDataProvider(Protocol):
+    def get_dividends(
+        self,
+        symbols: list[str],
+        start: date,
+        end: date,
+    ) -> dict[str, list[DividendEvent]]:
+        """Return ex-dividend events keyed by symbol."""
+
+
+class EconomicCalendarProvider(Protocol):
+    def get_economic_calendar(
+        self,
+        start: date,
+        end: date,
+    ) -> list[EconomicEvent]:
+        """Return macro calendar events (FOMC, CPI, NFP, GDP, etc.)."""

@@ -1,9 +1,12 @@
 """Provider interfaces and adapters for OptionMind ML data pipelines."""
 
 from ml.providers.alpaca import AlpacaProvider
+from ml.providers.fmp import FMPProvider
 from ml.providers.massive import MassiveProvider
 from ml.providers.models import (
+    DividendEvent,
     EarningsEvent,
+    EconomicEvent,
     Greeks,
     OptionChainSnapshot,
     OptionContract,
@@ -11,6 +14,8 @@ from ml.providers.models import (
     PriceBar,
 )
 from ml.providers.protocols import (
+    DividendDataProvider,
+    EconomicCalendarProvider,
     EventDataProvider,
     MarketDataProvider,
     OptionChainProvider,
@@ -21,8 +26,13 @@ from ml.providers.protocols import (
 
 __all__ = [
     "AlpacaProvider",
+    "DividendDataProvider",
+    "DividendEvent",
     "EarningsEvent",
+    "EconomicCalendarProvider",
+    "EconomicEvent",
     "EventDataProvider",
+    "FMPProvider",
     "Greeks",
     "MarketDataProvider",
     "MassiveProvider",

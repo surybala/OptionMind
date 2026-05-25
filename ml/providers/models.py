@@ -74,6 +74,34 @@ class EarningsEvent:
 
 
 @dataclass(frozen=True)
+class DividendEvent:
+    """Normalized ex-dividend event."""
+
+    symbol: str
+    ex_date: date
+    pay_date: date | None = None
+    declaration_date: date | None = None
+    record_date: date | None = None
+    cash_amount: float | None = None
+    frequency: int | None = None          # payments per year (1, 2, 4, 12)
+    distribution_type: str | None = None  # "CD" regular cash, "SC" special cash, etc.
+    source: str = "unknown"
+
+
+@dataclass(frozen=True)
+class EconomicEvent:
+    """Normalized macroeconomic calendar event (FOMC, CPI, NFP, GDP, etc.)."""
+
+    event_name: str
+    event_date: date
+    country: str = "US"
+    impact: str = "High"   # "Low", "Medium", "High"
+    actual: float | None = None
+    estimate: float | None = None
+    source: str = "unknown"
+
+
+@dataclass(frozen=True)
 class OptionChainSnapshot:
     symbol: str
     underlying: str

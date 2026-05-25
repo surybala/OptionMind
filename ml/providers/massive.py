@@ -12,7 +12,7 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import requests
 
-from ml.providers.models import Greeks, OptionChainSnapshot, OptionContract, OptionTrade, PriceBar
+from ml.providers.models import DividendEvent, Greeks, OptionChainSnapshot, OptionContract, OptionTrade, PriceBar
 
 
 class MassiveApiError(RuntimeError):
@@ -150,6 +150,42 @@ class MassiveProvider:
             )
             for symbol in symbols
         }
+
+    def get_dividends(
+        self,
+        symbols: list[str],
+        start: date,
+        end: date,
+    ) -> dict[str, list[DividendEvent]]:
+        """Return ex-dividend events from Polygon /stocks/v1/dividends."""
+        result: dict[str, list[DividendEvent]] = {s.upper(): [] for s in symbols}
+        for symbol in symbols:
+            params: dict[str, Any] = {
+                "ticker": symbol.upper(),
+                "ex_dividend_date.gte": start.isoformat(),
+                "ex_dividend_date.lte": end.isoformat(),
+                "limit": 1000,
+                "sort": "ex_dividend_date",
+                "order": "asc",
+            }
+            for item in self._get_paginated("/stocks/v1/dividends", params):
+                ex_date = _date_or_none(item.get("ex_dividend_date"))
+                if ex_date is None:
+                    continue
+                result[symbol.upper()].append(
+                    DividendEvent(
+                        symbol=symbol.upper(),
+                        ex_date=ex_date,
+                        pay_date=_date_or_none(item.get("pay_date")),
+                        declaration_date=_date_or_none(item.get("declaration_date")),
+                        record_date=_date_or_none(item.get("record_date")),
+                        cash_amount=item.get("cash_amount"),
+                        frequency=item.get("frequency"),
+                        distribution_type=item.get("distribution_type"),
+                        source=self.source,
+                    )
+                )
+        return result
 
     def get_earnings_calendar(
         self,

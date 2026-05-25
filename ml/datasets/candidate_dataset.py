@@ -12,8 +12,8 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 from ml.labels import ShortOptionLabelConfig, label_short_option_path
-from ml.providers.models import EarningsEvent, OptionContract, PriceBar
-from ml.providers.protocols import EventDataProvider, MarketDataProvider, OptionContractProvider, OptionPriceProvider
+from ml.providers.models import DividendEvent, EarningsEvent, EconomicEvent, OptionContract, PriceBar
+from ml.providers.protocols import DividendDataProvider, EconomicCalendarProvider, EventDataProvider, MarketDataProvider, OptionContractProvider, OptionPriceProvider
 
 
 @dataclass(frozen=True)
@@ -129,9 +129,19 @@ class CandidateDatasetRow:
     vix_above_20: int | None = None
     vix_above_30: int | None = None
 
-    # Event risk
+    # Event risk — earnings (from EventDataProvider)
     days_to_earnings: int | None = None
     has_earnings_in_forward_days: int | None = None
+
+    # Ex-dividend risk (from DividendDataProvider)
+    days_to_ex_dividend: int | None = None
+    has_dividend_in_forward_days: int | None = None
+
+    # Macro event risk — FOMC / CPI / NFP (from EconomicCalendarProvider + FOMC calendar)
+    days_to_fomc: int | None = None
+    has_fomc_in_forward_days: int | None = None
+    days_to_macro_event: int | None = None
+    has_macro_event_in_forward_days: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -146,11 +156,15 @@ class HistoricalCandidateDatasetBuilder:
         contract_provider: OptionContractProvider,
         price_provider: OptionPriceProvider,
         event_provider: EventDataProvider | None = None,
+        dividend_provider: DividendDataProvider | None = None,
+        economic_provider: EconomicCalendarProvider | None = None,
     ) -> None:
         self.market_provider = market_provider
         self.contract_provider = contract_provider
         self.price_provider = price_provider
         self.event_provider = event_provider
+        self.dividend_provider = dividend_provider
+        self.economic_provider = economic_provider
 
     def build(self, config: CandidateDatasetConfig) -> list[CandidateDatasetRow]:
         rows: list[CandidateDatasetRow] = []
@@ -167,14 +181,45 @@ class HistoricalCandidateDatasetBuilder:
         market_history = stock_bars.get(config.market_regime_symbol.upper(), [])
         vix_bars = stock_bars.get(config.vix_symbol.upper(), [])
 
+        event_horizon = (config.entry_end + timedelta(days=config.forward_days)).date()
+
         # Fetch earnings calendar for the full entry window (stub returns {} if not wired).
         earnings_events: dict[str, list[EarningsEvent]] = {}
         if self.event_provider is not None:
             earnings_events = self.event_provider.get_earnings_calendar(
                 config.underlyings,
                 config.entry_start.date(),
-                (config.entry_end + timedelta(days=config.forward_days)).date(),
+                event_horizon,
             )
+
+        # Fetch ex-dividend events (empty dict if provider not wired).
+        dividend_events: dict[str, list[DividendEvent]] = {}
+        if self.dividend_provider is not None:
+            dividend_events = self.dividend_provider.get_dividends(
+                config.underlyings,
+                config.entry_start.date(),
+                event_horizon,
+            )
+
+        # Fetch economic calendar events (FOMC always included via fomc_events helper).
+        # Search 90 days ahead for FOMC/macro so days_to_* always resolves even
+        # when the nearest event falls just outside the 30-day forward window.
+        macro_search_end = (config.entry_end + timedelta(days=90)).date()
+        from ml.providers.calendar import fomc_events as _fomc_events
+        fomc_list: list[EconomicEvent] = _fomc_events(config.entry_start.date(), macro_search_end)
+        macro_events: list[EconomicEvent] = list(fomc_list)
+        if self.economic_provider is not None:
+            macro_events.extend(
+                self.economic_provider.get_economic_calendar(
+                    config.entry_start.date(),
+                    macro_search_end,
+                )
+            )
+        # Deduplicate by (name, date) and sort chronologically
+        macro_events = sorted(
+            {(e.event_name, e.event_date): e for e in macro_events}.values(),
+            key=lambda e: e.event_date,
+        )
 
         for window_start, window_end, is_last_window in _date_windows(
             config.entry_start, config.entry_end, config.build_window_days
@@ -265,6 +310,17 @@ class HistoricalCandidateDatasetBuilder:
                             entry_bar.timestamp,
                             config.forward_days,
                         )
+                        dividend_feat = _dividend_features(
+                            dividend_events.get(underlying.upper(), []),
+                            entry_bar.timestamp,
+                            config.forward_days,
+                        )
+                        macro_feat = _macro_event_features(
+                            fomc_list,
+                            macro_events,
+                            entry_bar.timestamp,
+                            config.forward_days,
+                        )
                         label = label_short_option_path(
                             entry_bar,
                             future_path,
@@ -287,6 +343,8 @@ class HistoricalCandidateDatasetBuilder:
                                 lookback_features,
                                 vix_feat,
                                 event_feat,
+                                dividend_feat,
+                                macro_feat,
                                 label,
                             )
                         )
@@ -387,9 +445,15 @@ def _row_from_label(
     lookback_features: dict[str, Any],
     vix_features: dict[str, Any],
     event_features: dict[str, Any],
+    dividend_features: dict[str, Any],
+    macro_features: dict[str, Any],
     label: Any,
 ) -> CandidateDatasetRow:
-    all_features = {**underlying_features, **market_features, **greeks_features, **lookback_features, **vix_features, **event_features}
+    all_features = {
+        **underlying_features, **market_features, **greeks_features,
+        **lookback_features, **vix_features, **event_features,
+        **dividend_features, **macro_features,
+    }
     missing = _missing_fields(contract, all_features)
     return CandidateDatasetRow(
         entry_timestamp=entry_bar.timestamp,
@@ -465,9 +529,17 @@ def _row_from_label(
         vix_realized_vol_5d=vix_features.get("vix_realized_vol_5d"),
         vix_above_20=vix_features.get("vix_above_20"),
         vix_above_30=vix_features.get("vix_above_30"),
-        # Event risk
+        # Event risk — earnings
         days_to_earnings=event_features.get("days_to_earnings"),
         has_earnings_in_forward_days=event_features.get("has_earnings_in_forward_days"),
+        # Ex-dividend risk
+        days_to_ex_dividend=dividend_features.get("days_to_ex_dividend"),
+        has_dividend_in_forward_days=dividend_features.get("has_dividend_in_forward_days"),
+        # Macro event risk
+        days_to_fomc=macro_features.get("days_to_fomc"),
+        has_fomc_in_forward_days=macro_features.get("has_fomc_in_forward_days"),
+        days_to_macro_event=macro_features.get("days_to_macro_event"),
+        has_macro_event_in_forward_days=macro_features.get("has_macro_event_in_forward_days"),
     )
 
 
@@ -732,6 +804,52 @@ def _event_features(
     return {
         "days_to_earnings": (nearest.report_date - entry_date).days,
         "has_earnings_in_forward_days": int(nearest.report_date <= horizon),
+    }
+
+
+def _dividend_features(
+    dividend_events: list[DividendEvent],
+    entry_timestamp: datetime,
+    forward_days: int,
+) -> dict[str, Any]:
+    """Days to next ex-dividend date and in-window flag."""
+    entry_date = entry_timestamp.date()
+    horizon = entry_date + timedelta(days=forward_days)
+    upcoming = [e for e in dividend_events if e.ex_date > entry_date]
+    if not upcoming:
+        return {"days_to_ex_dividend": None, "has_dividend_in_forward_days": 0}
+    nearest = min(upcoming, key=lambda e: e.ex_date)
+    return {
+        "days_to_ex_dividend": (nearest.ex_date - entry_date).days,
+        "has_dividend_in_forward_days": int(nearest.ex_date <= horizon),
+    }
+
+
+def _macro_event_features(
+    fomc_events: list[EconomicEvent],
+    all_macro_events: list[EconomicEvent],
+    entry_timestamp: datetime,
+    forward_days: int,
+) -> dict[str, Any]:
+    """Days to next FOMC and next CPI/NFP/GDP event, plus in-window flags.
+
+    fomc_events: FOMC-only list (hardcoded calendar).
+    all_macro_events: merged list of FOMC + FMP economic events.
+    """
+    entry_date = entry_timestamp.date()
+    horizon = entry_date + timedelta(days=forward_days)
+
+    upcoming_fomc = [e for e in fomc_events if e.event_date > entry_date]
+    nearest_fomc = min(upcoming_fomc, key=lambda e: e.event_date) if upcoming_fomc else None
+
+    upcoming_macro = [e for e in all_macro_events if e.event_date > entry_date]
+    nearest_macro = min(upcoming_macro, key=lambda e: e.event_date) if upcoming_macro else None
+
+    return {
+        "days_to_fomc": (nearest_fomc.event_date - entry_date).days if nearest_fomc else None,
+        "has_fomc_in_forward_days": int(nearest_fomc is not None and nearest_fomc.event_date <= horizon),
+        "days_to_macro_event": (nearest_macro.event_date - entry_date).days if nearest_macro else None,
+        "has_macro_event_in_forward_days": int(nearest_macro is not None and nearest_macro.event_date <= horizon),
     }
 
 

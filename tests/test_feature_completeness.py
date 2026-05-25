@@ -58,7 +58,7 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 
 from ml.datasets import CandidateDatasetConfig, HistoricalCandidateDatasetBuilder
-from ml.providers.models import EarningsEvent, OptionContract, PriceBar
+from ml.providers.models import DividendEvent, EarningsEvent, EconomicEvent, OptionContract, PriceBar
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +174,38 @@ class FullEventProvider:
         }
 
 
+class FullDividendProvider:
+    """Returns one ex-dividend event within the 30-day forward window."""
+
+    def get_dividends(self, symbols, start, end):
+        return {
+            "SPY": [
+                DividendEvent(
+                    symbol="SPY",
+                    ex_date=date(2026, 6, 7),   # 24 calendar days from entry
+                    cash_amount=1.91,
+                    frequency=4,
+                    source="test",
+                )
+            ]
+        }
+
+
+class FullEconomicProvider:
+    """Returns one CPI event within the 30-day forward window."""
+
+    def get_economic_calendar(self, start, end):
+        return [
+            EconomicEvent(
+                event_name="CPI (MoM)",
+                event_date=date(2026, 6, 10),   # 27 days from entry
+                country="US",
+                impact="High",
+                source="test",
+            )
+        ]
+
+
 # ---------------------------------------------------------------------------
 # Completeness validation test
 # ---------------------------------------------------------------------------
@@ -185,6 +217,8 @@ def complete_row():
     builder = HistoricalCandidateDatasetBuilder(
         provider, provider, provider,
         event_provider=FullEventProvider(),
+        dividend_provider=FullDividendProvider(),
+        economic_provider=FullEconomicProvider(),
     )
     rows = builder.build(
         CandidateDatasetConfig(
@@ -409,6 +443,45 @@ class TestEventSource:
     def test_has_earnings_in_forward_days(self, complete_row):
         # 18 days < 30-day forward window → in window
         assert complete_row.has_earnings_in_forward_days == 1
+
+
+class TestDividendSource:
+    """Source: DividendDataProvider.get_dividends() — Polygon /stocks/v1/dividends
+    or FMP /v3/stock_dividend_calendar.
+    """
+
+    def test_days_to_ex_dividend(self, complete_row):
+        # DividendEvent ex_date 2026-06-07, entry 2026-05-14 → 24 days
+        assert complete_row.days_to_ex_dividend == 24
+
+    def test_has_dividend_in_forward_days(self, complete_row):
+        # 24 days < 30-day forward window → in window
+        assert complete_row.has_dividend_in_forward_days == 1
+
+
+class TestMacroEventSource:
+    """Source: FOMC hardcoded calendar + EconomicCalendarProvider.get_economic_calendar() (FMP).
+
+    FOMC dates are always available via the hardcoded calendar in
+    ml/providers/calendar.py regardless of whether an economic_provider is wired.
+    CPI/NFP require FMPProvider (or another EconomicCalendarProvider).
+    """
+
+    def test_days_to_fomc(self, complete_row):
+        # Next FOMC after 2026-05-14 is 2026-06-17 → 34 days
+        assert complete_row.days_to_fomc == 34
+
+    def test_has_fomc_in_forward_days(self, complete_row):
+        # 34 days > 30-day forward window → NOT in window
+        assert complete_row.has_fomc_in_forward_days == 0
+
+    def test_days_to_macro_event(self, complete_row):
+        # CPI on 2026-06-10 (27 days) is sooner than FOMC on 2026-06-17 (34 days)
+        assert complete_row.days_to_macro_event == 27
+
+    def test_has_macro_event_in_forward_days(self, complete_row):
+        # 27 days < 30-day forward window → in window
+        assert complete_row.has_macro_event_in_forward_days == 1
 
 
 class TestMissingFieldsCompleteness:

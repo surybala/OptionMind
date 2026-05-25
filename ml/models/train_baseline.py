@@ -69,9 +69,17 @@ DEFAULT_FEATURE_COLUMNS = [
     "vix_realized_vol_5d",
     "vix_above_20",
     "vix_above_30",
-    # Event risk
+    # Event risk — earnings
     "days_to_earnings",
     "has_earnings_in_forward_days",
+    # Ex-dividend risk
+    "days_to_ex_dividend",
+    "has_dividend_in_forward_days",
+    # Macro event risk
+    "days_to_fomc",
+    "has_fomc_in_forward_days",
+    "days_to_macro_event",
+    "has_macro_event_in_forward_days",
 ]
 
 
