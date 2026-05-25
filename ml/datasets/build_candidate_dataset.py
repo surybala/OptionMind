@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 from ml.datasets import CandidateDatasetConfig, HistoricalCandidateDatasetBuilder
 from ml.datasets.candidate_dataset import CandidateDatasetRow
-from ml.providers import AlpacaProvider, MassiveProvider
+from ml.providers import AlpacaProvider, FMPProvider, FREDProvider, MassiveProvider
 from ml.storage import ParquetDatasetWriter
 
 
@@ -37,6 +37,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-version", default="candidate_rows_v001")
     parser.add_argument("--output-dir", default="artifacts/datasets")
     parser.add_argument("--jsonl-output", default=None, help="Optional JSONL inspection copy.")
+
+    # Optional event / calendar providers
+    parser.add_argument(
+        "--economic-calendar",
+        default="fred",
+        choices=["fred", "fmp", "none"],
+        help=(
+            "Source for historical macro event dates (CPI, NFP, GDP, PPI). "
+            "'fred' (default) fetches full history in one call per series (requires FRED_API_KEY). "
+            "'fmp' chunks into 90-day windows (requires FMP_API_KEY). "
+            "'none' disables macro events (days_to_macro_event will be null)."
+        ),
+    )
+    parser.add_argument(
+        "--event-provider",
+        default="fmp",
+        choices=["fmp", "none"],
+        help="Source for earnings calendar (requires FMP_API_KEY when set to 'fmp').",
+    )
+    parser.add_argument(
+        "--dividend-provider",
+        default="fmp",
+        choices=["fmp", "none"],
+        help="Source for ex-dividend calendar (requires FMP_API_KEY when set to 'fmp').",
+    )
     return parser.parse_args()
 
 
@@ -45,6 +70,9 @@ def main() -> int:
     load_dotenv()
 
     provider = _provider_from_args(args.provider)
+    event_provider = _event_provider_from_args(args.event_provider)
+    dividend_provider = _dividend_provider_from_args(args.dividend_provider)
+    economic_provider = _economic_provider_from_args(args.economic_calendar)
 
     config = CandidateDatasetConfig(
         underlyings=[item.strip().upper() for item in args.underlyings.split(",") if item.strip()],
@@ -64,7 +92,14 @@ def main() -> int:
         forward_days=args.forward_days,
         build_window_days=args.build_window_days,
     )
-    rows = HistoricalCandidateDatasetBuilder(provider, provider, provider).build(config)
+    rows = HistoricalCandidateDatasetBuilder(
+        provider,
+        provider,
+        provider,
+        event_provider=event_provider,
+        dividend_provider=dividend_provider,
+        economic_provider=economic_provider,
+    ).build(config)
     result = ParquetDatasetWriter(root_dir=args.output_dir).write(
         rows,
         dataset_version=args.dataset_version,
@@ -88,6 +123,9 @@ def main() -> int:
             "build_window_days": config.build_window_days,
             "feature_set_version": "features_v002",
             "label_version": config.label_version,
+            "economic_calendar": args.economic_calendar,
+            "event_provider": args.event_provider,
+            "dividend_provider": args.dividend_provider,
         },
     )
 
@@ -124,6 +162,40 @@ def _provider_from_args(provider_name: str):
     if provider_name == "massive":
         return MassiveProvider.from_env()
     raise ValueError(f"Unsupported provider: {provider_name}")
+
+
+def _event_provider_from_args(name: str):
+    """Return an EventDataProvider or None."""
+    if name == "fmp":
+        return FMPProvider.from_env()
+    if name == "none":
+        return None
+    raise ValueError(f"Unsupported event provider: {name}")
+
+
+def _dividend_provider_from_args(name: str):
+    """Return a DividendDataProvider or None."""
+    if name == "fmp":
+        return FMPProvider.from_env()
+    if name == "none":
+        return None
+    raise ValueError(f"Unsupported dividend provider: {name}")
+
+
+def _economic_provider_from_args(name: str):
+    """Return an EconomicCalendarProvider or None.
+
+    FRED is the recommended choice for historical builds because it returns
+    the full history (back to the 1990s) in a single call per series.
+    FMP is available as a fallback but requires 90-day chunked requests.
+    """
+    if name == "fred":
+        return FREDProvider.from_env()
+    if name == "fmp":
+        return FMPProvider.from_env()
+    if name == "none":
+        return None
+    raise ValueError(f"Unsupported economic calendar provider: {name}")
 
 
 if __name__ == "__main__":

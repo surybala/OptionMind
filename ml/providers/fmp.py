@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 import requests
@@ -137,35 +137,64 @@ class FMPProvider:
     ) -> list[EconomicEvent]:
         """Return high-impact macro events (CPI, NFP, GDP, FOMC decisions, …).
 
-        FMP returns all economic events; we filter to US High-impact events
-        whose names match known high-volatility keywords.
+        FMP's economic calendar endpoint is hard-capped at a **3-month window**
+        per request.  This method automatically chunks multi-year date ranges
+        into sequential 90-day windows so the full requested span is always
+        covered — at the cost of one API call per chunk.
+
+        Results are filtered to US High-impact events whose names match the
+        known high-volatility keyword set.
         """
-        params = {"from": start.isoformat(), "to": end.isoformat(), "apikey": self.api_key}
         events: list[EconomicEvent] = []
-        for item in self._get("/v3/economic_calendar", params):
-            if (item.get("country") or "").upper() != "US":
-                continue
-            if (item.get("impact") or "").lower() != "high":
-                continue
-            event_date = _parse_date((item.get("date") or "")[:10])
-            if event_date is None:
-                continue
-            name = item.get("event", "")
-            # Only keep events related to major macro volatility drivers
-            name_lower = name.lower()
-            if not any(kw in name_lower for kw in _HIGH_IMPACT_KEYWORDS):
-                continue
-            events.append(
-                EconomicEvent(
-                    event_name=name,
-                    event_date=event_date,
-                    country="US",
-                    impact="High",
-                    actual=_float_or_none(item.get("actual")),
-                    estimate=_float_or_none(item.get("estimate")),
-                    source=self.source,
-                )
+        seen: set[tuple[str, date]] = set()  # deduplicate across chunk edges
+
+        chunk_start = start
+        while chunk_start <= end:
+            chunk_end = min(
+                date(chunk_start.year + (chunk_start.month // 10),
+                     (chunk_start.month % 10 + 1) if chunk_start.month < 10 else
+                     (chunk_start.month - 9), 1) - timedelta(days=1),
+                end,
             )
+            # Simpler 90-day chunks that avoid month-arithmetic edge cases.
+            chunk_end = min(chunk_start + timedelta(days=89), end)
+
+            params = {
+                "from": chunk_start.isoformat(),
+                "to": chunk_end.isoformat(),
+                "apikey": self.api_key,
+            }
+            for item in self._get("/v3/economic_calendar", params):
+                if (item.get("country") or "").upper() != "US":
+                    continue
+                if (item.get("impact") or "").lower() != "high":
+                    continue
+                event_date = _parse_date((item.get("date") or "")[:10])
+                if event_date is None:
+                    continue
+                name = item.get("event", "")
+                name_lower = name.lower()
+                if not any(kw in name_lower for kw in _HIGH_IMPACT_KEYWORDS):
+                    continue
+                key = (name, event_date)
+                if key in seen:
+                    continue
+                seen.add(key)
+                events.append(
+                    EconomicEvent(
+                        event_name=name,
+                        event_date=event_date,
+                        country="US",
+                        impact="High",
+                        actual=_float_or_none(item.get("actual")),
+                        estimate=_float_or_none(item.get("estimate")),
+                        source=self.source,
+                    )
+                )
+
+            chunk_start = chunk_end + timedelta(days=1)
+
+        events.sort(key=lambda e: e.event_date)
         return events
 
     # ------------------------------------------------------------------
