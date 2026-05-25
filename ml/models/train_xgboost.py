@@ -13,8 +13,10 @@ import pandas as pd
 
 from ml.datasets.audit_candidate_dataset import load_dataset
 from ml.models.train_baseline import (
+    _artifact_metadata,
     _embargo_rows_from_days,
     _empty_test_metrics,
+    _engineer_features,
     _evaluation_metrics,
     _prefixed_metrics,
     _row_timestamp,
@@ -34,7 +36,7 @@ except Exception:  # pragma: no cover - exercised only in missing native depende
 class AsymmetricLossConfig:
     downside_scale: float = 1000.0
     error_scale: float = 1000.0
-    downside_penalty: float = 1.5
+    downside_penalty: float = 1.4   # reduced from 1.5; 1.8 was too conservative
     overprediction_penalty: float = 1.0
     max_multiplier: float = 30.0
 
@@ -44,6 +46,9 @@ class XGBoostModelArtifact:
     model_type: str
     created_at: str
     target_column: str
+    feature_version: str
+    label_version: str
+    data_range: dict[str, str | None]
     model_path: str
     feature_columns: list[str]
     fill_values: dict[str, float]
@@ -146,6 +151,7 @@ def train_xgboost(
     if "entry_timestamp" in clean:
         clean = clean.sort_values("entry_timestamp")
 
+    clean = _engineer_features(clean)
     feature_columns = _select_feature_columns(clean)
     if not feature_columns:
         raise ValueError("No usable numeric feature columns found")
@@ -202,10 +208,14 @@ def train_xgboost(
 
     model_output.parent.mkdir(parents=True, exist_ok=True)
     booster.save_model(model_output)
+    artifact_metadata = _artifact_metadata(clean)
     return XGBoostModelArtifact(
         model_type="xgboost_asymmetric_v001",
         created_at=datetime.now(UTC).isoformat(),
         target_column=target_column,
+        feature_version=artifact_metadata["feature_version"],
+        label_version=artifact_metadata["label_version"],
+        data_range=artifact_metadata["data_range"],
         model_path=str(model_output),
         feature_columns=feature_columns,
         fill_values=fill_values,

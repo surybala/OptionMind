@@ -43,10 +43,7 @@ DEFAULT_FEATURE_COLUMNS = [
     "market_sma_20_distance_pct",
     "market_above_sma_20",
     "market_volatility_ratio_5d_20d",
-    # Option entry bar
-    "option_entry_open",
-    "option_entry_high",
-    "option_entry_low",
+    # Option entry bar — price level (open/high/low dropped: same-day OHLC, spurious importance)
     "option_entry_price",
     "option_entry_range_pct",
     "option_entry_volume",
@@ -64,7 +61,9 @@ DEFAULT_FEATURE_COLUMNS = [
     "iv_vs_hv5d",
     "iv_vs_hv20d",
     # VIX market regime
-    "vix_close",
+    # vix_close (continuous) replaced by vix_regime (3-level bucket: 0=low <15,
+    # 1=elevated 15-30, 2=high ≥30) to prevent memorising exact index levels.
+    "vix_regime",
     "vix_return_5d",
     "vix_realized_vol_5d",
     "vix_above_20",
@@ -82,12 +81,18 @@ DEFAULT_FEATURE_COLUMNS = [
     "has_macro_event_in_forward_days",
 ]
 
+DEFAULT_FEATURE_VERSION = "features_v003"
+DEFAULT_LABEL_VERSION = "short_option_labels_v001"
+
 
 @dataclass(frozen=True)
 class BaselineModelArtifact:
     model_type: str
     created_at: str
     target_column: str
+    feature_version: str
+    label_version: str
+    data_range: dict[str, str | None]
     feature_columns: list[str]
     intercept: float
     coefficients: dict[str, float]
@@ -151,6 +156,7 @@ def train_baseline(
     if "entry_timestamp" in clean:
         clean = clean.sort_values("entry_timestamp")
 
+    clean = _engineer_features(clean)
     feature_columns = _select_feature_columns(clean)
     if not feature_columns:
         raise ValueError("No usable numeric feature columns found")
@@ -181,10 +187,14 @@ def train_baseline(
     )
     metrics.update(_walk_forward_summary(walk_forward))
 
+    artifact_metadata = _artifact_metadata(clean)
     return BaselineModelArtifact(
         model_type="linear_least_squares_v001",
         created_at=datetime.now(UTC).isoformat(),
         target_column=target_column,
+        feature_version=artifact_metadata["feature_version"],
+        label_version=artifact_metadata["label_version"],
+        data_range=artifact_metadata["data_range"],
         feature_columns=feature_columns,
         intercept=round(float(weights[0]), 10),
         coefficients={
@@ -197,6 +207,59 @@ def train_baseline(
         metrics=metrics,
         walk_forward=walk_forward,
     )
+
+
+def _artifact_metadata(df: pd.DataFrame) -> dict[str, Any]:
+    manifest = df.attrs.get("dataset_manifest") if hasattr(df, "attrs") else None
+    manifest_metadata = dict((manifest or {}).get("metadata") or {})
+    return {
+        "feature_version": str(manifest_metadata.get("feature_set_version") or DEFAULT_FEATURE_VERSION),
+        "label_version": str(manifest_metadata.get("label_version") or _mode_value(df, "label_version") or DEFAULT_LABEL_VERSION),
+        "data_range": _data_range(df, manifest_metadata),
+    }
+
+
+def _mode_value(df: pd.DataFrame, column: str) -> Any | None:
+    if column not in df:
+        return None
+    values = df[column].dropna()
+    if values.empty:
+        return None
+    return values.astype(str).mode().iloc[0]
+
+
+def _data_range(df: pd.DataFrame, manifest_metadata: dict[str, Any]) -> dict[str, str | None]:
+    start = manifest_metadata.get("entry_start")
+    end = manifest_metadata.get("entry_end")
+    if "entry_timestamp" in df and (not start or not end):
+        timestamps = pd.to_datetime(df["entry_timestamp"], errors="coerce").dropna()
+        if not timestamps.empty:
+            start = start or timestamps.min().isoformat()
+            end = end or timestamps.max().isoformat()
+    return {"start": str(start) if start else None, "end": str(end) if end else None}
+
+
+def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Derive engineered features from raw dataset columns.
+
+    Computes ``vix_regime`` — a 3-level ordinal bucket from ``vix_close``:
+      0 = low      (VIX < 15)
+      1 = elevated (15 ≤ VIX < 30)
+      2 = high     (VIX ≥ 30)
+
+    Using a bucketed regime instead of the raw continuous VIX value prevents
+    the model from memorising specific index levels that may not generalise
+    across market periods.  ``vix_close`` is retained in the DataFrame for
+    diagnostics and fill-value computation but is excluded from
+    ``DEFAULT_FEATURE_COLUMNS``.
+    """
+    df = df.copy()
+    if "vix_close" in df.columns:
+        vix = pd.to_numeric(df["vix_close"], errors="coerce")
+        df["vix_regime"] = (
+            (vix >= 15).astype("Int64") + (vix >= 30).astype("Int64")
+        ).astype(float)
+    return df
 
 
 def _select_feature_columns(df: pd.DataFrame) -> list[str]:
