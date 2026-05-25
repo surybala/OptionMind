@@ -131,6 +131,37 @@ def test_parquet_writer_writes_empty_schema_file(tmp_path, monkeypatch):
     assert written == [(result.files[0], ["entry_timestamp", "underlying"], 0)]
 
 
+def test_parquet_writer_can_append_to_existing_manifest(tmp_path, monkeypatch):
+    def fake_to_parquet(self, path, index=False):
+        path.write_text("fake parquet")
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", fake_to_parquet)
+    writer = ParquetDatasetWriter(root_dir=tmp_path)
+
+    first = writer.write(
+        [_row("SPY")],
+        dataset_version="candidate_rows_test",
+        dataset_type="candidate_rows",
+        metadata={"provider": "fake", "chunk": "first"},
+    )
+    second = writer.write(
+        [_row("SPY")],
+        dataset_version="candidate_rows_test",
+        dataset_type="candidate_rows",
+        metadata={"chunk": "second"},
+        append=True,
+    )
+
+    assert first.files[0].name == "part-00000.parquet"
+    assert second.row_count == 2
+    assert len(second.files) == 2
+    assert second.files[-1].name == "part-00001.parquet"
+    manifest = json.loads(second.manifest_path.read_text())
+    assert manifest["row_count"] == 2
+    assert manifest["metadata"]["provider"] == "fake"
+    assert manifest["metadata"]["chunk"] == "second"
+
+
 def test_parquet_writer_explains_missing_engine(tmp_path, monkeypatch):
     def fake_to_parquet(self, path, index=False):
         raise ImportError("missing parquet engine")

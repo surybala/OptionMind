@@ -1,6 +1,7 @@
 """Partitioned Parquet dataset writer."""
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -42,10 +43,13 @@ class ParquetDatasetWriter:
         dataset_type: str,
         schema_columns: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        append: bool = False,
     ) -> DatasetWriteResult:
         normalized = [_normalize_row(row) for row in rows]
         dataset_root = self.root_dir / dataset_type / f"dataset_version={dataset_version}"
         dataset_root.mkdir(parents=True, exist_ok=True)
+        manifest_path = dataset_root / "_manifest.json"
+        existing_manifest = _read_manifest(manifest_path) if append else None
 
         files: list[Path] = []
         if normalized:
@@ -59,22 +63,26 @@ class ParquetDatasetWriter:
             _write_parquet([], part_path, schema_columns=schema_columns)
             files.append(part_path)
 
+        all_files = [Path(path) for path in existing_manifest.files] + files if existing_manifest else files
+        row_count = (existing_manifest.row_count if existing_manifest else 0) + len(normalized)
+        manifest_metadata = dict(existing_manifest.metadata) if existing_manifest else {}
+        manifest_metadata.update(metadata or {})
         manifest = DatasetManifest.create(
             dataset_version=dataset_version,
             dataset_type=dataset_type,
-            row_count=len(normalized),
+            row_count=row_count,
             root_path=dataset_root,
             file_format="parquet",
             partition_columns=self.partition_columns,
-            files=files,
-            metadata=metadata,
+            files=all_files,
+            metadata=manifest_metadata,
         )
-        manifest_path = manifest.write(dataset_root / "_manifest.json")
+        manifest_path = manifest.write(manifest_path)
         return DatasetWriteResult(
             root_path=dataset_root,
             manifest_path=manifest_path,
-            files=files,
-            row_count=len(normalized),
+            files=all_files,
+            row_count=row_count,
             manifest=manifest,
         )
 
@@ -118,3 +126,10 @@ def _write_parquet(rows: list[dict[str, Any]], path: Path, schema_columns: list[
             "Parquet writing requires pyarrow or fastparquet. Install project dependencies "
             "with `pip install -r requirements.txt`."
         ) from exc
+
+
+def _read_manifest(path: Path) -> DatasetManifest | None:
+    if not path.exists():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return DatasetManifest(**payload)

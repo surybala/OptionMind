@@ -142,6 +142,42 @@ def test_get_option_contracts_normalizes_and_paginates_metadata():
     assert p.session.calls[1][0] == "https://api.massive.test/page-2"
 
 
+def test_get_option_contracts_limit_applies_per_underlying():
+    p = provider(
+        [
+            {
+                "results": [
+                    {
+                        "ticker": "O:SPY260626P00500000",
+                        "underlying_ticker": "SPY",
+                        "expiration_date": "2026-06-26",
+                        "strike_price": 500,
+                        "contract_type": "put",
+                    }
+                ]
+            },
+            {
+                "results": [
+                    {
+                        "ticker": "O:QQQ260626P00450000",
+                        "underlying_ticker": "QQQ",
+                        "expiration_date": "2026-06-26",
+                        "strike_price": 450,
+                        "contract_type": "put",
+                    }
+                ]
+            },
+        ]
+    )
+
+    contracts = p.get_option_contracts(["SPY", "QQQ"], status="inactive", limit=1)
+
+    assert [contract.underlying for contract in contracts] == ["SPY", "QQQ"]
+    assert p.session.calls[0][1]["underlying_ticker"] == "SPY"
+    assert p.session.calls[1][1]["underlying_ticker"] == "QQQ"
+    assert p.session.calls[0][1]["limit"] == 1
+
+
 def test_get_option_bars_adds_api_prefix_and_normalizes_keys():
     p = provider(
         [

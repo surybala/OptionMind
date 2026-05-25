@@ -8,7 +8,7 @@ Set environment variable ``FRED_API_KEY`` before use.
 
 Why FRED instead of (or in addition to) FMP for historical data
 ----------------------------------------------------------------
-FMP's ``/v3/economic_calendar`` endpoint has a hard **3-month window limit**
+FMP's ``/stable/economic-calendar`` endpoint has a hard **3-month window limit**
 per request.  For a training dataset spanning 2020–present that means 20+
 sequential API calls under the free tier's 250-call/day budget.
 

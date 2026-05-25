@@ -11,6 +11,12 @@ import pandas as pd
 
 DEFAULT_NUMERIC_COLUMNS = [
     "dte",
+    "spread_width",
+    "entry_credit",
+    "max_profit",
+    "max_loss",
+    "credit_to_width",
+    "return_on_risk",
     "underlying_close",
     "underlying_return_1d",
     "underlying_return_5d",
@@ -70,19 +76,38 @@ def main() -> int:
 
 
 def load_dataset(path: Path) -> pd.DataFrame:
+    manifest = _load_manifest(path)
     if path.is_dir():
         files = sorted(path.rglob("part-*.parquet"))
         if not files:
             raise FileNotFoundError(f"No part-*.parquet files found under {path}")
         frames = [pd.read_parquet(file) for file in files]
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        if manifest:
+            df.attrs["dataset_manifest"] = manifest
+        return df
     if path.suffix == ".jsonl":
         if path.stat().st_size == 0:
-            return pd.DataFrame()
-        return pd.read_json(path, lines=True)
+            df = pd.DataFrame()
+        else:
+            df = pd.read_json(path, lines=True)
+        if manifest:
+            df.attrs["dataset_manifest"] = manifest
+        return df
     if path.suffix == ".parquet":
-        return pd.read_parquet(path)
+        df = pd.read_parquet(path)
+        if manifest:
+            df.attrs["dataset_manifest"] = manifest
+        return df
     raise ValueError(f"Unsupported dataset input: {path}")
+
+
+def _load_manifest(path: Path) -> dict[str, Any] | None:
+    candidates = [path / "_manifest.json"] if path.is_dir() else [path.with_name("_manifest.json")]
+    for candidate in candidates:
+        if candidate.exists():
+            return json.loads(candidate.read_text(encoding="utf-8"))
+    return None
 
 
 def summarize_candidate_dataset(df: pd.DataFrame) -> dict[str, Any]:
@@ -109,6 +134,7 @@ def summarize_candidate_dataset(df: pd.DataFrame) -> dict[str, Any]:
         "market_volatility_regime",
         "exit_reason",
         "label_version",
+        "strategy",
     ):
         if column in df:
             report[f"{column}_counts"] = _value_counts(df[column])

@@ -446,7 +446,7 @@ class TestEventSource:
 
 class TestDividendSource:
     """Source: DividendDataProvider.get_dividends() — Polygon /stocks/v1/dividends
-    or FMP /v3/stock_dividend_calendar.
+    or FMP /stable/dividends-calendar.
     """
 
     def test_days_to_ex_dividend(self, complete_row):

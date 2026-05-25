@@ -70,15 +70,23 @@ The CLI writes partitioned Parquet rows and a manifest to `artifacts/`:
 ```bash
 .venv/bin/python -m ml.datasets.build_candidate_dataset \
   --provider massive \
-  --underlyings SPY \
+  --underlying-preset broad-etfs \
   --entry-start 2025-05-14 \
   --entry-end 2025-05-15 \
   --contract-status inactive \
-  --option-limit 1000 \
+  --strategy-family credit-spreads \
+  --strategy-types PCS,CCS \
+  --spread-widths 5,10,15 \
+  --spread-stop-loss-max-loss-pct 0.80 \
   --max-contracts 300 \
   --max-rows-per-underlying 5000 \
   --max-abs-strike-distance-pct 0.30 \
   --min-forward-bars 2 \
+  --event-provider fmp \
+  --dividend-provider massive \
+  --economic-calendar fred \
+  --volatility-provider fred \
+  --min-output-rows 100000 \
   --dataset-version candidate_rows_massive_v001 \
   --output-dir artifacts/datasets
 ```
@@ -108,17 +116,28 @@ before pricing.
 
 Useful controls:
 
-- `--option-limit`: how many provider contract records to inspect before local filtering.
-- `--max-contracts`: how many locally balanced contracts to price per underlying.
+- `--option-limit`: optional provider contract metadata cap per underlying/window. Omit it for Massive so the builder follows all paginated `next_url` responses before local filtering.
+- `--max-contracts`: how many locally balanced contracts to price per underlying/window after full metadata pagination. The sampler balances across expiration/type buckets and chooses strikes nearest the reference underlying price inside the configured strike-distance band.
 - `--max-rows-per-underlying`: cap output rows for bounded experiments.
 - `--max-abs-strike-distance-pct`: keep strikes near the reference underlying price.
 - `--sample-every-n-bars`: downsample dense intraday/minute entry bars.
 - `--stock-lookback-days`: stock-bar lookback used for returns, volatility, and SMA features, default `60`.
 - `--market-regime-symbol`: benchmark symbol used for broad-market regime features, default `SPY`.
 - `--min-forward-bars`: skip entries without enough future path to label.
+- `--underlying-preset broad-etfs`: expand to the liquid ETF option universe used for premium-selling research.
+- `--strategy-family credit-spreads`: generate executable vertical spread rows instead of naked short-option rows.
+- `--strategy-types PCS,CCS`: restrict generated spreads to put credit spreads and call credit spreads.
+- `--spread-widths`: exact spread widths to pair when both short and long legs exist in the historical chain.
+- `--spread-stop-loss-max-loss-pct`: width-relative stop for spread labels; `0.80` exits when the close debit reaches entry credit plus 80% of max loss.
+- `--event-provider fmp`: enrich rows with FMP earnings-calendar distance/forward-window features.
+- `--dividend-provider massive`: enrich rows with Massive/Polygon ex-dividend dates, useful for ETF distributions. Use `fmp` only when the FMP plan includes historical dividend calendar access.
+- `--min-output-rows`: fail the run if the written corpus is smaller than the target row count.
+- `--append`: append chunk output to an existing dataset version and refresh the manifest, useful for rate-limited multi-batch collection.
 
 Massive API responses are cached by default under `artifacts/cache/massive`
 when using `.env` credentials. Override with `MASSIVE_CACHE_DIR`.
+FMP calendar responses are cached under `artifacts/cache/fmp`; override with
+`FMP_CACHE_DIR`.
 
 ## Quality Report
 

@@ -1,7 +1,14 @@
 import pandas as pd
 import pytest
+import numpy as np
 
-from ml.models.train_xgboost import AsymmetricLossConfig, train_xgboost
+from ml.models.train_xgboost import (
+    AsymmetricLossConfig,
+    _asymmetric_objective,
+    _inverse_transform_target,
+    _transform_target,
+    train_xgboost,
+)
 
 
 def _frame():
@@ -32,7 +39,7 @@ def test_train_xgboost_returns_asymmetric_artifact(tmp_path):
         loss_config=AsymmetricLossConfig(max_multiplier=5.0),
     )
 
-    assert artifact.model_type == "xgboost_asymmetric_v001"
+    assert artifact.model_type == "xgboost_asymmetric_pseudohuber_v002"
     assert artifact.target_column == "expected_pnl"
     assert artifact.train_rows == 6
     assert artifact.test_rows == 2
@@ -78,3 +85,37 @@ def test_train_xgboost_embargo_reflected_in_walk_forward(tmp_path):
 def test_train_xgboost_requires_labeled_rows(tmp_path):
     with pytest.raises(ValueError, match="Need at least"):
         train_xgboost(pd.DataFrame([{"dte": 1, "expected_pnl": None}]), model_output=tmp_path / "model.json")
+
+
+def test_signed_log_target_transform_compresses_tail_losses():
+    config = AsymmetricLossConfig(target_scale=100.0, target_clip=5000.0)
+    raw = np.array([-10_000.0, -1_000.0, 1_000.0])
+
+    transformed = _transform_target(raw, config)
+
+    assert abs(transformed[0]) < abs(transformed[1]) * 2
+    assert _inverse_transform_target(transformed, config)[0] == -5000.0
+    assert _inverse_transform_target(transformed, config)[1] == pytest.approx(-1000.0)
+
+
+def test_asymmetric_pseudo_huber_objective_clips_extreme_gradients():
+    config = AsymmetricLossConfig(
+        target_scale=100.0,
+        target_clip=5000.0,
+        huber_delta=1.0,
+        gradient_clip=2.0,
+        max_multiplier=5.0,
+    )
+    labels = _transform_target(np.array([-10_000.0, -1_000.0, 100.0]), config)
+    predt = _transform_target(np.array([1_000.0, 1_000.0, 100.0]), config)
+
+    class FakeDMatrix:
+        def get_label(self):
+            return labels
+
+    grad, hess = _asymmetric_objective(config)(predt, FakeDMatrix())
+
+    assert np.all(np.isfinite(grad))
+    assert np.all(np.isfinite(hess))
+    assert np.max(np.abs(grad)) <= config.gradient_clip
+    assert np.min(hess) >= config.hessian_floor

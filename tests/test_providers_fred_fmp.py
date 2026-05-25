@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ml.providers.fred import FREDProvider, _RELEASE_CONFIG
-from ml.providers.fmp import FMPProvider
+from ml.providers.fmp import FMPApiError, FMPProvider
 from ml.providers.models import EconomicEvent
 
 
@@ -261,7 +261,7 @@ class TestFMPEconomicCalendarChunking:
         chunks = events_by_chunk
 
         def fake_get(path, params):
-            if path != "/v3/economic_calendar":
+            if path != "/stable/economic-calendar":
                 return []
             idx = call_index["n"]
             call_index["n"] += 1
@@ -376,3 +376,91 @@ class TestFMPEconomicCalendarChunking:
         events = provider.get_economic_calendar(date(2022, 1, 1), date(2022, 4, 30))
         dates = [e.event_date for e in events]
         assert dates == sorted(set(dates))
+
+
+class TestFMPEnrichmentCalendars:
+    def test_earnings_calendar_chunks_and_filters_symbols(self):
+        calls: list[dict] = []
+
+        def fake_get(path, params):
+            calls.append({"path": path, "params": params})
+            return [
+                {"symbol": "SPY", "date": params["from"], "period": "Q1"},
+                {"symbol": "AAPL", "date": params["from"], "period": "Q1"},
+            ]
+
+        provider = FMPProvider(api_key="test")
+        provider._get = fake_get  # type: ignore[method-assign]
+
+        events = provider.get_earnings_calendar(["SPY"], date(2022, 1, 1), date(2022, 7, 20))
+
+        assert len(calls) == 3
+        assert all(call["path"] == "/stable/earnings-calendar" for call in calls)
+        assert set(events) == {"SPY"}
+        assert len(events["SPY"]) == 3
+        assert all(event.source == "fmp" for event in events["SPY"])
+
+    def test_dividend_calendar_chunks_and_filters_symbols(self):
+        calls: list[dict] = []
+
+        def fake_get(path, params):
+            calls.append({"path": path, "params": params})
+            return [
+                {"symbol": "SPY", "date": params["from"], "paymentDate": params["to"], "dividend": "1.23"},
+                {"symbol": "AAPL", "date": params["from"], "dividend": "0.25"},
+            ]
+
+        provider = FMPProvider(api_key="test")
+        provider._get = fake_get  # type: ignore[method-assign]
+
+        events = provider.get_dividends(["SPY"], date(2022, 1, 1), date(2022, 4, 30))
+
+        assert len(calls) == 2
+        assert all(call["path"] == "/stable/dividends-calendar" for call in calls)
+        assert len(events["SPY"]) == 2
+        assert events["SPY"][0].cash_amount == 1.23
+
+    def test_from_env_sets_default_cache_dir(self, monkeypatch):
+        monkeypatch.setenv("FMP_API_KEY", "abc123")
+        monkeypatch.delenv("FMP_CACHE_DIR", raising=False)
+
+        provider = FMPProvider.from_env()
+
+        assert provider.api_key == "abc123"
+        assert str(provider.cache_dir) == "artifacts/cache/fmp"
+
+    def test_get_uses_cache_without_api_key_in_cache_key(self, tmp_path):
+        session = MagicMock()
+        response = MagicMock()
+        response.json.return_value = [{"symbol": "SPY", "date": "2022-01-01"}]
+        response.raise_for_status = MagicMock()
+        session.get.return_value = response
+        provider = FMPProvider(api_key="secret", cache_dir=tmp_path, session=session)
+
+        params = {"from": "2022-01-01", "to": "2022-01-31", "apikey": "secret"}
+        first = provider._get("/stable/earnings-calendar", params)
+        second = provider._get("/stable/earnings-calendar", params)
+
+        assert first == second
+        assert session.get.call_count == 1
+        cache_file = next(tmp_path.glob("*.json"))
+        assert "secret" not in cache_file.read_text(encoding="utf-8")
+
+    def test_request_errors_redact_api_key(self):
+        import requests
+
+        class FailingSession:
+            def get(self, url, params=None, timeout=None):
+                request = requests.Request("GET", url, params=params).prepare()
+                error = requests.ConnectionError("network unavailable")
+                error.request = request
+                raise error
+
+        provider = FMPProvider(api_key="secret", session=FailingSession())
+
+        with pytest.raises(FMPApiError) as exc:
+            provider._get("/stable/earnings-calendar", {"from": "2022-01-01", "apikey": "secret"})
+
+        message = str(exc.value)
+        assert "secret" not in message
+        assert "apikey=%3Credacted%3E" in message or "apikey=<redacted>" in message

@@ -2,6 +2,7 @@ import sqlite3
 import datetime
 import json
 import os
+import hashlib
 
 
 class TradeDatabase:
@@ -46,6 +47,45 @@ class TradeDatabase:
                     FOREIGN KEY(trade_id) REFERENCES trades(id)
                 )
             """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS model_predictions (
+                    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at            TEXT NOT NULL,
+                    model_version         TEXT,
+                    model_type            TEXT,
+                    model_id              TEXT,
+                    symbol                TEXT,
+                    strategy              TEXT,
+                    expiry                TEXT,
+                    option_symbol         TEXT,
+                    features_hash         TEXT NOT NULL,
+                    features_json         TEXT,
+                    score                 REAL,
+                    score_components_json TEXT,
+                    raw_prediction_json   TEXT
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS model_decisions (
+                    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                    prediction_id      INTEGER,
+                    trade_id           INTEGER,
+                    created_at         TEXT NOT NULL,
+                    decision           TEXT NOT NULL,
+                    risk_gate          TEXT,
+                    reject_reason      TEXT,
+                    selected_rank      INTEGER,
+                    quantity           INTEGER,
+                    final_outcome      TEXT,
+                    realized_pnl       REAL,
+                    outcome_recorded_at TEXT,
+                    raw_decision_json  TEXT,
+                    FOREIGN KEY(prediction_id) REFERENCES model_predictions(id),
+                    FOREIGN KEY(trade_id) REFERENCES trades(id)
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_model_decisions_trade_id ON model_decisions(trade_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_model_decisions_prediction_id ON model_decisions(prediction_id)")
             conn.commit()
 
     def _migrate(self):
@@ -78,6 +118,12 @@ class TradeDatabase:
             if 'pnl_verified' not in existing:
                 cursor.execute("ALTER TABLE trades ADD COLUMN pnl_verified INTEGER DEFAULT 0")
                 conn.commit()
+            if 'model_prediction_id' not in existing:
+                cursor.execute("ALTER TABLE trades ADD COLUMN model_prediction_id INTEGER")
+                conn.commit()
+            if 'model_decision_id' not in existing:
+                cursor.execute("ALTER TABLE trades ADD COLUMN model_decision_id INTEGER")
+                conn.commit()
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS trade_orders (
@@ -95,6 +141,46 @@ class TradeDatabase:
                     FOREIGN KEY(trade_id) REFERENCES trades(id)
                 )
             """)
+            conn.commit()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS model_predictions (
+                    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at            TEXT NOT NULL,
+                    model_version         TEXT,
+                    model_type            TEXT,
+                    model_id              TEXT,
+                    symbol                TEXT,
+                    strategy              TEXT,
+                    expiry                TEXT,
+                    option_symbol         TEXT,
+                    features_hash         TEXT NOT NULL,
+                    features_json         TEXT,
+                    score                 REAL,
+                    score_components_json TEXT,
+                    raw_prediction_json   TEXT
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS model_decisions (
+                    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                    prediction_id      INTEGER,
+                    trade_id           INTEGER,
+                    created_at         TEXT NOT NULL,
+                    decision           TEXT NOT NULL,
+                    risk_gate          TEXT,
+                    reject_reason      TEXT,
+                    selected_rank      INTEGER,
+                    quantity           INTEGER,
+                    final_outcome      TEXT,
+                    realized_pnl       REAL,
+                    outcome_recorded_at TEXT,
+                    raw_decision_json  TEXT,
+                    FOREIGN KEY(prediction_id) REFERENCES model_predictions(id),
+                    FOREIGN KEY(trade_id) REFERENCES trades(id)
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_model_decisions_trade_id ON model_decisions(trade_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_model_decisions_prediction_id ON model_decisions(prediction_id)")
             conn.commit()
             cursor.execute(
                 """
@@ -230,6 +316,208 @@ class TradeDatabase:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    # ── Model prediction / decision ledger ────────────────────────────────────
+
+    @staticmethod
+    def _stable_json(value) -> str:
+        return json.dumps(value, sort_keys=True, separators=(',', ':'), default=str)
+
+    @classmethod
+    def _features_for_prediction(cls, prediction: dict) -> dict:
+        explicit = prediction.get('features')
+        if isinstance(explicit, dict):
+            return explicit
+        feature_keys = (
+            'symbol', 'strategy', 'expiry', 'current_price',
+            'short_strike', 'long_strike', 'short_put', 'long_put',
+            'short_call', 'long_call', 'premium', 'width', 'prob_win',
+            'roi', 'annualized_roi', 'estimated_delta',
+            'feature_version', 'label_version',
+        )
+        return {key: prediction.get(key) for key in feature_keys if key in prediction}
+
+    @classmethod
+    def _score_components_for_prediction(cls, prediction: dict) -> dict:
+        explicit = prediction.get('score_components')
+        if isinstance(explicit, dict):
+            return explicit
+        return {
+            key: prediction.get(key)
+            for key in (
+                'model_score', 'score', 'mispricing_score', 'prob_win',
+                'roi', 'annualized_roi', 'max_loss', 'max_loss_multiple',
+            )
+            if key in prediction
+        }
+
+    @classmethod
+    def _prediction_score(cls, prediction: dict) -> float | None:
+        for key in ('model_score', 'score', 'mispricing_score'):
+            if prediction.get(key) is not None:
+                try:
+                    return float(prediction.get(key))
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    def record_model_prediction(self, prediction: dict) -> int:
+        """Append one model prediction fact and return its ledger id."""
+        if prediction.get('model_prediction_id'):
+            return int(prediction['model_prediction_id'])
+        features = self._features_for_prediction(prediction)
+        features_json = self._stable_json(features)
+        features_hash = prediction.get('features_hash') or hashlib.sha256(features_json.encode('utf-8')).hexdigest()
+        score_components = self._score_components_for_prediction(prediction)
+        now = datetime.datetime.now().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO model_predictions (
+                    created_at, model_version, model_type, model_id,
+                    symbol, strategy, expiry, option_symbol,
+                    features_hash, features_json, score,
+                    score_components_json, raw_prediction_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now,
+                    prediction.get('model_version') or prediction.get('model_id') or prediction.get('model_type'),
+                    prediction.get('model_type'),
+                    prediction.get('model_id'),
+                    prediction.get('symbol'),
+                    prediction.get('strategy'),
+                    prediction.get('expiry'),
+                    prediction.get('short_option_symbol') or prediction.get('option_symbol'),
+                    features_hash,
+                    features_json,
+                    self._prediction_score(prediction),
+                    self._stable_json(score_components),
+                    json.dumps(prediction, default=str, sort_keys=True),
+                ),
+            )
+            conn.commit()
+            return cur.lastrowid
+
+    def record_model_decision(
+        self,
+        *,
+        prediction_id: int | None,
+        decision: str,
+        risk_gate: str = None,
+        reject_reason: str = None,
+        selected_rank: int = None,
+        quantity: int = None,
+        trade_id: int = None,
+        raw_decision: dict = None,
+    ) -> int:
+        """Append one model decision fact and return its ledger id."""
+        now = datetime.datetime.now().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO model_decisions (
+                    prediction_id, trade_id, created_at, decision,
+                    risk_gate, reject_reason, selected_rank, quantity,
+                    raw_decision_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    prediction_id,
+                    trade_id,
+                    now,
+                    decision,
+                    risk_gate,
+                    reject_reason,
+                    selected_rank,
+                    int(quantity) if quantity is not None else None,
+                    json.dumps(raw_decision or {}, default=str, sort_keys=True),
+                ),
+            )
+            conn.commit()
+            return cur.lastrowid
+
+    def link_model_decision_to_trade(
+        self,
+        *,
+        trade_id: int,
+        prediction_id: int | None = None,
+        decision_id: int | None = None,
+    ) -> None:
+        """Join a prediction/decision ledger row to the resulting trade."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE trades
+                   SET model_prediction_id = COALESCE(?, model_prediction_id),
+                       model_decision_id = COALESCE(?, model_decision_id)
+                 WHERE id = ?
+                """,
+                (prediction_id, decision_id, trade_id),
+            )
+            if decision_id is not None:
+                conn.execute(
+                    "UPDATE model_decisions SET trade_id = ? WHERE id = ?",
+                    (trade_id, decision_id),
+                )
+            elif prediction_id is not None:
+                conn.execute(
+                    """
+                    UPDATE model_decisions
+                       SET trade_id = ?
+                     WHERE prediction_id = ?
+                       AND trade_id IS NULL
+                       AND decision IN ('SELECTED', 'APPROVED', 'SUBMITTED')
+                    """,
+                    (trade_id, prediction_id),
+                )
+            conn.commit()
+
+    def record_model_outcome_for_trade(
+        self,
+        trade_id: int,
+        *,
+        final_outcome: str,
+        realized_pnl: float = None,
+    ) -> None:
+        """Store the realized outcome on all decisions joined to a trade."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE model_decisions
+                   SET final_outcome = ?,
+                       realized_pnl = ?,
+                       outcome_recorded_at = ?
+                 WHERE trade_id = ?
+                """,
+                (
+                    final_outcome,
+                    realized_pnl,
+                    datetime.datetime.now().isoformat(),
+                    trade_id,
+                ),
+            )
+            conn.commit()
+
+    def get_model_predictions(self, limit: int = 50) -> list[dict]:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM model_predictions ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_model_decisions(self, limit: int = 50) -> list[dict]:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM model_decisions ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     # ── Write ─────────────────────────────────────────────────────────────────
 
     def log_trade(
@@ -244,6 +532,8 @@ class TradeDatabase:
         order_id=None,
         legs=None,
         contracts=1,
+        model_prediction_id=None,
+        model_decision_id=None,
     ):
         """
         Insert a new trade row.
@@ -260,17 +550,25 @@ class TradeDatabase:
                 """
                 INSERT INTO trades
                     (timestamp, symbol, expiry, strike, type, premium, prob_expiry,
-                     status, order_id, legs, contracts)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     status, order_id, legs, contracts, model_prediction_id, model_decision_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     datetime.datetime.now().isoformat(),
                     symbol, expiry, strike, type, premium, prob_expiry,
                     status, order_id, legs_json, int(contracts),
+                    model_prediction_id, model_decision_id,
                 ),
             )
             conn.commit()
-            return cursor.lastrowid
+            trade_id = cursor.lastrowid
+        if model_prediction_id or model_decision_id:
+            self.link_model_decision_to_trade(
+                trade_id=trade_id,
+                prediction_id=model_prediction_id,
+                decision_id=model_decision_id,
+            )
+        return trade_id
 
     def update_status(self, trade_id, status, pnl=0):
         with sqlite3.connect(self.db_path) as conn:
@@ -296,6 +594,12 @@ class TradeDatabase:
                 ),
             )
             conn.commit()
+        if str(status).upper() == 'CLOSED':
+            self.record_model_outcome_for_trade(
+                trade_id,
+                final_outcome='CLOSED',
+                realized_pnl=pnl,
+            )
 
     def confirm_open(self, trade_id: int, order_id: str) -> None:
         """
@@ -350,6 +654,11 @@ class TradeDatabase:
                 (datetime.datetime.now().isoformat(), trade_id),
             )
             conn.commit()
+        self.record_model_outcome_for_trade(
+            trade_id,
+            final_outcome='VOID',
+            realized_pnl=0.0,
+        )
 
     def get_trade(self, trade_id: int) -> dict | None:
         """Return one trade row by id with legs decoded."""
@@ -533,6 +842,11 @@ class TradeDatabase:
                 ),
             )
             conn.commit()
+        self.record_model_outcome_for_trade(
+            trade_id,
+            final_outcome='CLOSED',
+            realized_pnl=pnl,
+        )
 
     def reopen_position(self, trade_id: int) -> None:
         """
@@ -591,6 +905,11 @@ class TradeDatabase:
                 ),
             )
             conn.commit()
+        self.record_model_outcome_for_trade(
+            trade_id,
+            final_outcome='CLOSED',
+            realized_pnl=pnl,
+        )
         if close_order_id:
             role = 'EXPIRE' if str(close_order_id).startswith('EXPIRED') else 'CLOSE'
             synthetic_id = (

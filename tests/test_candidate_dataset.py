@@ -80,6 +80,72 @@ class StopLossProvider(FakeProvider):
         }
 
 
+class CreditSpreadProvider(FakeProvider):
+    def get_option_contracts(
+        self,
+        underlyings,
+        expiration_gte=None,
+        expiration_lte=None,
+        status="inactive",
+        limit=None,
+    ):
+        return [
+            OptionContract("SPY260626P00500000", "SPY", date(2026, 6, 26), 500.0, "put", status=status, source="fake"),
+            OptionContract("SPY260626P00495000", "SPY", date(2026, 6, 26), 495.0, "put", status=status, source="fake"),
+            OptionContract("SPY260626C00510000", "SPY", date(2026, 6, 26), 510.0, "call", status=status, source="fake"),
+            OptionContract("SPY260626C00515000", "SPY", date(2026, 6, 26), 515.0, "call", status=status, source="fake"),
+        ]
+
+    def get_option_bars(self, symbols, start, end, timeframe, limit=None):
+        prices = {
+            "SPY260626P00500000": [4.0, 3.0, 2.2],
+            "SPY260626P00495000": [1.0, 1.0, 0.8],
+            "SPY260626C00510000": [3.0, 2.2, 1.7],
+            "SPY260626C00515000": [1.0, 0.9, 0.7],
+        }
+        return {
+            symbol: [
+                PriceBar(symbol, self.entry + timedelta(days=i), price, price, price, price, volume=100, trade_count=12)
+                for i, price in enumerate(prices[symbol])
+            ]
+            for symbol in symbols
+        }
+
+
+class SeparateVolatilityProvider:
+    def __init__(self, entry):
+        self.entry = entry
+        self.calls = []
+
+    def get_volatility_series(self, symbols, start, end):
+        self.calls.append({"symbols": symbols, "start": start, "end": end})
+        return {
+            "I:VIX": [
+                PriceBar("I:VIX", self.entry - timedelta(days=offset), 22.0, 22.0, 22.0, 22.0)
+                for offset in range(5, 0, -1)
+            ] + [
+                PriceBar("I:VIX", self.entry, 23.0, 23.0, 23.0, 23.0)
+            ]
+        }
+
+
+class NoVixStockProvider(FakeProvider):
+    def get_stock_bars(self, symbols, start, end, timeframe):
+        assert "I:VIX" not in symbols
+        return super().get_stock_bars(symbols, start, end, timeframe)
+
+
+class FailingEnrichmentProvider:
+    def get_earnings_calendar(self, symbols, start, end):
+        raise RuntimeError("earnings unavailable")
+
+    def get_dividends(self, symbols, start, end):
+        raise RuntimeError("dividends unavailable")
+
+    def get_economic_calendar(self, start, end):
+        raise RuntimeError("economic unavailable")
+
+
 def test_candidate_dataset_builder_emits_profit_take_rows():
     provider = FakeProvider()
     builder = HistoricalCandidateDatasetBuilder(provider, provider, provider)
@@ -152,6 +218,57 @@ def test_candidate_dataset_builder_emits_profit_take_rows():
     assert rows[1].exit_reason == "horizon"
 
 
+def test_candidate_dataset_builder_can_fetch_vix_from_volatility_provider():
+    provider = NoVixStockProvider()
+    volatility_provider = SeparateVolatilityProvider(provider.entry)
+    builder = HistoricalCandidateDatasetBuilder(
+        provider,
+        provider,
+        provider,
+        volatility_provider=volatility_provider,
+    )
+
+    rows = builder.build(
+        CandidateDatasetConfig(
+            underlyings=["SPY"],
+            entry_start=provider.entry,
+            entry_end=provider.entry + timedelta(days=1),
+            max_contracts_per_underlying=1,
+        )
+    )
+
+    assert rows[0].vix_close == 23.0
+    assert rows[0].vix_above_20 == 1
+    assert volatility_provider.calls[0]["symbols"] == ["I:VIX"]
+
+
+def test_candidate_dataset_builder_continues_when_enrichment_provider_fails():
+    provider = FakeProvider()
+    failing = FailingEnrichmentProvider()
+    builder = HistoricalCandidateDatasetBuilder(
+        provider,
+        provider,
+        provider,
+        event_provider=failing,
+        dividend_provider=failing,
+        economic_provider=failing,
+    )
+
+    rows = builder.build(
+        CandidateDatasetConfig(
+            underlyings=["SPY"],
+            entry_start=provider.entry,
+            entry_end=provider.entry + timedelta(days=1),
+            max_contracts_per_underlying=1,
+        )
+    )
+
+    assert rows
+    assert rows[0].has_earnings_in_forward_days == 0
+    assert rows[0].has_dividend_in_forward_days == 0
+    assert rows[0].has_fomc_in_forward_days in {0, 1}
+
+
 def test_candidate_dataset_builder_labels_stop_loss_rows():
     provider = StopLossProvider()
     builder = HistoricalCandidateDatasetBuilder(provider, provider, provider)
@@ -171,6 +288,34 @@ def test_candidate_dataset_builder_labels_stop_loss_rows():
     assert rows[0].realized_pnl_per_contract == -430.0
     assert rows[0].expected_pnl == -430.0
     assert rows[0].days_to_exit == 1.0
+
+
+def test_candidate_dataset_builder_emits_credit_spread_rows():
+    provider = CreditSpreadProvider()
+    builder = HistoricalCandidateDatasetBuilder(provider, provider, provider)
+
+    rows = builder.build(
+        CandidateDatasetConfig(
+            underlyings=["SPY"],
+            entry_start=provider.entry,
+            entry_end=provider.entry + timedelta(days=1),
+            strategy_family="credit_spreads",
+            strategy_types=("PCS", "CCS"),
+            spread_widths=(5.0,),
+            max_contracts_per_underlying=None,
+        )
+    )
+
+    strategies = {row.strategy for row in rows}
+    assert strategies == {"PCS", "CCS"}
+    pcs = next(row for row in rows if row.strategy == "PCS")
+    assert pcs.short_option_symbol == "SPY260626P00500000"
+    assert pcs.long_option_symbol == "SPY260626P00495000"
+    assert pcs.entry_credit == 3.0
+    assert pcs.max_loss == 200.0
+    assert pcs.credit_to_width == 0.6
+    assert pcs.expected_pnl == 160.0
+    assert pcs.option_entry_price == pcs.entry_credit
 
 
 def test_candidate_dataset_builder_skips_contracts_without_option_bars():
@@ -218,7 +363,7 @@ def test_candidate_dataset_builder_uses_separate_contracts_per_window():
     original_get_contracts = provider.get_option_contracts
 
     def tracking_get_contracts(underlyings, expiration_gte=None, expiration_lte=None, status="inactive", limit=None):
-        calls.append({"expiration_gte": expiration_gte, "expiration_lte": expiration_lte})
+        calls.append({"expiration_gte": expiration_gte, "expiration_lte": expiration_lte, "limit": limit})
         return original_get_contracts(underlyings, expiration_gte=expiration_gte, expiration_lte=expiration_lte, status=status, limit=limit)
 
     provider.get_option_contracts = tracking_get_contracts
@@ -236,6 +381,7 @@ def test_candidate_dataset_builder_uses_separate_contracts_per_window():
     )
 
     assert len(calls) == 2
+    assert calls[0]["limit"] is None
     assert calls[0]["expiration_lte"] < calls[1]["expiration_lte"]
 
 
@@ -256,6 +402,61 @@ def test_candidate_dataset_builder_no_duplicate_rows_across_windows():
 
     timestamps = [r.entry_timestamp for r in rows]
     assert len(timestamps) == len(set(str(t) + r.option_symbol for t, r in zip(timestamps, rows)))
+
+
+def test_candidate_contract_selection_balances_after_full_metadata_fetch():
+    from ml.datasets.candidate_dataset import _candidate_contracts
+
+    contracts = [
+        OptionContract("SPY260117C00500000", "SPY", date(2026, 1, 17), 500.0, "call", source="fake"),
+        OptionContract("SPY260117P00500000", "SPY", date(2026, 1, 17), 500.0, "put", source="fake"),
+        OptionContract("SPY260220C00500000", "SPY", date(2026, 2, 20), 500.0, "call", source="fake"),
+        OptionContract("SPY260220P00500000", "SPY", date(2026, 2, 20), 500.0, "put", source="fake"),
+        OptionContract("SPY260320C00500000", "SPY", date(2026, 3, 20), 500.0, "call", source="fake"),
+        OptionContract("SPY260320P00500000", "SPY", date(2026, 3, 20), 500.0, "put", source="fake"),
+    ]
+
+    selected = _candidate_contracts(
+        contracts,
+        "SPY",
+        CandidateDatasetConfig(
+            underlyings=["SPY"],
+            entry_start=datetime(2026, 1, 1, tzinfo=UTC),
+            entry_end=datetime(2026, 1, 2, tzinfo=UTC),
+            max_contracts_per_underlying=4,
+        ),
+        reference_close=500.0,
+    )
+
+    assert [contract.expiration for contract in selected] == [
+        date(2026, 1, 17),
+        date(2026, 1, 17),
+        date(2026, 2, 20),
+        date(2026, 2, 20),
+    ]
+
+
+def test_candidate_contract_selection_can_be_uncapped():
+    from ml.datasets.candidate_dataset import _candidate_contracts
+
+    contracts = [
+        OptionContract(f"SPY260117C0050{i}000", "SPY", date(2026, 1, 17), 500.0 + i, "call", source="fake")
+        for i in range(6)
+    ]
+
+    selected = _candidate_contracts(
+        contracts,
+        "SPY",
+        CandidateDatasetConfig(
+            underlyings=["SPY"],
+            entry_start=datetime(2026, 1, 1, tzinfo=UTC),
+            entry_end=datetime(2026, 1, 2, tzinfo=UTC),
+            max_contracts_per_underlying=None,
+        ),
+        reference_close=500.0,
+    )
+
+    assert len(selected) == 6
 
 
 # ---------------------------------------------------------------------------

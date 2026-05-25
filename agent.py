@@ -253,10 +253,13 @@ def _write_scan_audit(
     selected: list[dict],
     rejected: list[dict],
     *,
+    db: TradeDatabase | None = None,
     path: str = SCAN_AUDIT_PATH,
     max_rejected: int = 25,
 ) -> None:
     """Persist latest model-candidate plan/rejections for the dashboard."""
+    if db is not None:
+        _record_model_decisions(db, selected, rejected)
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
     selected_rows = [_pick_audit_row(p, 'SELECTED') for p in selected]
     selected_floor = min(
@@ -283,6 +286,72 @@ def _write_scan_audit(
     }
     with open(path, 'w', encoding='utf-8') as fh:
         json.dump(payload, fh, indent=2, default=str)
+
+
+def _record_model_predictions(db: TradeDatabase, picks: list[dict]) -> None:
+    """Append model prediction facts and stamp ids back onto candidate dicts."""
+    for pick in picks:
+        if pick.get('model_prediction_id'):
+            continue
+        try:
+            pick['model_prediction_id'] = db.record_model_prediction(pick)
+        except Exception as exc:
+            log.warning(
+                "[ledger] Failed to record model prediction for %s %s: %s",
+                pick.get('strategy'), pick.get('symbol'), exc,
+            )
+
+
+def _record_model_decisions(
+    db: TradeDatabase,
+    selected: list[dict],
+    rejected: list[dict],
+) -> None:
+    """Append final pass/reject decisions for the current scan."""
+    for rank, pick in enumerate(selected, start=1):
+        if pick.get('model_decision_id'):
+            continue
+        prediction_id = pick.get('model_prediction_id')
+        if prediction_id is None:
+            try:
+                prediction_id = db.record_model_prediction(pick)
+                pick['model_prediction_id'] = prediction_id
+            except Exception as exc:
+                log.warning("[ledger] Failed to backfill selected prediction: %s", exc)
+                continue
+        try:
+            pick['model_decision_id'] = db.record_model_decision(
+                prediction_id=prediction_id,
+                decision='SELECTED',
+                selected_rank=rank,
+                quantity=pick.get('quantity', 1),
+                raw_decision=pick,
+            )
+        except Exception as exc:
+            log.warning("[ledger] Failed to record selected decision: %s", exc)
+
+    for pick in rejected:
+        if pick.get('model_decision_id'):
+            continue
+        prediction_id = pick.get('model_prediction_id')
+        if prediction_id is None:
+            try:
+                prediction_id = db.record_model_prediction(pick)
+                pick['model_prediction_id'] = prediction_id
+            except Exception as exc:
+                log.warning("[ledger] Failed to backfill rejected prediction: %s", exc)
+                continue
+        try:
+            pick['model_decision_id'] = db.record_model_decision(
+                prediction_id=prediction_id,
+                decision='REJECTED',
+                risk_gate=pick.get('filtered_stage'),
+                reject_reason=pick.get('reject_reason'),
+                quantity=pick.get('quantity', 1),
+                raw_decision=pick,
+            )
+        except Exception as exc:
+            log.warning("[ledger] Failed to record rejected decision: %s", exc)
 
 
 def _max_loss_for_position(pos: dict) -> float:
@@ -1046,6 +1115,8 @@ def _execute_picks(
                 'DRY_RUN', 'DRY_RUN',
                 legs=_legs_from_pick(pick),
                 contracts=pick.get('quantity', 1),
+                model_prediction_id=pick.get('model_prediction_id'),
+                model_decision_id=pick.get('model_decision_id'),
             )
             print(f"OK  (DRY_RUN)")
             results.append((pick, 'DRY_RUN'))
@@ -1056,6 +1127,8 @@ def _execute_picks(
             'PENDING', None,
             legs=_legs_from_pick(pick),
             contracts=pick.get('quantity', 1),
+            model_prediction_id=pick.get('model_prediction_id'),
+            model_decision_id=pick.get('model_decision_id'),
         )
 
         # ── Phase 2: submit to broker ──────────────────────────────────────────
@@ -1609,23 +1682,31 @@ def _run_once(args, headless: bool = False) -> None:
     picks = scanner.get_top_picks(tickers, n=scan_top_n)
     risk_rejected: list[dict] = []
     _annotate_mispricing_scores(picks)
+    _record_model_predictions(db, picks)
 
     if not picks:
         log.info(
             "No model candidates returned. This is expected until ml_scanner.provider "
             "points at a trained inference provider."
         )
-        _write_scan_audit([], [])
+        _write_scan_audit([], [], db=db)
         return
 
     # ── Deduplicate against open positions ───────────────────────────────────
     if open_keys:
-        before = len(picks)
-        picks = [
-            p for p in picks
-            if (p['symbol'], p['strategy']) not in open_keys
-        ]
-        skipped = before - len(picks)
+        kept_picks: list[dict] = []
+        skipped = 0
+        for p in picks:
+            if (p['symbol'], p['strategy']) in open_keys:
+                item = dict(p)
+                item['filtered_stage'] = 'Open-position dedup'
+                item['reject_reason'] = 'Same symbol and strategy already held as an open or pending-close position'
+                item['mispricing_score'] = _mispricing_score_for_pick(item)
+                risk_rejected.append(item)
+                skipped += 1
+            else:
+                kept_picks.append(p)
+        picks = kept_picks
         if skipped:
             log.info(
                 f"Dedup: skipped {skipped} pick(s) already held as open positions."
@@ -1633,6 +1714,7 @@ def _run_once(args, headless: bool = False) -> None:
 
     if not picks:
         log.info("All picks are already held as open positions — nothing new to trade.")
+        _write_scan_audit([], risk_rejected, db=db)
         return
 
     # ── Pre-flight: filter picks whose contracts are inactive on Alpaca ───────
@@ -1648,7 +1730,7 @@ def _run_once(args, headless: bool = False) -> None:
         risk_rejected.append(_pick)
     if not picks:
         log.info("No picks survived pre-flight contract validation — nothing to trade.")
-        _write_scan_audit([], risk_rejected)
+        _write_scan_audit([], risk_rejected, db=db)
         return
 
     before_gate = list(picks)
@@ -1665,7 +1747,7 @@ def _run_once(args, headless: bool = False) -> None:
     )
     if not picks:
         log.info("No picks survived max-loss multiple filtering — nothing to trade.")
-        _write_scan_audit([], risk_rejected)
+        _write_scan_audit([], risk_rejected, db=db)
         return
 
     # ── Apply capital budget (net of already-deployed capital) ───────────────
@@ -1685,7 +1767,7 @@ def _run_once(args, headless: bool = False) -> None:
                 _item['reject_reason'] = 'No remaining capital budget after open positions'
                 _item['mispricing_score'] = _mispricing_score_for_pick(_item)
                 risk_rejected.append(_item)
-            _write_scan_audit([], risk_rejected)
+            _write_scan_audit([], risk_rejected, db=db)
             return
         max_contracts = int(config.get('max_contracts_per_pick', 50))
         picks_sorted  = sorted(picks, key=lambda x: x.get('score', 0.0), reverse=True)
@@ -1700,7 +1782,7 @@ def _run_once(args, headless: bool = False) -> None:
         )
         if not affordable:
             log.info("No picks fit within the remaining capital budget.")
-            _write_scan_audit([], risk_rejected)
+            _write_scan_audit([], risk_rejected, db=db)
             return
         # Equal-split remaining budget across affordable picks, then size each
         per_pick_alloc = remaining_budget / len(affordable)
@@ -1721,7 +1803,7 @@ def _run_once(args, headless: bool = False) -> None:
     picks = _apply_regime_quantity_multiplier(picks, regime)
     if not picks:
         log.info("No picks survived regime quantity throttle — nothing to trade.")
-        _write_scan_audit([], risk_rejected)
+        _write_scan_audit([], risk_rejected, db=db)
         return
     if regime.quantity_multiplier < 1.0:
         log.info(
@@ -1744,7 +1826,7 @@ def _run_once(args, headless: bool = False) -> None:
     )
     if not picks:
         log.info("No picks survived directional exposure caps — nothing to trade.")
-        _write_scan_audit([], risk_rejected)
+        _write_scan_audit([], risk_rejected, db=db)
         return
 
     before_gate = list(picks)
@@ -1760,11 +1842,11 @@ def _run_once(args, headless: bool = False) -> None:
     )
     if not picks:
         log.info("No picks survived portfolio gamma-risk controls — nothing to trade.")
-        _write_scan_audit([], risk_rejected)
+        _write_scan_audit([], risk_rejected, db=db)
         return
 
     _annotate_mispricing_scores(picks)
-    _write_scan_audit(picks, risk_rejected)
+    _write_scan_audit(picks, risk_rejected, db=db)
 
     # ── Print open positions with current P&L ────────────────────────────────
     if open_positions:
@@ -1866,6 +1948,8 @@ def _run_once(args, headless: bool = False) -> None:
             if not new_picks:
                 log.info("[agent] Fresh model request returned no picks — aborting cycle.")
                 return
+            _annotate_mispricing_scores(new_picks)
+            _record_model_predictions(db, new_picks)
             if open_keys:
                 new_picks = [p for p in new_picks
                              if (p['symbol'], p['strategy']) not in open_keys]

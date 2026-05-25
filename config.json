@@ -4,7 +4,9 @@
   "_ml_scanner_note": "Active candidate-generation path. The legacy deterministic scanner is not used by agent.py. Keep enabled=false until a trained model/inference provider is ready.",
   "ml_scanner": {
     "enabled": false,
-    "provider": "",
+    "provider": "src.model_scanner:LivePaperInferenceProvider",
+    "registry_path": "artifacts/model_registry.json",
+    "data_provider": "",
     "top_n": 10,
     "min_score": 0.0
   },

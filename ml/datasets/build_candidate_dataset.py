@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,6 +12,7 @@ from dotenv import load_dotenv
 
 from ml.datasets import CandidateDatasetConfig, HistoricalCandidateDatasetBuilder
 from ml.datasets.candidate_dataset import CandidateDatasetRow
+from ml.datasets.etf_universe import broad_etf_underlyings
 from ml.providers import AlpacaProvider, FMPProvider, FREDProvider, MassiveProvider
 from ml.storage import ParquetDatasetWriter
 
@@ -18,14 +20,24 @@ from ml.storage import ParquetDatasetWriter
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build prototype option candidate dataset rows.")
     parser.add_argument("--provider", default="alpaca", choices=["alpaca", "massive"], help="Provider adapter to use.")
-    parser.add_argument("--underlyings", default="SPY", help="Comma-separated underlying symbols.")
+    parser.add_argument("--underlyings", default="SPY", help="Comma-separated underlying symbols, or 'broad-etfs'.")
+    parser.add_argument(
+        "--underlying-preset",
+        default="custom",
+        choices=["custom", "broad-etfs"],
+        help="Preset universe. Use 'broad-etfs' for liquid ETF premium-selling research.",
+    )
     parser.add_argument("--entry-start", required=True, help="Entry window start, ISO datetime or YYYY-MM-DD.")
     parser.add_argument("--entry-end", required=True, help="Entry window end, ISO datetime or YYYY-MM-DD.")
     parser.add_argument("--contract-status", default="inactive", choices=["active", "inactive"], help="Option contract status.")
+    parser.add_argument("--strategy-family", default="credit-spreads", choices=["short-option", "credit-spreads"], help="Label family to generate.")
+    parser.add_argument("--strategy-types", default="PCS,CCS", help="Comma-separated strategy types for credit-spreads.")
+    parser.add_argument("--spread-widths", default="5,10,15", help="Comma-separated spread widths to pair for PCS/CCS rows.")
+    parser.add_argument("--spread-stop-loss-max-loss-pct", type=float, default=0.80, help="For spreads, stop when close debit reaches entry credit plus this fraction of max loss. Use a negative value to disable.")
     parser.add_argument("--min-dte", type=int, default=7)
     parser.add_argument("--max-dte", type=int, default=45)
-    parser.add_argument("--max-contracts", type=int, default=25)
-    parser.add_argument("--option-limit", type=int, default=100, help="Provider contract metadata page limit before local filtering.")
+    parser.add_argument("--max-contracts", type=int, default=300, help="Max locally selected contracts per underlying/window after full metadata pagination.")
+    parser.add_argument("--option-limit", type=int, default=None, help="Optional provider metadata cap per underlying/window. Omit to fetch all paginated contract metadata before local filtering.")
     parser.add_argument("--max-rows-per-underlying", type=int, default=None)
     parser.add_argument("--max-abs-strike-distance-pct", type=float, default=0.30)
     parser.add_argument("--min-forward-bars", type=int, default=2)
@@ -57,6 +69,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-version", default="candidate_rows_v001")
     parser.add_argument("--output-dir", default="artifacts/datasets")
     parser.add_argument("--jsonl-output", default=None, help="Optional JSONL inspection copy.")
+    parser.add_argument("--append", action="store_true", help="Append rows to an existing dataset version and refresh its manifest.")
+    parser.add_argument(
+        "--min-output-rows",
+        type=int,
+        default=0,
+        help="Fail the build if fewer candidate rows are written. Useful for large corpus runs.",
+    )
 
     # Optional event / calendar providers
     parser.add_argument(
@@ -78,9 +97,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--dividend-provider",
-        default="fmp",
-        choices=["fmp", "none"],
-        help="Source for ex-dividend calendar (requires FMP_API_KEY when set to 'fmp').",
+        default="massive",
+        choices=["massive", "fmp", "none"],
+        help=(
+            "Source for ex-dividend calendar. 'massive' reuses Massive/Polygon dividend data, "
+            "'fmp' requires an FMP plan with historical dividend calendar access."
+        ),
     )
     parser.add_argument(
         "--volatility-provider",
@@ -101,12 +123,15 @@ def main() -> int:
 
     provider = _provider_from_args(args.provider)
     event_provider = _event_provider_from_args(args.event_provider)
-    dividend_provider = _dividend_provider_from_args(args.dividend_provider)
+    dividend_provider = _dividend_provider_from_args(args.dividend_provider, provider)
     economic_provider = _economic_provider_from_args(args.economic_calendar)
     volatility_provider = _volatility_provider_from_args(args.volatility_provider, economic_provider)
 
+    underlyings = _underlyings_from_args(args)
+    underlying_preset = _underlying_preset_from_args(args)
+
     config = CandidateDatasetConfig(
-        underlyings=[item.strip().upper() for item in args.underlyings.split(",") if item.strip()],
+        underlyings=underlyings,
         entry_start=_parse_datetime(args.entry_start),
         entry_end=_parse_datetime(args.entry_end, end_of_day=True),
         min_dte=args.min_dte,
@@ -122,6 +147,11 @@ def main() -> int:
         market_regime_symbol=args.market_regime_symbol.upper(),
         vix_symbol=args.vix_symbol,
         forward_days=args.forward_days,
+        strategy_family=args.strategy_family.replace("-", "_"),
+        strategy_types=tuple(item.strip().upper() for item in args.strategy_types.split(",") if item.strip()),
+        spread_widths=tuple(float(item.strip()) for item in args.spread_widths.split(",") if item.strip()),
+        spread_stop_loss_max_loss_pct=None if args.spread_stop_loss_max_loss_pct < 0 else args.spread_stop_loss_max_loss_pct,
+        label_version="credit_spread_labels_v001" if args.strategy_family == "credit-spreads" else "short_option_labels_v001",
         max_workers=args.max_workers,
         build_window_days=args.build_window_days,
     )
@@ -149,6 +179,8 @@ def main() -> int:
             "max_dte": config.max_dte,
             "forward_days": config.forward_days,
             "max_rows_per_underlying": config.max_rows_per_underlying,
+            "max_contracts_per_underlying": config.max_contracts_per_underlying,
+            "option_limit": config.option_limit,
             "max_abs_strike_distance_pct": config.max_abs_strike_distance_pct,
             "min_forward_bars": config.min_forward_bars,
             "sample_every_n_bars": config.sample_every_n_bars,
@@ -157,11 +189,18 @@ def main() -> int:
             "build_window_days": config.build_window_days,
             "feature_set_version": "features_v002",
             "label_version": config.label_version,
+            "strategy_family": config.strategy_family,
+            "strategy_types": list(config.strategy_types),
+            "spread_widths": list(config.spread_widths),
+            "spread_stop_loss_max_loss_pct": config.spread_stop_loss_max_loss_pct,
             "economic_calendar": args.economic_calendar,
             "event_provider": args.event_provider,
             "dividend_provider": args.dividend_provider,
             "volatility_provider": args.volatility_provider,
+            "underlying_preset": underlying_preset,
+            "min_output_rows": args.min_output_rows,
         },
+        append=args.append,
     )
 
     if args.jsonl_output:
@@ -169,6 +208,12 @@ def main() -> int:
 
     print(f"Wrote {result.row_count} row(s) to {result.root_path}")
     print(f"Manifest: {result.manifest_path}")
+    if args.min_output_rows and result.row_count < args.min_output_rows:
+        print(
+            f"ERROR: dataset produced {result.row_count} row(s), below --min-output-rows={args.min_output_rows}",
+            file=sys.stderr,
+        )
+        return 2
     return 0
 
 
@@ -177,6 +222,18 @@ def _write_jsonl(rows, output: Path) -> None:
     with output.open("w", encoding="utf-8") as fh:
         for row in rows:
             fh.write(json.dumps(asdict(row), default=str) + "\n")
+
+
+def _underlyings_from_args(args: argparse.Namespace) -> list[str]:
+    if _underlying_preset_from_args(args) == "broad-etfs":
+        return broad_etf_underlyings()
+    return [item.strip().upper() for item in args.underlyings.split(",") if item.strip()]
+
+
+def _underlying_preset_from_args(args: argparse.Namespace) -> str:
+    if args.underlying_preset == "broad-etfs" or args.underlyings.strip().lower() in {"broad-etfs", "broad_etfs"}:
+        return "broad-etfs"
+    return "custom"
 
 
 def _parse_datetime(value: str, *, end_of_day: bool = False) -> datetime:
@@ -208,8 +265,12 @@ def _event_provider_from_args(name: str):
     raise ValueError(f"Unsupported event provider: {name}")
 
 
-def _dividend_provider_from_args(name: str):
+def _dividend_provider_from_args(name: str, market_provider=None):
     """Return a DividendDataProvider or None."""
+    if name == "massive":
+        if isinstance(market_provider, MassiveProvider):
+            return market_provider
+        return MassiveProvider.from_env()
     if name == "fmp":
         return FMPProvider.from_env()
     if name == "none":

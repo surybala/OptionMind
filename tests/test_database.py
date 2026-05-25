@@ -243,11 +243,17 @@ class TestOrderLedgerAndPnlSource(unittest.TestCase):
         with sqlite3.connect(self.db_path) as conn:
             cols = {row[1] for row in conn.execute("PRAGMA table_info(trades)")}
             order_cols = {row[1] for row in conn.execute("PRAGMA table_info(trade_orders)")}
+            pred_cols = {row[1] for row in conn.execute("PRAGMA table_info(model_predictions)")}
+            decision_cols = {row[1] for row in conn.execute("PRAGMA table_info(model_decisions)")}
 
         self.assertIn('pnl_source', cols)
         self.assertIn('pnl_verified', cols)
+        self.assertIn('model_prediction_id', cols)
+        self.assertIn('model_decision_id', cols)
         self.assertIn('order_id', order_cols)
         self.assertIn('filled_avg_price', order_cols)
+        self.assertIn('features_hash', pred_cols)
+        self.assertIn('final_outcome', decision_cols)
 
     def test_record_open_and_close_orders_in_ledger(self):
         tid = self.db.log_trade(
@@ -285,6 +291,75 @@ class TestOrderLedgerAndPnlSource(unittest.TestCase):
         self.assertEqual(row['status'], 'CLOSED')
         self.assertEqual(row['pnl_source'], 'ALPACA_FILLS')
         self.assertEqual(row['pnl_verified'], 1)
+
+    def test_model_prediction_decision_links_to_trade_and_outcome(self):
+        pick = {
+            'symbol': 'SPY',
+            'strategy': 'PCS',
+            'expiry': '2026-06-19',
+            'short_strike': 500.0,
+            'long_strike': 495.0,
+            'premium': 0.80,
+            'prob_win': 0.72,
+            'model_id': 'champion_v1',
+            'model_type': 'linear_least_squares_v001',
+            'model_score': 42.5,
+            'features': {'dte': 26, 'option_entry_price': 1.25},
+            'score_components': {'expected_pnl': 42.5, 'prob_win': 0.72},
+        }
+
+        prediction_id = self.db.record_model_prediction(pick)
+        decision_id = self.db.record_model_decision(
+            prediction_id=prediction_id,
+            decision='SELECTED',
+            selected_rank=1,
+            quantity=2,
+            raw_decision=pick,
+        )
+        tid = self.db.log_trade(
+            'SPY', '2026-06-19', 500.0, 'PCS', 0.80, 0.72,
+            status='EXECUTED',
+            legs={'short_strike': 500.0, 'long_strike': 495.0},
+            contracts=2,
+            model_prediction_id=prediction_id,
+            model_decision_id=decision_id,
+        )
+        self.db.confirm_close(tid, pnl=120.0, close_order_id='CLOSE-1')
+
+        trade = self.db.get_trade(tid)
+        prediction = self.db.get_model_predictions()[0]
+        decision = self.db.get_model_decisions()[0]
+
+        self.assertEqual(trade['model_prediction_id'], prediction_id)
+        self.assertEqual(trade['model_decision_id'], decision_id)
+        self.assertEqual(prediction['model_version'], 'champion_v1')
+        self.assertEqual(len(prediction['features_hash']), 64)
+        self.assertEqual(decision['trade_id'], tid)
+        self.assertEqual(decision['final_outcome'], 'CLOSED')
+        self.assertEqual(decision['realized_pnl'], 120.0)
+
+    def test_model_rejection_decision_stores_risk_gate(self):
+        prediction_id = self.db.record_model_prediction({
+            'symbol': 'QQQ',
+            'strategy': 'CCS',
+            'expiry': '2026-06-19',
+            'model_version': 'candidate_v2',
+            'score': -5.0,
+            'features': {'dte': 26},
+        })
+
+        decision_id = self.db.record_model_decision(
+            prediction_id=prediction_id,
+            decision='REJECTED',
+            risk_gate='Portfolio gamma risk',
+            reject_reason='stress cap exceeded',
+        )
+
+        decision = self.db.get_model_decisions()[0]
+        self.assertEqual(decision['id'], decision_id)
+        self.assertEqual(decision['decision'], 'REJECTED')
+        self.assertEqual(decision['risk_gate'], 'Portfolio gamma risk')
+        self.assertEqual(decision['reject_reason'], 'stress cap exceeded')
 
 
 if __name__ == '__main__':

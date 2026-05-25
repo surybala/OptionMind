@@ -36,9 +36,14 @@ except Exception:  # pragma: no cover - exercised only in missing native depende
 class AsymmetricLossConfig:
     downside_scale: float = 1000.0
     error_scale: float = 1000.0
-    downside_penalty: float = 1.4   # reduced from 1.5; 1.8 was too conservative
+    downside_penalty: float = 1.4
     overprediction_penalty: float = 1.0
     max_multiplier: float = 30.0
+    target_scale: float = 100.0
+    target_clip: float = 5000.0
+    huber_delta: float = 1.0
+    gradient_clip: float = 10.0
+    hessian_floor: float = 1e-6
 
 
 @dataclass(frozen=True)
@@ -87,6 +92,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--downside-penalty", type=float, default=1.5)
     parser.add_argument("--overprediction-penalty", type=float, default=1.0)
     parser.add_argument("--max-multiplier", type=float, default=30.0)
+    parser.add_argument("--target-scale", type=float, default=100.0, help="Signed log1p target scaling denominator for the custom objective.")
+    parser.add_argument("--target-clip", type=float, default=5000.0, help="Absolute target cap before signed log1p scaling.")
+    parser.add_argument("--huber-delta", type=float, default=1.0, help="Pseudo-Huber transition point in transformed target units.")
+    parser.add_argument("--gradient-clip", type=float, default=10.0, help="Absolute custom-objective gradient clip.")
+    parser.add_argument("--hessian-floor", type=float, default=1e-6, help="Minimum custom-objective hessian.")
     return parser.parse_args()
 
 
@@ -114,6 +124,11 @@ def main() -> int:
             downside_penalty=args.downside_penalty,
             overprediction_penalty=args.overprediction_penalty,
             max_multiplier=args.max_multiplier,
+            target_scale=args.target_scale,
+            target_clip=args.target_clip,
+            huber_delta=args.huber_delta,
+            gradient_clip=args.gradient_clip,
+            hessian_floor=args.hessian_floor,
         ),
     )
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -157,6 +172,8 @@ def train_xgboost(
         raise ValueError("No usable numeric feature columns found")
 
     y_all = clean[target_column].to_numpy(dtype=float)
+    loss = loss_config or AsymmetricLossConfig()
+    y_model_all = _transform_target(y_all, loss)
     split_index = _split_index(len(clean), test_fraction)
 
     # Hold out the last val_fraction of training rows as a validation set for
@@ -168,15 +185,14 @@ def train_xgboost(
     x_train = _transform_xgb_frame(clean.iloc[:split_index], feature_columns, fill_values)
     x_test = _transform_xgb_frame(clean.iloc[split_index:], feature_columns, fill_values)
 
-    y_train_sub = y_all[:val_split_index]
-    y_val = y_all[val_split_index:split_index]
+    y_train_sub = y_model_all[:val_split_index]
+    y_val = y_model_all[val_split_index:split_index]
     y_train = y_all[:split_index]
     y_test = y_all[split_index:]
 
     model_params = _default_params()
     if params:
         model_params.update(params)
-    loss = loss_config or AsymmetricLossConfig()
     booster = _fit_booster(
         x_train_sub, y_train_sub, model_params, num_boost_round, loss,
         x_val=x_val if len(x_val) > 0 else None,
@@ -184,8 +200,8 @@ def train_xgboost(
         early_stopping_rounds=early_stopping_rounds,
     )
     best_iteration = getattr(booster, "best_iteration", num_boost_round - 1) + 1
-    train_pred = _predict(booster, x_train)
-    test_pred = _predict(booster, x_test) if len(x_test) else np.array([])
+    train_pred = _inverse_transform_target(_predict_model(booster, x_train), loss)
+    test_pred = _inverse_transform_target(_predict_model(booster, x_test), loss) if len(x_test) else np.array([])
 
     metrics = _prefixed_metrics("train", _evaluation_metrics(y_train, train_pred))
     if len(x_test):
@@ -210,7 +226,7 @@ def train_xgboost(
     booster.save_model(model_output)
     artifact_metadata = _artifact_metadata(clean)
     return XGBoostModelArtifact(
-        model_type="xgboost_asymmetric_v001",
+        model_type="xgboost_asymmetric_pseudohuber_v002",
         created_at=datetime.now(UTC).isoformat(),
         target_column=target_column,
         feature_version=artifact_metadata["feature_version"],
@@ -273,15 +289,13 @@ def _fit_booster(
     if has_val:
         dval = xgb.DMatrix(x_val, label=y_val, feature_names=list(x_val.columns))
         evals = [(dval, "val")]
-        # mae is more stable than rmse with the asymmetric custom objective because
-        # asymmetric gradients push predictions negative, inflating squared errors
-        # even when the model is improving on the actual loss.
-        train_params["eval_metric"] = "mae"
+        train_params.pop("eval_metric", None)
     return xgb.train(
         train_params,
         dtrain,
         num_boost_round=num_boost_round,
         obj=_asymmetric_objective(loss_config),
+        custom_metric=_asymmetric_metric(loss_config),
         evals=evals,
         early_stopping_rounds=early_stopping_rounds if has_val else None,
         verbose_eval=False,
@@ -292,15 +306,51 @@ def _asymmetric_objective(config: AsymmetricLossConfig):
     def objective(predt: np.ndarray, dtrain) -> tuple[np.ndarray, np.ndarray]:
         labels = dtrain.get_label()
         residual = predt - labels
-        downside = np.clip((-labels) / config.downside_scale, 0.0, None)
-        optimistic_error = np.clip(residual / config.error_scale, 0.0, None)
-        exponent = config.downside_penalty * downside + config.overprediction_penalty * optimistic_error
-        multiplier = np.where(residual > 0.0, np.exp(np.clip(exponent, 0.0, np.log(config.max_multiplier))), 1.0)
-        grad = multiplier * residual
-        hess = multiplier * (1.0 + np.where(residual > 0.0, config.overprediction_penalty * optimistic_error, 0.0))
-        return grad.astype(float), np.maximum(hess, 1e-6).astype(float)
+        weight = _asymmetric_weight(labels, predt, config)
+        scaled = residual / config.huber_delta
+        denom = np.sqrt(1.0 + np.square(scaled))
+        grad = weight * residual / denom
+        hess = weight / np.power(1.0 + np.square(scaled), 1.5)
+        grad = np.clip(grad, -config.gradient_clip, config.gradient_clip)
+        hess = np.maximum(hess, config.hessian_floor)
+        return grad.astype(float), hess.astype(float)
 
     return objective
+
+
+def _asymmetric_metric(config: AsymmetricLossConfig):
+    def metric(predt: np.ndarray, dtrain) -> tuple[str, float]:
+        labels = dtrain.get_label()
+        residual = predt - labels
+        weight = _asymmetric_weight(labels, predt, config)
+        scaled = residual / config.huber_delta
+        loss = weight * (config.huber_delta**2) * (np.sqrt(1.0 + np.square(scaled)) - 1.0)
+        return "asym_pseudo_huber", float(np.mean(loss))
+
+    return metric
+
+
+def _asymmetric_weight(labels: np.ndarray, predt: np.ndarray, config: AsymmetricLossConfig) -> np.ndarray:
+    raw_labels = _inverse_transform_target(labels, config)
+    raw_pred = _inverse_transform_target(predt, config)
+    downside = np.log1p(np.clip(-raw_labels, 0.0, config.target_clip) / config.downside_scale)
+    optimistic_error = np.log1p(np.clip(raw_pred - raw_labels, 0.0, config.target_clip) / config.error_scale)
+    weight = 1.0 + config.downside_penalty * downside + config.overprediction_penalty * optimistic_error
+    return np.clip(weight, 1.0, config.max_multiplier)
+
+
+def _transform_target(values: np.ndarray, config: AsymmetricLossConfig) -> np.ndarray:
+    clipped = np.clip(values.astype(float), -config.target_clip, config.target_clip)
+    return np.sign(clipped) * np.log1p(np.abs(clipped) / config.target_scale)
+
+
+def _inverse_transform_target(values: np.ndarray, config: AsymmetricLossConfig) -> np.ndarray:
+    clipped = np.clip(values.astype(float), -_transformed_target_cap(config), _transformed_target_cap(config))
+    return np.sign(clipped) * np.expm1(np.abs(clipped)) * config.target_scale
+
+
+def _transformed_target_cap(config: AsymmetricLossConfig) -> float:
+    return float(np.log1p(config.target_clip / config.target_scale))
 
 
 def _fit_xgb_frame(df: pd.DataFrame, feature_columns: list[str]) -> tuple[pd.DataFrame, dict[str, float]]:
@@ -320,7 +370,7 @@ def _transform_xgb_frame(
     return df[feature_columns].apply(pd.to_numeric, errors="coerce").fillna(fill_values)
 
 
-def _predict(booster, frame: pd.DataFrame) -> np.ndarray:
+def _predict_model(booster, frame: pd.DataFrame) -> np.ndarray:
     if len(frame) == 0:
         return np.array([])
     matrix = xgb.DMatrix(frame, feature_names=list(frame.columns))
@@ -341,6 +391,7 @@ def _walk_forward_validation(
 ) -> list[dict[str, Any]]:
     folds: list[dict[str, Any]] = []
     y_all = df[target_column].to_numpy(dtype=float)
+    y_model_all = _transform_target(y_all, loss_config)
     embargo_rows = _embargo_rows_from_days(df, embargo_days)
     for fold_number, train_start, train_end, test_start, test_end in _walk_forward_splits(
         len(df),
@@ -352,12 +403,12 @@ def _walk_forward_validation(
         x_test = _transform_xgb_frame(df.iloc[test_start:test_end], feature_columns, fold_fill_values)
         booster = _fit_booster(
             x_train,
-            y_all[train_start:train_end],
+            y_model_all[train_start:train_end],
             params,
             num_boost_round,
             loss_config,
         )
-        pred = _predict(booster, x_test)
+        pred = _inverse_transform_target(_predict_model(booster, x_test), loss_config)
         fold_metrics = _evaluation_metrics(y_all[test_start:test_end], pred)
         folds.append(
             {

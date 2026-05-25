@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import hashlib
 import json
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -42,6 +43,8 @@ class MassiveProvider:
     timeout: float = 30.0
     adjusted: bool = False
     cache_dir: Path | str | None = None
+    max_retries: int = 5
+    rate_limit_sleep_seconds: float = 65.0
     session: Any = field(default_factory=requests.Session)
 
     source: str = "massive"
@@ -83,7 +86,10 @@ class MassiveProvider:
     ) -> list[OptionContract]:
         expired = str(status).lower() in {"inactive", "expired"}
         contracts: list[OptionContract] = []
-        page_limit = min(limit or 1000, 1000)
+        # Massive caps contract-reference pages at 1000 records. ``limit`` is
+        # a per-underlying safety cap; when it is None we follow every
+        # next_url so sorted early-expiration pages do not starve later chains.
+        page_limit = min(limit, 1000) if limit is not None else 1000
 
         for underlying in underlyings:
             params: dict[str, Any] = {
@@ -100,8 +106,6 @@ class MassiveProvider:
 
             for item in self._get_paginated("/v3/reference/options/contracts", params, limit=limit):
                 contracts.append(_normalize_contract(item, source=self.source))
-                if limit is not None and len(contracts) >= limit:
-                    return contracts
 
         return contracts
 
@@ -138,18 +142,22 @@ class MassiveProvider:
         limit: int | None = None,
     ) -> dict[str, list[PriceBar]]:
         multiplier, timespan = _parse_timeframe(timeframe)
-        return {
-            _normalize_option_symbol(symbol): self._get_aggregate_bars(
-                ticker=_api_option_ticker(symbol),
-                start=start,
-                end=end,
-                multiplier=multiplier,
-                timespan=timespan,
-                normalized_symbol=_normalize_option_symbol(symbol),
-                limit=limit,
-            )
-            for symbol in symbols
-        }
+        result: dict[str, list[PriceBar]] = {}
+        for symbol in symbols:
+            normalized = _normalize_option_symbol(symbol)
+            try:
+                result[normalized] = self._get_aggregate_bars(
+                    ticker=_api_option_ticker(symbol),
+                    start=start,
+                    end=end,
+                    multiplier=multiplier,
+                    timespan=timespan,
+                    normalized_symbol=normalized,
+                    limit=limit,
+                )
+            except MassiveApiError:
+                result[normalized] = []
+        return result
 
     def get_dividends(
         self,
@@ -282,15 +290,20 @@ class MassiveProvider:
         cache_path = self._cache_path(url, query)
         if cache_path is not None and cache_path.exists():
             return json.loads(cache_path.read_text(encoding="utf-8"))
-        try:
-            response = self.session.get(url, params=query, timeout=self.timeout)
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            safe_url = _redact_url(getattr(getattr(exc, "request", None), "url", None) or url)
-            response = getattr(exc, "response", None)
-            status_code = getattr(response, "status_code", None)
-            detail = _redact_text(getattr(response, "text", "") or "")
-            raise MassiveApiError(safe_url, status_code=status_code, detail=detail) from None
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = self.session.get(url, params=query, timeout=self.timeout)
+                response.raise_for_status()
+                break
+            except requests.RequestException as exc:
+                safe_url = _redact_url(getattr(getattr(exc, "request", None), "url", None) or url)
+                response = getattr(exc, "response", None)
+                status_code = getattr(response, "status_code", None)
+                detail = _redact_text(getattr(response, "text", "") or "")
+                if status_code == 429 and attempt < self.max_retries:
+                    time.sleep(_retry_after_seconds(response, self.rate_limit_sleep_seconds))
+                    continue
+                raise MassiveApiError(safe_url, status_code=status_code, detail=detail) from None
         payload = response.json()
         if cache_path is not None:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -304,6 +317,18 @@ class MassiveProvider:
         key = json.dumps({"url": url, "params": safe_params}, sort_keys=True, default=str)
         digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
         return Path(self.cache_dir) / f"{digest}.json"
+
+
+def _retry_after_seconds(response: Any, fallback: float) -> float:
+    if response is None:
+        return fallback
+    raw_value = getattr(response, "headers", {}).get("Retry-After")
+    if raw_value is None:
+        return fallback
+    try:
+        return max(float(raw_value), 0.0)
+    except (TypeError, ValueError):
+        return fallback
 
 
 def _parse_timeframe(value: str) -> tuple[int, str]:

@@ -16,10 +16,22 @@ from ml.datasets.audit_candidate_dataset import load_dataset
 
 DEFAULT_FEATURE_COLUMNS = [
     # Contract structure
+    "is_pcs",
+    "is_ccs",
     "dte",
     "strike",
     "strike_distance_pct",
     "moneyness",
+    # Credit spread structure
+    "spread_width",
+    "entry_credit",
+    "max_profit",
+    "max_loss",
+    "credit_to_width",
+    "long_option_entry_price",
+    "long_option_entry_volume",
+    "long_option_entry_trade_count",
+    "long_option_entry_vwap",
     # Underlying price features
     "underlying_close",
     "underlying_return_1d",
@@ -259,6 +271,10 @@ def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
         df["vix_regime"] = (
             (vix >= 15).astype("Int64") + (vix >= 30).astype("Int64")
         ).astype(float)
+    if "strategy" in df.columns:
+        strategy = df["strategy"].astype(str).str.upper()
+        df["is_pcs"] = (strategy == "PCS").astype(float)
+        df["is_ccs"] = (strategy == "CCS").astype(float)
     return df
 
 

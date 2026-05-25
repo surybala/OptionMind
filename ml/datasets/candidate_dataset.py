@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
-from ml.labels import ShortOptionLabelConfig, label_short_option_path
+from ml.labels import CreditSpreadLabelConfig, ShortOptionLabelConfig, label_credit_spread_path, label_short_option_path
 from ml.providers.models import DividendEvent, EarningsEvent, EconomicEvent, OptionContract, PriceBar
 from ml.providers.protocols import DividendDataProvider, EconomicCalendarProvider, EventDataProvider, MarketDataProvider, OptionContractProvider, OptionPriceProvider, VolatilityDataProvider
 
@@ -26,8 +26,8 @@ class CandidateDatasetConfig:
     min_dte: int = 7
     max_dte: int = 45
     contract_status: str = "inactive"
-    option_limit: int | None = 100
-    max_contracts_per_underlying: int = 25
+    option_limit: int | None = None
+    max_contracts_per_underlying: int | None = 300
     max_rows_per_underlying: int | None = None
     max_abs_strike_distance_pct: float | None = 0.30
     min_forward_bars: int = 2
@@ -41,6 +41,10 @@ class CandidateDatasetConfig:
     stock_timeframe: str = "1Day"
     large_loss_multiple: float = 1.0
     label_version: str = "short_option_labels_v001"
+    strategy_family: str = "short_option"
+    strategy_types: tuple[str, ...] = ("PCS", "CCS")
+    spread_widths: tuple[float, ...] = (5.0, 10.0, 15.0)
+    spread_stop_loss_max_loss_pct: float | None = 0.80
     build_window_days: int = 45
     vix_symbol: str = "I:VIX"
     risk_free_rate: float = 0.045
@@ -106,6 +110,25 @@ class CandidateDatasetRow:
     days_to_exit: float
     label_version: str
     missing_fields: tuple[str, ...] = field(default_factory=tuple)
+
+    # Strategy / spread-specific fields. For legacy short-option rows these
+    # remain None; for PCS/CCS rows option_symbol/option_* describe the short leg.
+    strategy: str | None = None
+    short_option_symbol: str | None = None
+    long_option_symbol: str | None = None
+    short_strike: float | None = None
+    long_strike: float | None = None
+    spread_width: float | None = None
+    entry_credit: float | None = None
+    exit_debit: float | None = None
+    max_profit: float | None = None
+    max_loss: float | None = None
+    credit_to_width: float | None = None
+    return_on_risk: float | None = None
+    long_option_entry_price: float | None = None
+    long_option_entry_volume: float | None = None
+    long_option_entry_trade_count: int | None = None
+    long_option_entry_vwap: float | None = None
 
     # Additional underlying features
     underlying_realized_vol_10d: float | None = None
@@ -215,20 +238,26 @@ class HistoricalCandidateDatasetBuilder:
         earnings_events: dict[str, list[EarningsEvent]] = {}
         if self.event_provider is not None:
             print("Fetching earnings calendar …", flush=True)
-            earnings_events = self.event_provider.get_earnings_calendar(
-                config.underlyings,
-                config.entry_start.date(),
-                event_horizon,
-            )
+            try:
+                earnings_events = self.event_provider.get_earnings_calendar(
+                    config.underlyings,
+                    config.entry_start.date(),
+                    event_horizon,
+                )
+            except Exception as exc:
+                print(f"WARNING: earnings calendar unavailable; continuing without earnings features: {exc}", file=sys.stderr, flush=True)
 
         dividend_events: dict[str, list[DividendEvent]] = {}
         if self.dividend_provider is not None:
             print("Fetching dividend calendar …", flush=True)
-            dividend_events = self.dividend_provider.get_dividends(
-                config.underlyings,
-                config.entry_start.date(),
-                event_horizon,
-            )
+            try:
+                dividend_events = self.dividend_provider.get_dividends(
+                    config.underlyings,
+                    config.entry_start.date(),
+                    event_horizon,
+                )
+            except Exception as exc:
+                print(f"WARNING: dividend calendar unavailable; continuing without dividend features: {exc}", file=sys.stderr, flush=True)
 
         # FOMC always included via hardcoded calendar; 90-day lookahead so
         # days_to_fomc resolves even when the meeting is outside forward_days.
@@ -238,12 +267,15 @@ class HistoricalCandidateDatasetBuilder:
         macro_events: list[EconomicEvent] = list(fomc_list)
         if self.economic_provider is not None:
             print("Fetching economic calendar …", flush=True)
-            macro_events.extend(
-                self.economic_provider.get_economic_calendar(
-                    config.entry_start.date(),
-                    macro_search_end,
+            try:
+                macro_events.extend(
+                    self.economic_provider.get_economic_calendar(
+                        config.entry_start.date(),
+                        macro_search_end,
+                    )
                 )
-            )
+            except Exception as exc:
+                print(f"WARNING: economic calendar unavailable; continuing with FOMC-only macro features: {exc}", file=sys.stderr, flush=True)
         macro_events = sorted(
             {(e.event_name, e.event_date): e for e in macro_events}.values(),
             key=lambda e: e.event_date,
@@ -384,6 +416,24 @@ class HistoricalCandidateDatasetBuilder:
             limit=None,
         )
 
+        if config.strategy_family in {"credit_spreads", "credit-spreads"}:
+            return self._build_credit_spread_rows(
+                contracts,
+                option_bars,
+                window_start,
+                window_end,
+                is_last_window,
+                underlying,
+                config,
+                underlying_history,
+                market_history,
+                vix_bars,
+                earnings_events,
+                dividend_events,
+                fomc_list,
+                macro_events,
+            )
+
         for contract in contracts:
             path = sorted(option_bars.get(contract.symbol, []), key=lambda bar: bar.timestamp)
             if is_last_window:
@@ -467,6 +517,146 @@ class HistoricalCandidateDatasetBuilder:
                 )
         return rows
 
+    def _build_credit_spread_rows(
+        self,
+        contracts: list[OptionContract],
+        option_bars: dict[str, list[PriceBar]],
+        window_start: datetime,
+        window_end: datetime,
+        is_last_window: bool,
+        underlying: str,
+        config: CandidateDatasetConfig,
+        underlying_history: list[PriceBar],
+        market_history: list[PriceBar],
+        vix_bars: list[PriceBar],
+        earnings_events: dict[str, list[EarningsEvent]],
+        dividend_events: dict[str, list[DividendEvent]],
+        fomc_list: list[EconomicEvent],
+        macro_events: list[EconomicEvent],
+    ) -> list[CandidateDatasetRow]:
+        rows: list[CandidateDatasetRow] = []
+        paths = {
+            contract.symbol: sorted(option_bars.get(contract.symbol, []), key=lambda bar: bar.timestamp)
+            for contract in contracts
+        }
+        contracts_by_key = {
+            (contract.expiration, contract.option_type, _strike_key(contract.strike)): contract
+            for contract in contracts
+            if contract.expiration is not None and contract.option_type in {"put", "call"} and contract.strike is not None
+        }
+
+        for short_contract, long_contract, strategy, width in _credit_spread_pairs(
+            contracts,
+            contracts_by_key,
+            config,
+        ):
+            short_path = paths.get(short_contract.symbol, [])
+            long_path = paths.get(long_contract.symbol, [])
+            if not short_path or not long_path:
+                continue
+
+            if is_last_window:
+                window_bars = [b for b in short_path if window_start <= b.timestamp <= config.entry_end]
+            else:
+                window_bars = [b for b in short_path if window_start <= b.timestamp < window_end]
+
+            long_by_time = {bar.timestamp: bar for bar in long_path}
+            for short_entry_bar in window_bars[:: config.sample_every_n_bars]:
+                long_entry_bar = long_by_time.get(short_entry_bar.timestamp)
+                if long_entry_bar is None:
+                    continue
+
+                entry_dte = _dte(short_entry_bar.timestamp, short_contract.expiration)
+                if entry_dte is None or entry_dte < config.min_dte or entry_dte > config.max_dte:
+                    continue
+                future_short_path = [
+                    bar
+                    for bar in short_path
+                    if short_entry_bar.timestamp <= bar.timestamp
+                    <= short_entry_bar.timestamp + timedelta(days=config.forward_days)
+                ]
+                future_long_path = [
+                    bar
+                    for bar in long_path
+                    if short_entry_bar.timestamp <= bar.timestamp
+                    <= short_entry_bar.timestamp + timedelta(days=config.forward_days)
+                ]
+                if min(len(future_short_path), len(future_long_path)) < config.min_forward_bars:
+                    continue
+
+                underlying_features = _underlying_features(underlying_history, short_entry_bar.timestamp)
+                market_features = _market_regime_features(
+                    market_history,
+                    short_entry_bar.timestamp,
+                    config.market_regime_symbol,
+                )
+                greeks_features = _option_greeks_features(
+                    short_entry_bar,
+                    underlying_features["underlying_close"],
+                    short_contract.strike,
+                    short_contract.option_type,
+                    entry_dte,
+                    config.risk_free_rate,
+                    underlying_features["underlying_realized_vol_5d"],
+                    underlying_features["underlying_realized_vol_20d"],
+                )
+                lookback_features = _option_lookback_features(short_path, short_entry_bar.timestamp)
+                vix_feat = _vix_features(vix_bars, short_entry_bar.timestamp)
+                event_feat = _event_features(
+                    earnings_events.get(underlying.upper(), []),
+                    short_entry_bar.timestamp,
+                    config.forward_days,
+                )
+                dividend_feat = _dividend_features(
+                    dividend_events.get(underlying.upper(), []),
+                    short_entry_bar.timestamp,
+                    config.forward_days,
+                )
+                macro_feat = _macro_event_features(
+                    fomc_list,
+                    macro_events,
+                    short_entry_bar.timestamp,
+                    config.forward_days,
+                )
+                try:
+                    label = label_credit_spread_path(
+                        strategy=strategy,
+                        short_entry_bar=short_entry_bar,
+                        long_entry_bar=long_entry_bar,
+                        short_path=future_short_path,
+                        long_path=future_long_path,
+                        spread_width=width,
+                        config=CreditSpreadLabelConfig(
+                            profit_take_pct=config.profit_take_pct,
+                            stop_loss_multiple=config.stop_loss_multiple,
+                            stop_loss_max_loss_pct=config.spread_stop_loss_max_loss_pct,
+                            large_loss_multiple=config.large_loss_multiple,
+                            label_version=config.label_version,
+                        ),
+                    )
+                except ValueError:
+                    continue
+                rows.append(
+                    _row_from_credit_spread_label(
+                        short_contract,
+                        long_contract,
+                        underlying,
+                        short_entry_bar,
+                        long_entry_bar,
+                        entry_dte,
+                        underlying_features,
+                        market_features,
+                        greeks_features,
+                        lookback_features,
+                        vix_feat,
+                        event_feat,
+                        dividend_feat,
+                        macro_feat,
+                        label,
+                    )
+                )
+        return rows
+
 
 def _candidate_contracts(
     contracts: list[OptionContract],
@@ -488,24 +678,97 @@ def _candidate_contracts(
             for contract in filtered
             if abs((float(contract.strike) - reference_close) / reference_close) <= config.max_abs_strike_distance_pct
         ]
-    if reference_close:
-        filtered = sorted(filtered, key=lambda c: abs(float(c.strike or 0.0) - reference_close))
+    if config.max_contracts_per_underlying is None:
+        return sorted(filtered, key=lambda c: _candidate_contract_sort_key(c, reference_close))
+
+    max_contracts = max(0, int(config.max_contracts_per_underlying))
+    if max_contracts == 0:
+        return []
 
     buckets: dict[tuple[date, str], list[OptionContract]] = {}
     for contract in filtered:
         buckets.setdefault((contract.expiration, contract.option_type), []).append(contract)
+    for bucket in buckets.values():
+        bucket.sort(key=lambda c: _candidate_contract_sort_key(c, reference_close))
 
     ordered: list[OptionContract] = []
-    bucket_values = list(buckets.values())
-    while bucket_values and len(ordered) < config.max_contracts_per_underlying:
+    bucket_values = sorted(buckets.values(), key=lambda bucket: _candidate_contract_bucket_sort_key(bucket, reference_close))
+    while bucket_values and len(ordered) < max_contracts:
         next_values: list[list[OptionContract]] = []
         for bucket in bucket_values:
-            if bucket and len(ordered) < config.max_contracts_per_underlying:
+            if bucket and len(ordered) < max_contracts:
                 ordered.append(bucket.pop(0))
             if bucket:
                 next_values.append(bucket)
         bucket_values = next_values
     return ordered
+
+
+def _credit_spread_pairs(
+    contracts: list[OptionContract],
+    contracts_by_key: dict[tuple[date | None, str | None, float], OptionContract],
+    config: CandidateDatasetConfig,
+) -> list[tuple[OptionContract, OptionContract, str, float]]:
+    pairs: list[tuple[OptionContract, OptionContract, str, float]] = []
+    enabled = {strategy.upper() for strategy in config.strategy_types}
+    widths = sorted({round(float(width), 8) for width in config.spread_widths if float(width) > 0.0})
+    if not widths:
+        return pairs
+
+    for short_contract in contracts:
+        if short_contract.expiration is None or short_contract.strike is None:
+            continue
+        short_type = short_contract.option_type
+        if short_type == "put":
+            strategy = "PCS"
+            if strategy not in enabled:
+                continue
+            long_sign = -1.0
+        elif short_type == "call":
+            strategy = "CCS"
+            if strategy not in enabled:
+                continue
+            long_sign = 1.0
+        else:
+            continue
+
+        for width in widths:
+            long_strike = round(float(short_contract.strike) + long_sign * width, 8)
+            long_contract = contracts_by_key.get((short_contract.expiration, short_type, long_strike))
+            if long_contract is None:
+                continue
+            pairs.append((short_contract, long_contract, strategy, width))
+    return pairs
+
+
+def _strike_key(value: float | None) -> float:
+    return round(float(value or 0.0), 8)
+
+
+def _candidate_contract_sort_key(
+    contract: OptionContract,
+    reference_close: float | None,
+) -> tuple[float, float, str]:
+    strike = float(contract.strike or 0.0)
+    strike_distance = abs(strike - reference_close) if reference_close else strike
+    return (strike_distance, strike, contract.symbol)
+
+
+def _candidate_contract_bucket_sort_key(
+    bucket: list[OptionContract],
+    reference_close: float | None,
+) -> tuple[float, date, int, float, str]:
+    first = bucket[0]
+    strike = float(first.strike or 0.0)
+    strike_distance = abs(strike - reference_close) if reference_close else strike
+    type_order = {"put": 0, "call": 1}.get(str(first.option_type), 2)
+    return (
+        strike_distance,
+        first.expiration or date.max,
+        type_order,
+        strike,
+        first.symbol,
+    )
 
 
 def _stock_symbols(config: CandidateDatasetConfig) -> list[str]:
@@ -656,6 +919,126 @@ def _row_from_label(
         days_to_ex_dividend=dividend_features.get("days_to_ex_dividend"),
         has_dividend_in_forward_days=dividend_features.get("has_dividend_in_forward_days"),
         # Macro event risk
+        days_to_fomc=macro_features.get("days_to_fomc"),
+        has_fomc_in_forward_days=macro_features.get("has_fomc_in_forward_days"),
+        days_to_macro_event=macro_features.get("days_to_macro_event"),
+        has_macro_event_in_forward_days=macro_features.get("has_macro_event_in_forward_days"),
+    )
+
+
+def _row_from_credit_spread_label(
+    short_contract: OptionContract,
+    long_contract: OptionContract,
+    underlying: str,
+    short_entry_bar: PriceBar,
+    long_entry_bar: PriceBar,
+    entry_dte: int,
+    underlying_features: dict[str, Any],
+    market_features: dict[str, Any],
+    greeks_features: dict[str, Any],
+    lookback_features: dict[str, Any],
+    vix_features: dict[str, Any],
+    event_features: dict[str, Any],
+    dividend_features: dict[str, Any],
+    macro_features: dict[str, Any],
+    label: Any,
+) -> CandidateDatasetRow:
+    all_features = {
+        **underlying_features, **market_features, **greeks_features,
+        **lookback_features, **vix_features, **event_features,
+        **dividend_features, **macro_features,
+    }
+    missing = _missing_fields(short_contract, all_features)
+    return CandidateDatasetRow(
+        entry_timestamp=short_entry_bar.timestamp,
+        underlying=underlying,
+        option_symbol=short_contract.symbol,
+        option_type=short_contract.option_type,
+        strike=short_contract.strike,
+        expiration=short_contract.expiration,
+        dte=entry_dte,
+        source=short_contract.source,
+        underlying_close=underlying_features["underlying_close"],
+        underlying_return_1d=underlying_features["underlying_return_1d"],
+        underlying_return_5d=underlying_features["underlying_return_5d"],
+        underlying_return_20d=underlying_features["underlying_return_20d"],
+        underlying_range_pct=underlying_features["underlying_range_pct"],
+        underlying_realized_vol_5d=underlying_features["underlying_realized_vol_5d"],
+        underlying_realized_vol_20d=underlying_features["underlying_realized_vol_20d"],
+        underlying_sma_20_distance_pct=underlying_features["underlying_sma_20_distance_pct"],
+        underlying_above_sma_20=underlying_features["underlying_above_sma_20"],
+        underlying_volatility_ratio_5d_20d=underlying_features["underlying_volatility_ratio_5d_20d"],
+        underlying_volume=underlying_features["underlying_volume"],
+        strike_distance_pct=_strike_distance_pct(short_contract.strike, underlying_features["underlying_close"]),
+        moneyness=_moneyness(short_contract.strike, underlying_features["underlying_close"]),
+        market_regime_symbol=market_features["market_regime_symbol"],
+        market_return_5d=market_features["market_return_5d"],
+        market_return_20d=market_features["market_return_20d"],
+        market_realized_vol_5d=market_features["market_realized_vol_5d"],
+        market_realized_vol_20d=market_features["market_realized_vol_20d"],
+        market_sma_20_distance_pct=market_features["market_sma_20_distance_pct"],
+        market_above_sma_20=market_features["market_above_sma_20"],
+        market_volatility_ratio_5d_20d=market_features["market_volatility_ratio_5d_20d"],
+        market_trend_regime=market_features["market_trend_regime"],
+        market_volatility_regime=market_features["market_volatility_regime"],
+        option_entry_open=float(short_entry_bar.open),
+        option_entry_high=float(short_entry_bar.high),
+        option_entry_low=float(short_entry_bar.low),
+        option_entry_price=label.entry_credit,
+        option_entry_range_pct=_range_pct(short_entry_bar.high, short_entry_bar.low, short_entry_bar.close),
+        option_entry_volume=short_entry_bar.volume,
+        option_entry_trade_count=short_entry_bar.trade_count,
+        option_entry_vwap=short_entry_bar.vwap,
+        option_exit_price=label.exit_debit,
+        exit_timestamp=label.exit_timestamp,
+        exit_reason=label.exit_reason,
+        expected_pnl=label.expected_pnl,
+        realized_pnl_per_contract=label.realized_pnl_per_contract,
+        profit_label=label.profit_label,
+        stop_loss_hit=label.stop_loss_hit,
+        large_loss_label=label.large_loss_label,
+        max_adverse_excursion=label.max_adverse_excursion,
+        max_favorable_excursion=label.max_favorable_excursion,
+        days_to_exit=label.days_to_exit,
+        label_version=label.label_version,
+        missing_fields=tuple(missing),
+        strategy=label.strategy,
+        short_option_symbol=short_contract.symbol,
+        long_option_symbol=long_contract.symbol,
+        short_strike=short_contract.strike,
+        long_strike=long_contract.strike,
+        spread_width=label.spread_width,
+        entry_credit=label.entry_credit,
+        exit_debit=label.exit_debit,
+        max_profit=label.max_profit,
+        max_loss=label.max_loss,
+        credit_to_width=round(label.entry_credit / label.spread_width, 8) if label.spread_width else None,
+        return_on_risk=label.return_on_risk,
+        long_option_entry_price=float(long_entry_bar.close),
+        long_option_entry_volume=long_entry_bar.volume,
+        long_option_entry_trade_count=long_entry_bar.trade_count,
+        long_option_entry_vwap=long_entry_bar.vwap,
+        underlying_realized_vol_10d=underlying_features.get("underlying_realized_vol_10d"),
+        underlying_return_3d=underlying_features.get("underlying_return_3d"),
+        underlying_skew_5d=underlying_features.get("underlying_skew_5d"),
+        implied_volatility=greeks_features.get("implied_volatility"),
+        option_delta=greeks_features.get("option_delta"),
+        option_gamma=greeks_features.get("option_gamma"),
+        option_theta=greeks_features.get("option_theta"),
+        option_vega=greeks_features.get("option_vega"),
+        iv_vs_hv5d=greeks_features.get("iv_vs_hv5d"),
+        iv_vs_hv20d=greeks_features.get("iv_vs_hv20d"),
+        option_volume_5d_avg=lookback_features.get("option_volume_5d_avg"),
+        option_trade_count_5d_avg=lookback_features.get("option_trade_count_5d_avg"),
+        vix_close=vix_features.get("vix_close"),
+        vix_return_5d=vix_features.get("vix_return_5d"),
+        vix_realized_vol_5d=vix_features.get("vix_realized_vol_5d"),
+        vix_above_20=vix_features.get("vix_above_20"),
+        vix_above_30=vix_features.get("vix_above_30"),
+        days_to_earnings=event_features.get("days_to_earnings"),
+        has_earnings_in_forward_days=event_features.get("has_earnings_in_forward_days"),
+        days_to_ex_dividend=dividend_features.get("days_to_ex_dividend"),
+        has_dividend_in_forward_days=dividend_features.get("has_dividend_in_forward_days"),
         days_to_fomc=macro_features.get("days_to_fomc"),
         has_fomc_in_forward_days=macro_features.get("has_fomc_in_forward_days"),
         days_to_macro_event=macro_features.get("days_to_macro_event"),
