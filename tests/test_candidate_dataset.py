@@ -93,9 +93,20 @@ def test_candidate_dataset_builder_emits_profit_take_rows():
     assert row.underlying_close == 504
     assert row.underlying_return_1d == 0.008
     assert row.underlying_return_5d == 0.01612903
+    assert row.underlying_return_20d == 0.04781705
     assert row.underlying_realized_vol_5d is not None
+    assert row.underlying_sma_20_distance_pct == 0.0251195
+    assert row.underlying_above_sma_20 == 1
+    assert row.underlying_volatility_ratio_5d_20d is not None
     assert row.strike_distance_pct == -0.00793651
     assert row.moneyness == 1.008
+    assert row.market_regime_symbol == "SPY"
+    assert row.market_return_5d == 0.01612903
+    assert row.market_return_20d == 0.04781705
+    assert row.market_sma_20_distance_pct == 0.0251195
+    assert row.market_above_sma_20 == 1
+    assert row.market_trend_regime == "uptrend"
+    assert row.market_volatility_regime is not None
     assert row.option_entry_range_pct == 0.075
     assert row.option_entry_trade_count == 12
     assert row.option_entry_vwap == 4.05

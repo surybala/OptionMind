@@ -29,7 +29,8 @@ class CandidateDatasetConfig:
     max_abs_strike_distance_pct: float | None = 0.30
     min_forward_bars: int = 2
     sample_every_n_bars: int = 1
-    stock_lookback_days: int = 30
+    stock_lookback_days: int = 60
+    market_regime_symbol: str = "SPY"
     forward_days: int = 30
     profit_take_pct: float = 0.50
     stop_loss_multiple: float = 2.0
@@ -53,12 +54,27 @@ class CandidateDatasetRow:
     underlying_close: float | None
     underlying_return_1d: float | None
     underlying_return_5d: float | None
+    underlying_return_20d: float | None
     underlying_range_pct: float | None
     underlying_realized_vol_5d: float | None
     underlying_realized_vol_20d: float | None
+    underlying_sma_20_distance_pct: float | None
+    underlying_above_sma_20: int | None
+    underlying_volatility_ratio_5d_20d: float | None
     underlying_volume: float | None
     strike_distance_pct: float | None
     moneyness: float | None
+
+    market_regime_symbol: str | None
+    market_return_5d: float | None
+    market_return_20d: float | None
+    market_realized_vol_5d: float | None
+    market_realized_vol_20d: float | None
+    market_sma_20_distance_pct: float | None
+    market_above_sma_20: int | None
+    market_volatility_ratio_5d_20d: float | None
+    market_trend_regime: str | None
+    market_volatility_regime: str | None
 
     option_entry_open: float
     option_entry_high: float
@@ -103,12 +119,14 @@ class HistoricalCandidateDatasetBuilder:
     def build(self, config: CandidateDatasetConfig) -> list[CandidateDatasetRow]:
         rows: list[CandidateDatasetRow] = []
         stock_start = config.entry_start - timedelta(days=config.stock_lookback_days)
+        stock_symbols = _stock_symbols(config)
         stock_bars = self.market_provider.get_stock_bars(
-            config.underlyings,
+            stock_symbols,
             stock_start,
             config.entry_end,
             config.stock_timeframe,
         )
+        market_history = stock_bars.get(config.market_regime_symbol.upper(), [])
 
         for underlying in config.underlyings:
             underlying_row_count = 0
@@ -154,6 +172,11 @@ class HistoricalCandidateDatasetBuilder:
                     if len(future_path) < config.min_forward_bars:
                         continue
                     underlying_features = _underlying_features(underlying_history, entry_bar.timestamp)
+                    market_features = _market_regime_features(
+                        market_history,
+                        entry_bar.timestamp,
+                        config.market_regime_symbol,
+                    )
                     label = label_short_option_path(
                         entry_bar,
                         future_path,
@@ -164,7 +187,17 @@ class HistoricalCandidateDatasetBuilder:
                             label_version=config.label_version,
                         ),
                     )
-                    rows.append(_row_from_label(contract, underlying, entry_bar, entry_dte, underlying_features, label))
+                    rows.append(
+                        _row_from_label(
+                            contract,
+                            underlying,
+                            entry_bar,
+                            entry_dte,
+                            underlying_features,
+                            market_features,
+                            label,
+                        )
+                    )
                     underlying_row_count += 1
                     if (
                         config.max_rows_per_underlying is not None
@@ -219,6 +252,15 @@ def _candidate_contracts(
     return ordered
 
 
+def _stock_symbols(config: CandidateDatasetConfig) -> list[str]:
+    symbols: list[str] = []
+    for symbol in [*config.underlyings, config.market_regime_symbol]:
+        normalized = symbol.upper()
+        if normalized not in symbols:
+            symbols.append(normalized)
+    return symbols
+
+
 def _entry_bars(path: list[PriceBar], config: CandidateDatasetConfig) -> list[PriceBar]:
     if config.sample_every_n_bars <= 0:
         raise ValueError("sample_every_n_bars must be positive")
@@ -231,10 +273,12 @@ def _row_from_label(
     underlying: str,
     entry_bar: PriceBar,
     entry_dte: int,
-    underlying_features: dict[str, float | None],
+    underlying_features: dict[str, Any],
+    market_features: dict[str, Any],
     label: Any,
 ) -> CandidateDatasetRow:
-    missing = _missing_fields(contract, underlying_features)
+    features = {**underlying_features, **market_features}
+    missing = _missing_fields(contract, features)
     return CandidateDatasetRow(
         entry_timestamp=entry_bar.timestamp,
         underlying=underlying,
@@ -247,12 +291,26 @@ def _row_from_label(
         underlying_close=underlying_features["underlying_close"],
         underlying_return_1d=underlying_features["underlying_return_1d"],
         underlying_return_5d=underlying_features["underlying_return_5d"],
+        underlying_return_20d=underlying_features["underlying_return_20d"],
         underlying_range_pct=underlying_features["underlying_range_pct"],
         underlying_realized_vol_5d=underlying_features["underlying_realized_vol_5d"],
         underlying_realized_vol_20d=underlying_features["underlying_realized_vol_20d"],
+        underlying_sma_20_distance_pct=underlying_features["underlying_sma_20_distance_pct"],
+        underlying_above_sma_20=underlying_features["underlying_above_sma_20"],
+        underlying_volatility_ratio_5d_20d=underlying_features["underlying_volatility_ratio_5d_20d"],
         underlying_volume=underlying_features["underlying_volume"],
         strike_distance_pct=_strike_distance_pct(contract.strike, underlying_features["underlying_close"]),
         moneyness=_moneyness(contract.strike, underlying_features["underlying_close"]),
+        market_regime_symbol=market_features["market_regime_symbol"],
+        market_return_5d=market_features["market_return_5d"],
+        market_return_20d=market_features["market_return_20d"],
+        market_realized_vol_5d=market_features["market_realized_vol_5d"],
+        market_realized_vol_20d=market_features["market_realized_vol_20d"],
+        market_sma_20_distance_pct=market_features["market_sma_20_distance_pct"],
+        market_above_sma_20=market_features["market_above_sma_20"],
+        market_volatility_ratio_5d_20d=market_features["market_volatility_ratio_5d_20d"],
+        market_trend_regime=market_features["market_trend_regime"],
+        market_volatility_regime=market_features["market_volatility_regime"],
         option_entry_open=float(entry_bar.open),
         option_entry_high=float(entry_bar.high),
         option_entry_low=float(entry_bar.low),
@@ -277,16 +335,20 @@ def _row_from_label(
     )
 
 
-def _underlying_features(bars: list[PriceBar], entry_timestamp: datetime) -> dict[str, float | None]:
+def _underlying_features(bars: list[PriceBar], entry_timestamp: datetime) -> dict[str, Any]:
     history = [bar for bar in sorted(bars, key=lambda b: b.timestamp) if bar.timestamp <= entry_timestamp]
     if not history:
         return {
             "underlying_close": None,
             "underlying_return_1d": None,
             "underlying_return_5d": None,
+            "underlying_return_20d": None,
             "underlying_range_pct": None,
             "underlying_realized_vol_5d": None,
             "underlying_realized_vol_20d": None,
+            "underlying_sma_20_distance_pct": None,
+            "underlying_above_sma_20": None,
+            "underlying_volatility_ratio_5d_20d": None,
             "underlying_volume": None,
         }
 
@@ -295,15 +357,45 @@ def _underlying_features(bars: list[PriceBar], entry_timestamp: datetime) -> dic
     prev_close = previous.close if previous else None
     return_1d = ((current.close / prev_close) - 1.0) if prev_close else None
     return_5d = _window_return(history, periods=5)
+    return_20d = _window_return(history, periods=20)
     returns = _close_returns(history)
+    realized_vol_5d = _realized_vol(returns[-5:])
+    realized_vol_20d = _realized_vol(returns[-20:])
+    sma_20_distance_pct = _sma_distance_pct(history, periods=20)
     return {
         "underlying_close": current.close,
         "underlying_return_1d": round(return_1d, 8) if return_1d is not None else None,
         "underlying_return_5d": round(return_5d, 8) if return_5d is not None else None,
+        "underlying_return_20d": round(return_20d, 8) if return_20d is not None else None,
         "underlying_range_pct": _range_pct(current.high, current.low, current.close),
-        "underlying_realized_vol_5d": _realized_vol(returns[-5:]),
-        "underlying_realized_vol_20d": _realized_vol(returns[-20:]),
+        "underlying_realized_vol_5d": realized_vol_5d,
+        "underlying_realized_vol_20d": realized_vol_20d,
+        "underlying_sma_20_distance_pct": sma_20_distance_pct,
+        "underlying_above_sma_20": _above_sma(sma_20_distance_pct),
+        "underlying_volatility_ratio_5d_20d": _volatility_ratio(realized_vol_5d, realized_vol_20d),
         "underlying_volume": current.volume,
+    }
+
+
+def _market_regime_features(
+    bars: list[PriceBar],
+    entry_timestamp: datetime,
+    market_regime_symbol: str,
+) -> dict[str, Any]:
+    features = _underlying_features(bars, entry_timestamp)
+    market_sma_20_distance_pct = features["underlying_sma_20_distance_pct"]
+    market_realized_vol_20d = features["underlying_realized_vol_20d"]
+    return {
+        "market_regime_symbol": market_regime_symbol.upper(),
+        "market_return_5d": features["underlying_return_5d"],
+        "market_return_20d": features["underlying_return_20d"],
+        "market_realized_vol_5d": features["underlying_realized_vol_5d"],
+        "market_realized_vol_20d": market_realized_vol_20d,
+        "market_sma_20_distance_pct": market_sma_20_distance_pct,
+        "market_above_sma_20": features["underlying_above_sma_20"],
+        "market_volatility_ratio_5d_20d": features["underlying_volatility_ratio_5d_20d"],
+        "market_trend_regime": _trend_regime(market_sma_20_distance_pct),
+        "market_volatility_regime": _volatility_regime(market_realized_vol_20d),
     }
 
 
@@ -331,6 +423,48 @@ def _realized_vol(returns: list[float]) -> float | None:
     mean = sum(returns) / len(returns)
     variance = sum((value - mean) ** 2 for value in returns) / (len(returns) - 1)
     return round((variance ** 0.5) * (252 ** 0.5), 8)
+
+
+def _sma_distance_pct(history: list[PriceBar], periods: int) -> float | None:
+    if len(history) < periods:
+        return None
+    closes = [bar.close for bar in history[-periods:]]
+    sma = sum(closes) / periods
+    if not sma:
+        return None
+    return round((history[-1].close / sma) - 1.0, 8)
+
+
+def _above_sma(sma_distance_pct: float | None) -> int | None:
+    if sma_distance_pct is None:
+        return None
+    return int(sma_distance_pct > 0.0)
+
+
+def _volatility_ratio(short_vol: float | None, long_vol: float | None) -> float | None:
+    if short_vol is None or not long_vol:
+        return None
+    return round(short_vol / long_vol, 8)
+
+
+def _trend_regime(sma_distance_pct: float | None) -> str | None:
+    if sma_distance_pct is None:
+        return None
+    if sma_distance_pct >= 0.02:
+        return "uptrend"
+    if sma_distance_pct <= -0.02:
+        return "downtrend"
+    return "sideways"
+
+
+def _volatility_regime(realized_vol_20d: float | None) -> str | None:
+    if realized_vol_20d is None:
+        return None
+    if realized_vol_20d >= 0.30:
+        return "high"
+    if realized_vol_20d <= 0.15:
+        return "low"
+    return "normal"
 
 
 def _range_pct(high: float | None, low: float | None, close: float | None) -> float | None:
@@ -364,7 +498,7 @@ def _dte(entry_timestamp: datetime, expiration: date | None) -> int | None:
     return (expiration - entry_timestamp.date()).days
 
 
-def _missing_fields(contract: OptionContract, features: dict[str, float | None]) -> list[str]:
+def _missing_fields(contract: OptionContract, features: dict[str, Any]) -> list[str]:
     missing: list[str] = []
     if contract.expiration is None:
         missing.append("expiration")

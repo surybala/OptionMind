@@ -30,6 +30,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-abs-strike-distance-pct", type=float, default=0.30)
     parser.add_argument("--min-forward-bars", type=int, default=2)
     parser.add_argument("--sample-every-n-bars", type=int, default=1)
+    parser.add_argument("--stock-lookback-days", type=int, default=60)
+    parser.add_argument("--market-regime-symbol", default="SPY", help="Benchmark symbol used for market regime features.")
     parser.add_argument("--forward-days", type=int, default=30)
     parser.add_argument("--dataset-version", default="candidate_rows_v001")
     parser.add_argument("--output-dir", default="artifacts/datasets")
@@ -56,6 +58,8 @@ def main() -> int:
         max_abs_strike_distance_pct=args.max_abs_strike_distance_pct,
         min_forward_bars=args.min_forward_bars,
         sample_every_n_bars=args.sample_every_n_bars,
+        stock_lookback_days=args.stock_lookback_days,
+        market_regime_symbol=args.market_regime_symbol.upper(),
         forward_days=args.forward_days,
     )
     rows = HistoricalCandidateDatasetBuilder(provider, provider, provider).build(config)
@@ -77,7 +81,9 @@ def main() -> int:
             "max_abs_strike_distance_pct": config.max_abs_strike_distance_pct,
             "min_forward_bars": config.min_forward_bars,
             "sample_every_n_bars": config.sample_every_n_bars,
-            "feature_set_version": "features_v001",
+            "stock_lookback_days": config.stock_lookback_days,
+            "market_regime_symbol": config.market_regime_symbol,
+            "feature_set_version": "features_v002",
             "label_version": config.label_version,
         },
     )

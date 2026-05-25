@@ -14,10 +14,21 @@ DEFAULT_NUMERIC_COLUMNS = [
     "underlying_close",
     "underlying_return_1d",
     "underlying_return_5d",
+    "underlying_return_20d",
     "underlying_realized_vol_5d",
     "underlying_realized_vol_20d",
+    "underlying_sma_20_distance_pct",
+    "underlying_above_sma_20",
+    "underlying_volatility_ratio_5d_20d",
     "strike_distance_pct",
     "moneyness",
+    "market_return_5d",
+    "market_return_20d",
+    "market_realized_vol_5d",
+    "market_realized_vol_20d",
+    "market_sma_20_distance_pct",
+    "market_above_sma_20",
+    "market_volatility_ratio_5d_20d",
     "option_entry_price",
     "option_entry_range_pct",
     "option_entry_volume",
@@ -89,7 +100,16 @@ def summarize_candidate_dataset(df: pd.DataFrame) -> dict[str, Any]:
         report["entry_end"] = _iso_or_none(timestamps.max())
         report["entry_date_counts"] = _value_counts(timestamps.dt.date.astype("string"))
 
-    for column in ("source", "underlying", "option_type", "exit_reason", "label_version"):
+    for column in (
+        "source",
+        "underlying",
+        "option_type",
+        "market_regime_symbol",
+        "market_trend_regime",
+        "market_volatility_regime",
+        "exit_reason",
+        "label_version",
+    ):
         if column in df:
             report[f"{column}_counts"] = _value_counts(df[column])
 
@@ -122,7 +142,15 @@ def render_markdown(report: dict[str, Any]) -> str:
     if report.get("entry_start") or report.get("entry_end"):
         lines.append(f"- Entry range: {report.get('entry_start')} to {report.get('entry_end')}")
 
-    for key in ("source_counts", "underlying_counts", "option_type_counts", "exit_reason_counts"):
+    for key in (
+        "source_counts",
+        "underlying_counts",
+        "option_type_counts",
+        "market_regime_symbol_counts",
+        "market_trend_regime_counts",
+        "market_volatility_regime_counts",
+        "exit_reason_counts",
+    ):
         if key in report:
             lines.extend(["", f"## {key.replace('_', ' ').title()}", ""])
             for value, count in report[key].items():

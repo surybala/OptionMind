@@ -27,6 +27,24 @@ def test_train_baseline_returns_transparent_artifact():
     assert artifact.train_rows == 4
     assert artifact.test_rows == 2
     assert "test_mae" in artifact.metrics
+    assert "test_profit_factor" in artifact.metrics
+    assert "test_top_decile_max_drawdown" in artifact.metrics
+    assert artifact.metrics["walk_forward_folds"] == 2
+    assert artifact.walk_forward[0]["train_rows"] == 4
+    assert artifact.walk_forward[0]["test_rows"] == 1
+    assert "top_decile_actual_mean" in artifact.walk_forward[0]["metrics"]
+
+
+def test_train_baseline_uses_train_only_fill_values():
+    frame = _frame()
+    frame.loc[:3, "option_entry_volume"] = [10, 20, 30, 40]
+    frame.loc[4:, "option_entry_volume"] = [100000, 200000]
+    frame.loc[0, "option_entry_volume"] = None
+
+    artifact = train_baseline(frame, test_fraction=0.33, walk_forward_folds=0)
+
+    assert artifact.fill_values["option_entry_volume"] == 30.0
+    assert artifact.metrics["walk_forward_folds"] == 0
 
 
 def test_train_baseline_requires_labeled_rows():

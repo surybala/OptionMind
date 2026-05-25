@@ -16,6 +16,7 @@ Each row contains:
 
 - Option identity: symbol, underlying, option type, strike, expiration, DTE
 - Entry-time underlying features: close, 1-day/5-day returns, range percentage, realized volatility, volume
+- Decision-time regime features: 20-day return, 20-day SMA distance, trend/volatility regime, and benchmark market regime fields
 - Option/strike features: strike distance, moneyness, entry OHLC/VWAP/range/liquidity
 - Forward-simulated exit price and timestamp
 - P&L-centered labels:
@@ -57,7 +58,7 @@ The important ML-system lesson: once this row shape is stable, we can add richer
 
 - Add current/historical IV and Greeks when available.
 - Add opening-window candle features from minute bars.
-- Add market regime features.
+- Add richer market regime features from dedicated volatility/event datasets.
 - Add event features such as earnings, CPI, FOMC, and ex-dividend dates.
 - Write rows to parquet.
 - Build walk-forward dataset splits.
@@ -112,6 +113,8 @@ Useful controls:
 - `--max-rows-per-underlying`: cap output rows for bounded experiments.
 - `--max-abs-strike-distance-pct`: keep strikes near the reference underlying price.
 - `--sample-every-n-bars`: downsample dense intraday/minute entry bars.
+- `--stock-lookback-days`: stock-bar lookback used for returns, volatility, and SMA features, default `60`.
+- `--market-regime-symbol`: benchmark symbol used for broad-market regime features, default `SPY`.
 - `--min-forward-bars`: skip entries without enough future path to label.
 
 Massive API responses are cached by default under `artifacts/cache/massive`
@@ -143,3 +146,39 @@ Train the first transparent baseline on generated rows:
 
 The baseline is intentionally simple: a least-squares linear model over numeric
 decision-time features, with a time-ordered train/test split and JSON artifact.
+
+The trainer also runs expanding walk-forward validation by default. Each fold
+fits preprocessing medians and model weights on prior rows only, then evaluates
+the next chronological test window. The artifact records fold-level ranking and
+risk metrics including top-decile actual P&L, win rate, profit factor, drawdown,
+and tail loss. Use `--walk-forward-folds 0` for a single holdout-only run, or
+increase `--walk-forward-folds` when the dataset spans enough dates to support
+more out-of-sample windows.
+
+## Asymmetric XGBoost Model
+
+The tree baseline uses XGBoost with a custom asymmetric objective that makes
+optimistic errors on losing trades exponentially more expensive than ordinary
+residuals:
+
+```bash
+.venv/bin/python -m ml.models.train_xgboost \
+  --input artifacts/datasets/massive_spy_apr2025_rolling_features_v002.jsonl \
+  --output artifacts/models/xgboost_asymmetric_shallow_massive_spy_apr2025_rolling_features_v002.json \
+  --model-output artifacts/models/xgboost_asymmetric_shallow_massive_spy_apr2025_rolling_features_v002.model.json \
+  --num-boost-round 150 \
+  --max-depth 2 \
+  --eta 0.04 \
+  --min-child-weight 20 \
+  --reg-lambda 50 \
+  --downside-scale 750 \
+  --error-scale 750 \
+  --downside-penalty 2.5 \
+  --overprediction-penalty 2.0 \
+  --max-multiplier 60
+```
+
+This model is still evaluated with the same holdout and walk-forward ranking
+metrics as the linear baseline. It should not be promoted just because train
+metrics improve; top-decile out-of-sample P&L and tail loss remain the deciding
+signals.
