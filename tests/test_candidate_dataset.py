@@ -86,7 +86,7 @@ def test_candidate_dataset_builder_emits_profit_take_rows():
         )
     )
 
-    assert len(rows) == 1
+    assert len(rows) == 2
     row = rows[0]
     assert row.option_symbol == "SPY260626P00500000"
     assert row.dte == 43
@@ -107,6 +107,8 @@ def test_candidate_dataset_builder_emits_profit_take_rows():
     assert row.profit_label == 1
     assert row.stop_loss_hit == 0
     assert row.missing_fields == ()
+    assert rows[1].entry_timestamp == provider.entry + timedelta(days=1)
+    assert rows[1].exit_reason == "horizon"
 
 
 def test_candidate_dataset_builder_labels_stop_loss_rows():

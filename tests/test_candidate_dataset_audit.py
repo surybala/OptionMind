@@ -60,6 +60,7 @@ def test_audit_summarizes_jsonl_candidate_dataset(tmp_path):
 
     assert report["row_count"] == 2
     assert report["underlying_counts"] == {"SPY": 2}
+    assert report["entry_date_counts"] == {"2026-05-14": 1, "2026-05-15": 1}
     assert report["exit_reason_counts"] == {"profit_take": 1, "stop_loss": 1}
     assert report["numeric_summary"]["realized_pnl_per_contract"]["min"] == -430.0
     assert report["missing_field_counts"] == {"underlying_close": 1}

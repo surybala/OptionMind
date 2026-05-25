@@ -25,6 +25,10 @@ class CandidateDatasetConfig:
     contract_status: str = "inactive"
     option_limit: int | None = 100
     max_contracts_per_underlying: int = 25
+    max_rows_per_underlying: int | None = None
+    max_abs_strike_distance_pct: float | None = 0.30
+    min_forward_bars: int = 2
+    sample_every_n_bars: int = 1
     stock_lookback_days: int = 30
     forward_days: int = 30
     profit_take_pct: float = 0.50
@@ -107,8 +111,9 @@ class HistoricalCandidateDatasetBuilder:
         )
 
         for underlying in config.underlyings:
+            underlying_row_count = 0
             expiration_gte = _datetime_to_date(config.entry_start) + timedelta(days=config.min_dte)
-            expiration_lte = _datetime_to_date(config.entry_start) + timedelta(days=config.max_dte)
+            expiration_lte = _datetime_to_date(config.entry_end) + timedelta(days=config.max_dte)
             contracts = self.contract_provider.get_option_contracts(
                 [underlying],
                 expiration_gte=expiration_gte,
@@ -116,7 +121,14 @@ class HistoricalCandidateDatasetBuilder:
                 status=config.contract_status,
                 limit=config.option_limit,
             )
-            contracts = _candidate_contracts(contracts, underlying, config)
+            underlying_history = stock_bars.get(underlying, [])
+            reference_features = _underlying_features(underlying_history, config.entry_start)
+            contracts = _candidate_contracts(
+                contracts,
+                underlying,
+                config,
+                reference_close=reference_features["underlying_close"],
+            )
             if not contracts:
                 continue
 
@@ -130,73 +142,40 @@ class HistoricalCandidateDatasetBuilder:
 
             for contract in contracts:
                 path = sorted(option_bars.get(contract.symbol, []), key=lambda bar: bar.timestamp)
-                entry_bar = _first_bar_at_or_after(path, config.entry_start)
-                if entry_bar is None or entry_bar.timestamp > config.entry_end:
-                    continue
-                entry_dte = _dte(entry_bar.timestamp, contract.expiration)
-                if entry_dte is None or entry_dte < config.min_dte or entry_dte > config.max_dte:
-                    continue
-                future_path = [
-                    bar
-                    for bar in path
-                    if entry_bar.timestamp <= bar.timestamp <= entry_bar.timestamp + timedelta(days=config.forward_days)
-                ]
-                if not future_path:
-                    continue
-                underlying_features = _underlying_features(stock_bars.get(underlying, []), entry_bar.timestamp)
-                label = label_short_option_path(
-                    entry_bar,
-                    future_path,
-                    ShortOptionLabelConfig(
-                        profit_take_pct=config.profit_take_pct,
-                        stop_loss_multiple=config.stop_loss_multiple,
-                        large_loss_multiple=config.large_loss_multiple,
-                        label_version=config.label_version,
-                    ),
-                )
-                missing = _missing_fields(contract, underlying_features)
-                rows.append(
-                    CandidateDatasetRow(
-                        entry_timestamp=entry_bar.timestamp,
-                        underlying=underlying,
-                        option_symbol=contract.symbol,
-                        option_type=contract.option_type,
-                        strike=contract.strike,
-                        expiration=contract.expiration,
-                        dte=entry_dte,
-                        source=contract.source,
-                        underlying_close=underlying_features["underlying_close"],
-                        underlying_return_1d=underlying_features["underlying_return_1d"],
-                        underlying_return_5d=underlying_features["underlying_return_5d"],
-                        underlying_range_pct=underlying_features["underlying_range_pct"],
-                        underlying_realized_vol_5d=underlying_features["underlying_realized_vol_5d"],
-                        underlying_realized_vol_20d=underlying_features["underlying_realized_vol_20d"],
-                        underlying_volume=underlying_features["underlying_volume"],
-                        strike_distance_pct=_strike_distance_pct(contract.strike, underlying_features["underlying_close"]),
-                        moneyness=_moneyness(contract.strike, underlying_features["underlying_close"]),
-                        option_entry_open=float(entry_bar.open),
-                        option_entry_high=float(entry_bar.high),
-                        option_entry_low=float(entry_bar.low),
-                        option_entry_price=label.entry_price,
-                        option_entry_range_pct=_range_pct(entry_bar.high, entry_bar.low, entry_bar.close),
-                        option_entry_volume=entry_bar.volume,
-                        option_entry_trade_count=entry_bar.trade_count,
-                        option_entry_vwap=entry_bar.vwap,
-                        option_exit_price=label.exit_price,
-                        exit_timestamp=label.exit_timestamp,
-                        exit_reason=label.exit_reason,
-                        expected_pnl=label.expected_pnl,
-                        realized_pnl_per_contract=label.realized_pnl_per_contract,
-                        profit_label=label.profit_label,
-                        stop_loss_hit=label.stop_loss_hit,
-                        large_loss_label=label.large_loss_label,
-                        max_adverse_excursion=label.max_adverse_excursion,
-                        max_favorable_excursion=label.max_favorable_excursion,
-                        days_to_exit=label.days_to_exit,
-                        label_version=label.label_version,
-                        missing_fields=tuple(missing),
+                for entry_bar in _entry_bars(path, config):
+                    entry_dte = _dte(entry_bar.timestamp, contract.expiration)
+                    if entry_dte is None or entry_dte < config.min_dte or entry_dte > config.max_dte:
+                        continue
+                    future_path = [
+                        bar
+                        for bar in path
+                        if entry_bar.timestamp <= bar.timestamp <= entry_bar.timestamp + timedelta(days=config.forward_days)
+                    ]
+                    if len(future_path) < config.min_forward_bars:
+                        continue
+                    underlying_features = _underlying_features(underlying_history, entry_bar.timestamp)
+                    label = label_short_option_path(
+                        entry_bar,
+                        future_path,
+                        ShortOptionLabelConfig(
+                            profit_take_pct=config.profit_take_pct,
+                            stop_loss_multiple=config.stop_loss_multiple,
+                            large_loss_multiple=config.large_loss_multiple,
+                            label_version=config.label_version,
+                        ),
                     )
-                )
+                    rows.append(_row_from_label(contract, underlying, entry_bar, entry_dte, underlying_features, label))
+                    underlying_row_count += 1
+                    if (
+                        config.max_rows_per_underlying is not None
+                        and underlying_row_count >= config.max_rows_per_underlying
+                    ):
+                        break
+                if (
+                    config.max_rows_per_underlying is not None
+                    and underlying_row_count >= config.max_rows_per_underlying
+                ):
+                    break
         return rows
 
 
@@ -204,8 +183,9 @@ def _candidate_contracts(
     contracts: list[OptionContract],
     underlying: str,
     config: CandidateDatasetConfig,
+    reference_close: float | None = None,
 ) -> list[OptionContract]:
-    filtered = [
+    filtered: list[OptionContract] = [
         contract
         for contract in contracts
         if contract.underlying.upper() == underlying.upper()
@@ -213,7 +193,88 @@ def _candidate_contracts(
         and contract.strike is not None
         and contract.option_type in {"call", "put"}
     ]
-    return filtered[: config.max_contracts_per_underlying]
+    if reference_close and config.max_abs_strike_distance_pct is not None:
+        filtered = [
+            contract
+            for contract in filtered
+            if abs((float(contract.strike) - reference_close) / reference_close) <= config.max_abs_strike_distance_pct
+        ]
+    if reference_close:
+        filtered = sorted(filtered, key=lambda c: abs(float(c.strike or 0.0) - reference_close))
+
+    buckets: dict[tuple[date, str], list[OptionContract]] = {}
+    for contract in filtered:
+        buckets.setdefault((contract.expiration, contract.option_type), []).append(contract)
+
+    ordered: list[OptionContract] = []
+    bucket_values = list(buckets.values())
+    while bucket_values and len(ordered) < config.max_contracts_per_underlying:
+        next_values: list[list[OptionContract]] = []
+        for bucket in bucket_values:
+            if bucket and len(ordered) < config.max_contracts_per_underlying:
+                ordered.append(bucket.pop(0))
+            if bucket:
+                next_values.append(bucket)
+        bucket_values = next_values
+    return ordered
+
+
+def _entry_bars(path: list[PriceBar], config: CandidateDatasetConfig) -> list[PriceBar]:
+    if config.sample_every_n_bars <= 0:
+        raise ValueError("sample_every_n_bars must be positive")
+    bars = [bar for bar in path if config.entry_start <= bar.timestamp <= config.entry_end]
+    return bars[:: config.sample_every_n_bars]
+
+
+def _row_from_label(
+    contract: OptionContract,
+    underlying: str,
+    entry_bar: PriceBar,
+    entry_dte: int,
+    underlying_features: dict[str, float | None],
+    label: Any,
+) -> CandidateDatasetRow:
+    missing = _missing_fields(contract, underlying_features)
+    return CandidateDatasetRow(
+        entry_timestamp=entry_bar.timestamp,
+        underlying=underlying,
+        option_symbol=contract.symbol,
+        option_type=contract.option_type,
+        strike=contract.strike,
+        expiration=contract.expiration,
+        dte=entry_dte,
+        source=contract.source,
+        underlying_close=underlying_features["underlying_close"],
+        underlying_return_1d=underlying_features["underlying_return_1d"],
+        underlying_return_5d=underlying_features["underlying_return_5d"],
+        underlying_range_pct=underlying_features["underlying_range_pct"],
+        underlying_realized_vol_5d=underlying_features["underlying_realized_vol_5d"],
+        underlying_realized_vol_20d=underlying_features["underlying_realized_vol_20d"],
+        underlying_volume=underlying_features["underlying_volume"],
+        strike_distance_pct=_strike_distance_pct(contract.strike, underlying_features["underlying_close"]),
+        moneyness=_moneyness(contract.strike, underlying_features["underlying_close"]),
+        option_entry_open=float(entry_bar.open),
+        option_entry_high=float(entry_bar.high),
+        option_entry_low=float(entry_bar.low),
+        option_entry_price=label.entry_price,
+        option_entry_range_pct=_range_pct(entry_bar.high, entry_bar.low, entry_bar.close),
+        option_entry_volume=entry_bar.volume,
+        option_entry_trade_count=entry_bar.trade_count,
+        option_entry_vwap=entry_bar.vwap,
+        option_exit_price=label.exit_price,
+        exit_timestamp=label.exit_timestamp,
+        exit_reason=label.exit_reason,
+        expected_pnl=label.expected_pnl,
+        realized_pnl_per_contract=label.realized_pnl_per_contract,
+        profit_label=label.profit_label,
+        stop_loss_hit=label.stop_loss_hit,
+        large_loss_label=label.large_loss_label,
+        max_adverse_excursion=label.max_adverse_excursion,
+        max_favorable_excursion=label.max_favorable_excursion,
+        days_to_exit=label.days_to_exit,
+        label_version=label.label_version,
+        missing_fields=tuple(missing),
+    )
 
 
 def _underlying_features(bars: list[PriceBar], entry_timestamp: datetime) -> dict[str, float | None]:

@@ -255,3 +255,38 @@ def test_option_aggregate_404_returns_empty_bars():
     )
 
     assert bars == {"SPY260626P00500000": []}
+
+
+def test_massive_provider_caches_successful_responses(tmp_path):
+    p = MassiveProvider(
+        api_key="super-secret",
+        base_url="https://api.massive.test",
+        cache_dir=tmp_path,
+        session=FakeSession(
+            [
+                {
+                    "results": [
+                        {"t": 1_779_984_000_000, "o": 500, "h": 505, "l": 499, "c": 504, "v": 1000}
+                    ]
+                }
+            ]
+        ),
+    )
+
+    first = p.get_stock_bars(
+        ["SPY"],
+        datetime(2026, 5, 14, tzinfo=UTC),
+        datetime(2026, 5, 15, tzinfo=UTC),
+        "1Day",
+    )
+    second = p.get_stock_bars(
+        ["SPY"],
+        datetime(2026, 5, 14, tzinfo=UTC),
+        datetime(2026, 5, 15, tzinfo=UTC),
+        "1Day",
+    )
+
+    assert first["SPY"][0].close == 504
+    assert second["SPY"][0].close == 504
+    assert len(p.session.calls) == 1
+    assert len(list(tmp_path.glob("*.json"))) == 1

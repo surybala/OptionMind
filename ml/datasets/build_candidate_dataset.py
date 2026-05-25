@@ -26,6 +26,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-dte", type=int, default=45)
     parser.add_argument("--max-contracts", type=int, default=25)
     parser.add_argument("--option-limit", type=int, default=100, help="Provider contract metadata page limit before local filtering.")
+    parser.add_argument("--max-rows-per-underlying", type=int, default=None)
+    parser.add_argument("--max-abs-strike-distance-pct", type=float, default=0.30)
+    parser.add_argument("--min-forward-bars", type=int, default=2)
+    parser.add_argument("--sample-every-n-bars", type=int, default=1)
     parser.add_argument("--forward-days", type=int, default=30)
     parser.add_argument("--dataset-version", default="candidate_rows_v001")
     parser.add_argument("--output-dir", default="artifacts/datasets")
@@ -48,6 +52,10 @@ def main() -> int:
         contract_status=args.contract_status,
         option_limit=args.option_limit,
         max_contracts_per_underlying=args.max_contracts,
+        max_rows_per_underlying=args.max_rows_per_underlying,
+        max_abs_strike_distance_pct=args.max_abs_strike_distance_pct,
+        min_forward_bars=args.min_forward_bars,
+        sample_every_n_bars=args.sample_every_n_bars,
         forward_days=args.forward_days,
     )
     rows = HistoricalCandidateDatasetBuilder(provider, provider, provider).build(config)
@@ -65,6 +73,10 @@ def main() -> int:
             "min_dte": config.min_dte,
             "max_dte": config.max_dte,
             "forward_days": config.forward_days,
+            "max_rows_per_underlying": config.max_rows_per_underlying,
+            "max_abs_strike_distance_pct": config.max_abs_strike_distance_pct,
+            "min_forward_bars": config.min_forward_bars,
+            "sample_every_n_bars": config.sample_every_n_bars,
             "feature_set_version": "features_v001",
             "label_version": config.label_version,
         },

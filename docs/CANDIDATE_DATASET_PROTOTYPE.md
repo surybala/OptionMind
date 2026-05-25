@@ -74,7 +74,10 @@ The CLI writes partitioned Parquet rows and a manifest to `artifacts/`:
   --entry-end 2025-05-15 \
   --contract-status inactive \
   --option-limit 1000 \
-  --max-contracts 10 \
+  --max-contracts 300 \
+  --max-rows-per-underlying 5000 \
+  --max-abs-strike-distance-pct 0.30 \
+  --min-forward-bars 2 \
   --dataset-version candidate_rows_massive_v001 \
   --output-dir artifacts/datasets
 ```
@@ -94,6 +97,25 @@ artifacts/datasets/candidate_rows/
 Use `--jsonl-output artifacts/datasets/sample.jsonl` only when you want a small inspection copy.
 
 `artifacts/` is git-ignored because generated datasets should not be committed.
+
+## Historical Sampling
+
+The builder emits one candidate row per valid contract entry bar inside the
+entry window, not just the first bar after `entry_start`. Contracts are selected
+from a wider provider metadata pool and balanced across expiration/type buckets
+before pricing.
+
+Useful controls:
+
+- `--option-limit`: how many provider contract records to inspect before local filtering.
+- `--max-contracts`: how many locally balanced contracts to price per underlying.
+- `--max-rows-per-underlying`: cap output rows for bounded experiments.
+- `--max-abs-strike-distance-pct`: keep strikes near the reference underlying price.
+- `--sample-every-n-bars`: downsample dense intraday/minute entry bars.
+- `--min-forward-bars`: skip entries without enough future path to label.
+
+Massive API responses are cached by default under `artifacts/cache/massive`
+when using `.env` credentials. Override with `MASSIVE_CACHE_DIR`.
 
 ## Quality Report
 

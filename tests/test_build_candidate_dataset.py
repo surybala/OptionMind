@@ -24,7 +24,14 @@ def test_parse_args_accepts_option_limit(monkeypatch):
             "2025-04-30",
             "--option-limit",
             "1000",
+            "--max-rows-per-underlying",
+            "5000",
+            "--sample-every-n-bars",
+            "2",
         ],
     )
 
-    assert parse_args().option_limit == 1000
+    args = parse_args()
+    assert args.option_limit == 1000
+    assert args.max_rows_per_underlying == 5000
+    assert args.sample_every_n_bars == 2

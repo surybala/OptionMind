@@ -57,6 +57,11 @@ Use it with the dataset CLI:
 The provider normalizes Massive option tickers by stripping the API `O:` prefix
 inside OptionMind rows, while adding it back for Massive API calls.
 
+Massive responses are cached under `artifacts/cache/massive` by default when
+using `MassiveProvider.from_env()`. Set `MASSIVE_CACHE_DIR` to override the
+cache location. Cached files never include the API key in their cache key or
+contents.
+
 ## Next Integration Point
 
 The next implementation should build a small dataset prototype that accepts these protocols and creates candidate rows from provider data, starting with Alpaca for recent/replayable samples.

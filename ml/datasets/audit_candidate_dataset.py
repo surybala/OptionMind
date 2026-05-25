@@ -87,6 +87,7 @@ def summarize_candidate_dataset(df: pd.DataFrame) -> dict[str, Any]:
         timestamps = pd.to_datetime(df["entry_timestamp"], errors="coerce")
         report["entry_start"] = _iso_or_none(timestamps.min())
         report["entry_end"] = _iso_or_none(timestamps.max())
+        report["entry_date_counts"] = _value_counts(timestamps.dt.date.astype("string"))
 
     for column in ("source", "underlying", "option_type", "exit_reason", "label_version"):
         if column in df:

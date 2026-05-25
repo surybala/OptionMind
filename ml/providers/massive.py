@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
@@ -38,6 +41,7 @@ class MassiveProvider:
     base_url: str = "https://api.massive.com"
     timeout: float = 30.0
     adjusted: bool = False
+    cache_dir: Path | str | None = None
     session: Any = field(default_factory=requests.Session)
 
     source: str = "massive"
@@ -47,7 +51,7 @@ class MassiveProvider:
         api_key = os.getenv("MASSIVE_API_KEY") or os.getenv("POLYGON_API_KEY")
         if not api_key:
             raise ValueError("MASSIVE_API_KEY or POLYGON_API_KEY is required")
-        return cls(api_key=api_key)
+        return cls(api_key=api_key, cache_dir=os.getenv("MASSIVE_CACHE_DIR", "artifacts/cache/massive"))
 
     def get_stock_bars(
         self,
@@ -225,6 +229,9 @@ class MassiveProvider:
         url = path_or_url if path_or_url.startswith("http") else f"{self.base_url.rstrip('/')}{path_or_url}"
         query = dict(params or {})
         query["apiKey"] = self.api_key
+        cache_path = self._cache_path(url, query)
+        if cache_path is not None and cache_path.exists():
+            return json.loads(cache_path.read_text(encoding="utf-8"))
         try:
             response = self.session.get(url, params=query, timeout=self.timeout)
             response.raise_for_status()
@@ -234,7 +241,19 @@ class MassiveProvider:
             status_code = getattr(response, "status_code", None)
             detail = _redact_text(getattr(response, "text", "") or "")
             raise MassiveApiError(safe_url, status_code=status_code, detail=detail) from None
-        return response.json()
+        payload = response.json()
+        if cache_path is not None:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+        return payload
+
+    def _cache_path(self, url: str, params: dict[str, Any]) -> Path | None:
+        if self.cache_dir is None:
+            return None
+        safe_params = {key: value for key, value in params.items() if key.lower() != "apikey"}
+        key = json.dumps({"url": url, "params": safe_params}, sort_keys=True, default=str)
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        return Path(self.cache_dir) / f"{digest}.json"
 
 
 def _parse_timeframe(value: str) -> tuple[int, str]:
