@@ -3,6 +3,7 @@
 from ml.providers.alpaca import AlpacaProvider
 from ml.providers.massive import MassiveProvider
 from ml.providers.models import (
+    EarningsEvent,
     Greeks,
     OptionChainSnapshot,
     OptionContract,
@@ -20,6 +21,7 @@ from ml.providers.protocols import (
 
 __all__ = [
     "AlpacaProvider",
+    "EarningsEvent",
     "EventDataProvider",
     "Greeks",
     "MarketDataProvider",

@@ -151,6 +151,20 @@ class MassiveProvider:
             for symbol in symbols
         }
 
+    def get_earnings_calendar(
+        self,
+        symbols: list[str],
+        start: date,
+        end: date,
+    ) -> dict[str, list]:
+        """Stub: Massive/Polygon earnings calendar not yet implemented.
+
+        Returns an empty dict so callers fall back to None earnings features
+        gracefully. Implement by hitting /vX/reference/financials or a dedicated
+        earnings endpoint when that data becomes available.
+        """
+        return {}
+
     def get_option_trades(
         self,
         symbols: list[str],

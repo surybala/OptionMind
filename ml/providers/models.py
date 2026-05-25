@@ -64,6 +64,16 @@ class Greeks:
 
 
 @dataclass(frozen=True)
+class EarningsEvent:
+    """Normalized earnings calendar event."""
+
+    symbol: str
+    report_date: date
+    fiscal_period: str | None = None
+    source: str = "unknown"
+
+
+@dataclass(frozen=True)
 class OptionChainSnapshot:
     symbol: str
     underlying: str

@@ -15,21 +15,27 @@ from ml.datasets.audit_candidate_dataset import load_dataset
 
 
 DEFAULT_FEATURE_COLUMNS = [
+    # Contract structure
     "dte",
     "strike",
+    "strike_distance_pct",
+    "moneyness",
+    # Underlying price features
     "underlying_close",
     "underlying_return_1d",
+    "underlying_return_3d",
     "underlying_return_5d",
     "underlying_return_20d",
     "underlying_range_pct",
     "underlying_realized_vol_5d",
+    "underlying_realized_vol_10d",
     "underlying_realized_vol_20d",
     "underlying_sma_20_distance_pct",
     "underlying_above_sma_20",
     "underlying_volatility_ratio_5d_20d",
     "underlying_volume",
-    "strike_distance_pct",
-    "moneyness",
+    "underlying_skew_5d",
+    # Market regime
     "market_return_5d",
     "market_return_20d",
     "market_realized_vol_5d",
@@ -37,6 +43,7 @@ DEFAULT_FEATURE_COLUMNS = [
     "market_sma_20_distance_pct",
     "market_above_sma_20",
     "market_volatility_ratio_5d_20d",
+    # Option entry bar
     "option_entry_open",
     "option_entry_high",
     "option_entry_low",
@@ -45,6 +52,26 @@ DEFAULT_FEATURE_COLUMNS = [
     "option_entry_volume",
     "option_entry_trade_count",
     "option_entry_vwap",
+    # Option lookback
+    "option_volume_5d_avg",
+    "option_trade_count_5d_avg",
+    # Black-Scholes Greeks and implied volatility
+    "implied_volatility",
+    "option_delta",
+    "option_gamma",
+    "option_theta",
+    "option_vega",
+    "iv_vs_hv5d",
+    "iv_vs_hv20d",
+    # VIX market regime
+    "vix_close",
+    "vix_return_5d",
+    "vix_realized_vol_5d",
+    "vix_above_20",
+    "vix_above_30",
+    # Event risk
+    "days_to_earnings",
+    "has_earnings_in_forward_days",
 ]
 
 

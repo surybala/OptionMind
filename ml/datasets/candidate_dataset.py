@@ -6,13 +6,14 @@ written to parquet/csv and used by feature, label, and model code.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 from ml.labels import ShortOptionLabelConfig, label_short_option_path
-from ml.providers.models import OptionContract, PriceBar
-from ml.providers.protocols import MarketDataProvider, OptionContractProvider, OptionPriceProvider
+from ml.providers.models import EarningsEvent, OptionContract, PriceBar
+from ml.providers.protocols import EventDataProvider, MarketDataProvider, OptionContractProvider, OptionPriceProvider
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,9 @@ class CandidateDatasetConfig:
     large_loss_multiple: float = 1.0
     label_version: str = "short_option_labels_v001"
     build_window_days: int = 45
+    vix_symbol: str = "VIX"
+    risk_free_rate: float = 0.045
+    option_lookback_days: int = 10
 
 
 @dataclass(frozen=True)
@@ -100,6 +104,35 @@ class CandidateDatasetRow:
     label_version: str
     missing_fields: tuple[str, ...] = field(default_factory=tuple)
 
+    # Additional underlying features
+    underlying_realized_vol_10d: float | None = None
+    underlying_return_3d: float | None = None
+    underlying_skew_5d: float | None = None
+
+    # Black-Scholes Greeks and implied volatility
+    implied_volatility: float | None = None
+    option_delta: float | None = None
+    option_gamma: float | None = None
+    option_theta: float | None = None
+    option_vega: float | None = None
+    iv_vs_hv5d: float | None = None
+    iv_vs_hv20d: float | None = None
+
+    # Option historical context (pre-entry lookback)
+    option_volume_5d_avg: float | None = None
+    option_trade_count_5d_avg: float | None = None
+
+    # VIX market regime
+    vix_close: float | None = None
+    vix_return_5d: float | None = None
+    vix_realized_vol_5d: float | None = None
+    vix_above_20: int | None = None
+    vix_above_30: int | None = None
+
+    # Event risk
+    days_to_earnings: int | None = None
+    has_earnings_in_forward_days: int | None = None
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -112,10 +145,12 @@ class HistoricalCandidateDatasetBuilder:
         market_provider: MarketDataProvider,
         contract_provider: OptionContractProvider,
         price_provider: OptionPriceProvider,
+        event_provider: EventDataProvider | None = None,
     ) -> None:
         self.market_provider = market_provider
         self.contract_provider = contract_provider
         self.price_provider = price_provider
+        self.event_provider = event_provider
 
     def build(self, config: CandidateDatasetConfig) -> list[CandidateDatasetRow]:
         rows: list[CandidateDatasetRow] = []
@@ -130,6 +165,16 @@ class HistoricalCandidateDatasetBuilder:
             config.stock_timeframe,
         )
         market_history = stock_bars.get(config.market_regime_symbol.upper(), [])
+        vix_bars = stock_bars.get(config.vix_symbol.upper(), [])
+
+        # Fetch earnings calendar for the full entry window (stub returns {} if not wired).
+        earnings_events: dict[str, list[EarningsEvent]] = {}
+        if self.event_provider is not None:
+            earnings_events = self.event_provider.get_earnings_calendar(
+                config.underlyings,
+                config.entry_start.date(),
+                (config.entry_end + timedelta(days=config.forward_days)).date(),
+            )
 
         for window_start, window_end, is_last_window in _date_windows(
             config.entry_start, config.entry_end, config.build_window_days
@@ -168,9 +213,11 @@ class HistoricalCandidateDatasetBuilder:
                 if not contracts:
                     continue
 
+                # Extend lookback start so _option_lookback_features has pre-entry bars.
+                option_fetch_start = window_start - timedelta(days=config.option_lookback_days)
                 option_bars = self.price_provider.get_option_bars(
                     [contract.symbol for contract in contracts],
-                    window_start,
+                    option_fetch_start,
                     window_end + timedelta(days=config.forward_days),
                     config.option_timeframe,
                     limit=None,
@@ -201,6 +248,23 @@ class HistoricalCandidateDatasetBuilder:
                             entry_bar.timestamp,
                             config.market_regime_symbol,
                         )
+                        greeks_features = _option_greeks_features(
+                            entry_bar,
+                            underlying_features["underlying_close"],
+                            contract.strike,
+                            contract.option_type,
+                            entry_dte,
+                            config.risk_free_rate,
+                            underlying_features["underlying_realized_vol_5d"],
+                            underlying_features["underlying_realized_vol_20d"],
+                        )
+                        lookback_features = _option_lookback_features(path, entry_bar.timestamp)
+                        vix_feat = _vix_features(vix_bars, entry_bar.timestamp)
+                        event_feat = _event_features(
+                            earnings_events.get(underlying.upper(), []),
+                            entry_bar.timestamp,
+                            config.forward_days,
+                        )
                         label = label_short_option_path(
                             entry_bar,
                             future_path,
@@ -219,6 +283,10 @@ class HistoricalCandidateDatasetBuilder:
                                 entry_dte,
                                 underlying_features,
                                 market_features,
+                                greeks_features,
+                                lookback_features,
+                                vix_feat,
+                                event_feat,
                                 label,
                             )
                         )
@@ -278,7 +346,7 @@ def _candidate_contracts(
 
 def _stock_symbols(config: CandidateDatasetConfig) -> list[str]:
     symbols: list[str] = []
-    for symbol in [*config.underlyings, config.market_regime_symbol]:
+    for symbol in [*config.underlyings, config.market_regime_symbol, config.vix_symbol]:
         normalized = symbol.upper()
         if normalized not in symbols:
             symbols.append(normalized)
@@ -315,10 +383,14 @@ def _row_from_label(
     entry_dte: int,
     underlying_features: dict[str, Any],
     market_features: dict[str, Any],
+    greeks_features: dict[str, Any],
+    lookback_features: dict[str, Any],
+    vix_features: dict[str, Any],
+    event_features: dict[str, Any],
     label: Any,
 ) -> CandidateDatasetRow:
-    features = {**underlying_features, **market_features}
-    missing = _missing_fields(contract, features)
+    all_features = {**underlying_features, **market_features, **greeks_features, **lookback_features, **vix_features, **event_features}
+    missing = _missing_fields(contract, all_features)
     return CandidateDatasetRow(
         entry_timestamp=entry_bar.timestamp,
         underlying=underlying,
@@ -372,6 +444,30 @@ def _row_from_label(
         days_to_exit=label.days_to_exit,
         label_version=label.label_version,
         missing_fields=tuple(missing),
+        # Additional underlying features
+        underlying_realized_vol_10d=underlying_features.get("underlying_realized_vol_10d"),
+        underlying_return_3d=underlying_features.get("underlying_return_3d"),
+        underlying_skew_5d=underlying_features.get("underlying_skew_5d"),
+        # Black-Scholes Greeks and IV
+        implied_volatility=greeks_features.get("implied_volatility"),
+        option_delta=greeks_features.get("option_delta"),
+        option_gamma=greeks_features.get("option_gamma"),
+        option_theta=greeks_features.get("option_theta"),
+        option_vega=greeks_features.get("option_vega"),
+        iv_vs_hv5d=greeks_features.get("iv_vs_hv5d"),
+        iv_vs_hv20d=greeks_features.get("iv_vs_hv20d"),
+        # Option lookback
+        option_volume_5d_avg=lookback_features.get("option_volume_5d_avg"),
+        option_trade_count_5d_avg=lookback_features.get("option_trade_count_5d_avg"),
+        # VIX regime
+        vix_close=vix_features.get("vix_close"),
+        vix_return_5d=vix_features.get("vix_return_5d"),
+        vix_realized_vol_5d=vix_features.get("vix_realized_vol_5d"),
+        vix_above_20=vix_features.get("vix_above_20"),
+        vix_above_30=vix_features.get("vix_above_30"),
+        # Event risk
+        days_to_earnings=event_features.get("days_to_earnings"),
+        has_earnings_in_forward_days=event_features.get("has_earnings_in_forward_days"),
     )
 
 
@@ -381,39 +477,48 @@ def _underlying_features(bars: list[PriceBar], entry_timestamp: datetime) -> dic
         return {
             "underlying_close": None,
             "underlying_return_1d": None,
+            "underlying_return_3d": None,
             "underlying_return_5d": None,
             "underlying_return_20d": None,
             "underlying_range_pct": None,
             "underlying_realized_vol_5d": None,
+            "underlying_realized_vol_10d": None,
             "underlying_realized_vol_20d": None,
             "underlying_sma_20_distance_pct": None,
             "underlying_above_sma_20": None,
             "underlying_volatility_ratio_5d_20d": None,
             "underlying_volume": None,
+            "underlying_skew_5d": None,
         }
 
     current = history[-1]
     previous = history[-2] if len(history) >= 2 else None
     prev_close = previous.close if previous else None
     return_1d = ((current.close / prev_close) - 1.0) if prev_close else None
+    return_3d = _window_return(history, periods=3)
     return_5d = _window_return(history, periods=5)
     return_20d = _window_return(history, periods=20)
     returns = _close_returns(history)
     realized_vol_5d = _realized_vol(returns[-5:])
+    realized_vol_10d = _realized_vol(returns[-10:])
     realized_vol_20d = _realized_vol(returns[-20:])
+    skew_5d = _skewness(returns[-5:])
     sma_20_distance_pct = _sma_distance_pct(history, periods=20)
     return {
         "underlying_close": current.close,
         "underlying_return_1d": round(return_1d, 8) if return_1d is not None else None,
+        "underlying_return_3d": round(return_3d, 8) if return_3d is not None else None,
         "underlying_return_5d": round(return_5d, 8) if return_5d is not None else None,
         "underlying_return_20d": round(return_20d, 8) if return_20d is not None else None,
         "underlying_range_pct": _range_pct(current.high, current.low, current.close),
         "underlying_realized_vol_5d": realized_vol_5d,
+        "underlying_realized_vol_10d": realized_vol_10d,
         "underlying_realized_vol_20d": realized_vol_20d,
         "underlying_sma_20_distance_pct": sma_20_distance_pct,
         "underlying_above_sma_20": _above_sma(sma_20_distance_pct),
         "underlying_volatility_ratio_5d_20d": _volatility_ratio(realized_vol_5d, realized_vol_20d),
         "underlying_volume": current.volume,
+        "underlying_skew_5d": skew_5d,
     }
 
 
@@ -438,6 +543,215 @@ def _market_regime_features(
         "market_volatility_regime": _volatility_regime(market_realized_vol_20d),
     }
 
+
+# ---------------------------------------------------------------------------
+# Black-Scholes helpers (no external dependencies — pure math)
+# ---------------------------------------------------------------------------
+
+def _norm_cdf(x: float) -> float:
+    """Standard normal CDF via math.erf."""
+    return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
+
+
+def _norm_pdf(x: float) -> float:
+    """Standard normal PDF."""
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
+def _bs_price(S: float, K: float, T: float, r: float, sigma: float, option_type: str) -> float:
+    """Black-Scholes European option price (call or put)."""
+    sqrt_T = math.sqrt(T)
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * sqrt_T)
+    d2 = d1 - sigma * sqrt_T
+    if option_type == "call":
+        return S * _norm_cdf(d1) - K * math.exp(-r * T) * _norm_cdf(d2)
+    return K * math.exp(-r * T) * _norm_cdf(-d2) - S * _norm_cdf(-d1)
+
+
+def _bs_vega(S: float, K: float, T: float, r: float, sigma: float) -> float:
+    """Black-Scholes vega (∂Price/∂sigma)."""
+    sqrt_T = math.sqrt(T)
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * sqrt_T)
+    return S * _norm_pdf(d1) * sqrt_T
+
+
+def _implied_volatility(
+    market_price: float,
+    S: float,
+    K: float,
+    T: float,
+    r: float,
+    option_type: str,
+    max_iterations: int = 100,
+    tolerance: float = 1e-6,
+) -> float | None:
+    """Newton-Raphson implied volatility solver. Returns None if unconverged."""
+    if T <= 0.0 or S <= 0.0 or K <= 0.0 or market_price <= 0.0:
+        return None
+    sigma = 0.25
+    for _ in range(max_iterations):
+        try:
+            price = _bs_price(S, K, T, r, sigma, option_type)
+            vega = _bs_vega(S, K, T, r, sigma)
+        except (ValueError, ZeroDivisionError):
+            return None
+        if abs(vega) < 1e-10:
+            return None
+        diff = price - market_price
+        if abs(diff) < tolerance:
+            return round(max(0.001, min(sigma, 10.0)), 8)
+        sigma = max(0.001, min(sigma - diff / vega, 10.0))
+    return None
+
+
+def _black_scholes_greeks(
+    S: float, K: float, T: float, r: float, sigma: float, option_type: str
+) -> dict[str, float | None]:
+    """Compute delta, gamma, theta ($/day), vega (per 1% IV move)."""
+    try:
+        sqrt_T = math.sqrt(T)
+        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * sqrt_T)
+        d2 = d1 - sigma * sqrt_T
+        pdf_d1 = _norm_pdf(d1)
+        discount = math.exp(-r * T)
+        gamma = pdf_d1 / (S * sigma * sqrt_T)
+        if option_type == "call":
+            delta = _norm_cdf(d1)
+            theta = (-S * pdf_d1 * sigma / (2.0 * sqrt_T) - r * K * discount * _norm_cdf(d2)) / 365.0
+        else:
+            delta = _norm_cdf(d1) - 1.0
+            theta = (-S * pdf_d1 * sigma / (2.0 * sqrt_T) + r * K * discount * _norm_cdf(-d2)) / 365.0
+        vega_per_pct = S * pdf_d1 * sqrt_T / 100.0
+        return {
+            "delta": round(delta, 8),
+            "gamma": round(gamma, 8),
+            "theta": round(theta, 8),
+            "vega": round(vega_per_pct, 8),
+        }
+    except (ValueError, ZeroDivisionError):
+        return {"delta": None, "gamma": None, "theta": None, "vega": None}
+
+
+def _option_greeks_features(
+    entry_bar: PriceBar,
+    underlying_close: float | None,
+    strike: float | None,
+    option_type: str | None,
+    dte: int | None,
+    risk_free_rate: float,
+    realized_vol_5d: float | None,
+    realized_vol_20d: float | None,
+) -> dict[str, Any]:
+    """Compute IV, Greeks, and IV/HV ratios for a candidate row."""
+    _empty: dict[str, Any] = {
+        "implied_volatility": None,
+        "option_delta": None,
+        "option_gamma": None,
+        "option_theta": None,
+        "option_vega": None,
+        "iv_vs_hv5d": None,
+        "iv_vs_hv20d": None,
+    }
+    if underlying_close is None or strike is None or option_type is None or dte is None or dte <= 0:
+        return _empty
+    T = dte / 365.0
+    iv = _implied_volatility(float(entry_bar.close), float(underlying_close), float(strike), T, risk_free_rate, option_type)
+    if iv is None:
+        return _empty
+    greeks = _black_scholes_greeks(float(underlying_close), float(strike), T, risk_free_rate, iv, option_type)
+    iv_vs_hv5d = round(iv / realized_vol_5d, 8) if realized_vol_5d else None
+    iv_vs_hv20d = round(iv / realized_vol_20d, 8) if realized_vol_20d else None
+    return {
+        "implied_volatility": iv,
+        "option_delta": greeks["delta"],
+        "option_gamma": greeks["gamma"],
+        "option_theta": greeks["theta"],
+        "option_vega": greeks["vega"],
+        "iv_vs_hv5d": iv_vs_hv5d,
+        "iv_vs_hv20d": iv_vs_hv20d,
+    }
+
+
+def _option_lookback_features(
+    path: list[PriceBar],
+    entry_timestamp: datetime,
+    lookback_days: int = 5,
+) -> dict[str, Any]:
+    """Average volume and trade count from pre-entry option bars (last lookback_days)."""
+    cutoff = entry_timestamp - timedelta(days=lookback_days)
+    pre_entry = [b for b in path if cutoff <= b.timestamp < entry_timestamp]
+    if not pre_entry:
+        return {"option_volume_5d_avg": None, "option_trade_count_5d_avg": None}
+    volumes = [b.volume for b in pre_entry if b.volume is not None]
+    counts = [b.trade_count for b in pre_entry if b.trade_count is not None]
+    return {
+        "option_volume_5d_avg": round(sum(volumes) / len(volumes), 4) if volumes else None,
+        "option_trade_count_5d_avg": round(sum(counts) / len(counts), 4) if counts else None,
+    }
+
+
+def _vix_features(
+    vix_bars: list[PriceBar],
+    entry_timestamp: datetime,
+) -> dict[str, Any]:
+    """VIX level, return, vol-of-vol, and threshold regime features."""
+    history = [bar for bar in sorted(vix_bars, key=lambda b: b.timestamp) if bar.timestamp <= entry_timestamp]
+    if not history:
+        return {
+            "vix_close": None,
+            "vix_return_5d": None,
+            "vix_realized_vol_5d": None,
+            "vix_above_20": None,
+            "vix_above_30": None,
+        }
+    vix_close = history[-1].close
+    vix_return_5d = _window_return(history, periods=5)
+    returns = _close_returns(history)
+    vix_realized_vol_5d = _realized_vol(returns[-5:])
+    return {
+        "vix_close": vix_close,
+        "vix_return_5d": round(vix_return_5d, 8) if vix_return_5d is not None else None,
+        "vix_realized_vol_5d": vix_realized_vol_5d,
+        "vix_above_20": int(vix_close >= 20.0),
+        "vix_above_30": int(vix_close >= 30.0),
+    }
+
+
+def _event_features(
+    earnings_events: list[EarningsEvent],
+    entry_timestamp: datetime,
+    forward_days: int,
+) -> dict[str, Any]:
+    """Days to next earnings and in-window flag."""
+    entry_date = entry_timestamp.date()
+    horizon = entry_date + timedelta(days=forward_days)
+    upcoming = [e for e in earnings_events if e.report_date > entry_date]
+    if not upcoming:
+        return {"days_to_earnings": None, "has_earnings_in_forward_days": 0}
+    nearest = min(upcoming, key=lambda e: e.report_date)
+    return {
+        "days_to_earnings": (nearest.report_date - entry_date).days,
+        "has_earnings_in_forward_days": int(nearest.report_date <= horizon),
+    }
+
+
+def _skewness(returns: list[float]) -> float | None:
+    """Moment-based skewness of a return series. Returns None if < 3 observations."""
+    n = len(returns)
+    if n < 3:
+        return None
+    mean = sum(returns) / n
+    variance = sum((x - mean) ** 2 for x in returns) / (n - 1)
+    std = variance ** 0.5
+    if std < 1e-10:
+        return None
+    third_moment = sum((x - mean) ** 3 for x in returns) / n
+    return round(third_moment / (std ** 3), 8)
+
+
+# ---------------------------------------------------------------------------
+# Feature computation helpers (original)
+# ---------------------------------------------------------------------------
 
 def _window_return(history: list[PriceBar], periods: int) -> float | None:
     if len(history) <= periods:
