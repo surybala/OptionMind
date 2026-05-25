@@ -12,6 +12,20 @@ import requests
 from ml.providers.models import Greeks, OptionChainSnapshot, OptionContract, OptionTrade, PriceBar
 
 
+class MassiveApiError(RuntimeError):
+    """Redacted Massive API failure."""
+
+    def __init__(self, safe_url: str, status_code: int | None = None, detail: str | None = None) -> None:
+        self.safe_url = safe_url
+        self.status_code = status_code
+        message = f"Massive API request failed for {safe_url}"
+        if status_code is not None:
+            message += f" status={status_code}"
+        if detail:
+            message += f" detail={detail[:300]}"
+        super().__init__(message)
+
+
 @dataclass
 class MassiveProvider:
     """Normalized Massive.com adapter for historical market/options data.
@@ -175,7 +189,12 @@ class MassiveProvider:
             "sort": "asc",
             "limit": min(limit or 50_000, 50_000),
         }
-        payload = self._get_json(path, params)
+        try:
+            payload = self._get_json(path, params)
+        except MassiveApiError as exc:
+            if exc.status_code == 404:
+                return []
+            raise
         rows = payload.get("results") or []
         if limit is not None:
             rows = rows[:limit]
@@ -211,7 +230,10 @@ class MassiveProvider:
             response.raise_for_status()
         except requests.RequestException as exc:
             safe_url = _redact_url(getattr(getattr(exc, "request", None), "url", None) or url)
-            raise RuntimeError(f"Massive API request failed for {safe_url}") from None
+            response = getattr(exc, "response", None)
+            status_code = getattr(response, "status_code", None)
+            detail = _redact_text(getattr(response, "text", "") or "")
+            raise MassiveApiError(safe_url, status_code=status_code, detail=detail) from None
         return response.json()
 
 
@@ -394,3 +416,9 @@ def _redact_url(url: str) -> str:
     for key, value in parse_qsl(parts.query, keep_blank_values=True):
         query.append((key, "***" if key.lower() == "apikey" else value))
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+def _redact_text(text: str) -> str:
+    if not text:
+        return ""
+    return text.replace("apiKey", "apiKey").replace("apikey", "apikey")

@@ -15,8 +15,8 @@ It consumes the provider protocols from `ml/providers` and emits one row per his
 Each row contains:
 
 - Option identity: symbol, underlying, option type, strike, expiration, DTE
-- Entry-time underlying features: close, 1-day return, range percentage, volume
-- Option entry price and volume
+- Entry-time underlying features: close, 1-day/5-day returns, range percentage, realized volatility, volume
+- Option/strike features: strike distance, moneyness, entry OHLC/VWAP/range/liquidity
 - Forward-simulated exit price and timestamp
 - P&L-centered labels:
   - `expected_pnl`
@@ -93,3 +93,30 @@ artifacts/datasets/candidate_rows/
 Use `--jsonl-output artifacts/datasets/sample.jsonl` only when you want a small inspection copy.
 
 `artifacts/` is git-ignored because generated datasets should not be committed.
+
+## Quality Report
+
+Audit generated rows before training:
+
+```bash
+.venv/bin/python -m ml.datasets.audit_candidate_dataset \
+  --input artifacts/datasets/massive_spy_smoke.jsonl \
+  --json-output artifacts/reports/massive_spy_smoke_quality.json \
+  --markdown-output artifacts/reports/massive_spy_smoke_quality.md
+```
+
+The report summarizes row counts, label balance, exit reasons, P&L extremes,
+missing fields, null counts, and numeric feature distributions.
+
+## Baseline Model
+
+Train the first transparent baseline on generated rows:
+
+```bash
+.venv/bin/python -m ml.models.train_baseline \
+  --input artifacts/datasets/massive_spy_smoke.jsonl \
+  --output artifacts/models/baseline_linear_massive_spy_v001.json
+```
+
+The baseline is intentionally simple: a least-squares linear model over numeric
+decision-time features, with a time-ordered train/test split and JSON artifact.

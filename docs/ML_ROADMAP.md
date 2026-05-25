@@ -82,6 +82,15 @@ The candidate dataset builder now uses this engine instead of inline label
 logic, and each row records `label_version` so future label definitions can be
 compared without mixing training targets.
 
+Supporting tooling:
+
+- `ml/datasets/audit_candidate_dataset.py` reports dataset quality before training.
+- `ml/models/train_baseline.py` trains a transparent least-squares baseline for `expected_pnl`.
+
+The baseline is not the final champion model. It is the first sanity-check model
+for validating row shape, feature availability, target behavior, and
+time-ordered evaluation mechanics before introducing tree models.
+
 ## Phase 4: Baseline Model
 
 Goal: train a simple, inspectable model before neural networks.

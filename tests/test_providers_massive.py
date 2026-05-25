@@ -35,6 +35,18 @@ class FailingSession:
         raise error
 
 
+class NotFoundSession:
+    def get(self, url, params=None, timeout=None):
+        request = requests.Request("GET", url, params=params).prepare()
+        response = requests.Response()
+        response.status_code = 404
+        response._content = b'{"error":"not found"}'
+        response.request = request
+        error = requests.HTTPError("not found", response=response)
+        error.request = request
+        raise error
+
+
 def provider(responses):
     return MassiveProvider(api_key="key", base_url="https://api.massive.test", session=FakeSession(responses))
 
@@ -230,3 +242,16 @@ def test_massive_request_errors_redact_api_key():
     message = str(exc.value)
     assert "super-secret" not in message
     assert "apiKey=%2A%2A%2A" in message
+
+
+def test_option_aggregate_404_returns_empty_bars():
+    p = MassiveProvider(api_key="super-secret", base_url="https://api.massive.test", session=NotFoundSession())
+
+    bars = p.get_option_bars(
+        ["SPY260626P00500000"],
+        datetime(2026, 5, 14, tzinfo=UTC),
+        datetime(2026, 5, 15, tzinfo=UTC),
+        "1Day",
+    )
+
+    assert bars == {"SPY260626P00500000": []}

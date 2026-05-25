@@ -41,7 +41,7 @@ def main() -> int:
     config = CandidateDatasetConfig(
         underlyings=[item.strip().upper() for item in args.underlyings.split(",") if item.strip()],
         entry_start=_parse_datetime(args.entry_start),
-        entry_end=_parse_datetime(args.entry_end),
+        entry_end=_parse_datetime(args.entry_end, end_of_day=True),
         min_dte=args.min_dte,
         max_dte=args.max_dte,
         contract_status=args.contract_status,
@@ -83,9 +83,12 @@ def _write_jsonl(rows, output: Path) -> None:
             fh.write(json.dumps(asdict(row), default=str) + "\n")
 
 
-def _parse_datetime(value: str) -> datetime:
+def _parse_datetime(value: str, *, end_of_day: bool = False) -> datetime:
     if len(value) == 10:
-        return datetime.fromisoformat(value).replace(tzinfo=UTC)
+        parsed_date = datetime.fromisoformat(value).replace(tzinfo=UTC)
+        if end_of_day:
+            return parsed_date.replace(hour=23, minute=59, second=59, microsecond=999999)
+        return parsed_date
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)

@@ -9,11 +9,14 @@ class FakeProvider:
         self.entry = datetime(2026, 5, 14, tzinfo=UTC)
 
     def get_stock_bars(self, symbols, start, end, timeframe):
+        bars = []
+        for offset in range(21, 0, -1):
+            day = self.entry - timedelta(days=offset)
+            close = 501 - offset
+            bars.append(PriceBar("SPY", day, close - 1, close + 1, close - 2, close, volume=1000 + offset))
+        bars.append(PriceBar("SPY", self.entry, 500, 505, 499, 504, volume=1200))
         return {
-            "SPY": [
-                PriceBar("SPY", self.entry - timedelta(days=1), 498, 501, 497, 500, volume=1000),
-                PriceBar("SPY", self.entry, 500, 505, 499, 504, volume=1200),
-            ]
+            "SPY": bars
         }
 
     def get_option_contracts(
@@ -49,9 +52,9 @@ class FakeProvider:
         data = {}
         for symbol in symbols:
             data[symbol] = [
-                PriceBar(symbol, self.entry, 4.00, 4.20, 3.90, 4.00, volume=100),
-                PriceBar(symbol, self.entry + timedelta(days=1), 2.40, 2.50, 2.00, 2.20, volume=90),
-                PriceBar(symbol, self.entry + timedelta(days=2), 1.90, 2.00, 1.80, 1.90, volume=80),
+                PriceBar(symbol, self.entry, 4.00, 4.20, 3.90, 4.00, volume=100, trade_count=12, vwap=4.05),
+                PriceBar(symbol, self.entry + timedelta(days=1), 2.40, 2.50, 2.00, 2.20, volume=90, trade_count=10, vwap=2.25),
+                PriceBar(symbol, self.entry + timedelta(days=2), 1.90, 2.00, 1.80, 1.90, volume=80, trade_count=8, vwap=1.92),
             ]
         return data
 
@@ -63,8 +66,8 @@ class StopLossProvider(FakeProvider):
     def get_option_bars(self, symbols, start, end, timeframe, limit=None):
         return {
             symbol: [
-                PriceBar(symbol, self.entry, 4.00, 4.20, 3.90, 4.00, volume=100),
-                PriceBar(symbol, self.entry + timedelta(days=1), 8.30, 8.50, 8.10, 8.30, volume=90),
+                PriceBar(symbol, self.entry, 4.00, 4.20, 3.90, 4.00, volume=100, trade_count=12, vwap=4.05),
+                PriceBar(symbol, self.entry + timedelta(days=1), 8.30, 8.50, 8.10, 8.30, volume=90, trade_count=9, vwap=8.32),
             ]
             for symbol in symbols
         }
@@ -89,6 +92,13 @@ def test_candidate_dataset_builder_emits_profit_take_rows():
     assert row.dte == 43
     assert row.underlying_close == 504
     assert row.underlying_return_1d == 0.008
+    assert row.underlying_return_5d == 0.01612903
+    assert row.underlying_realized_vol_5d is not None
+    assert row.strike_distance_pct == -0.00793651
+    assert row.moneyness == 1.008
+    assert row.option_entry_range_pct == 0.075
+    assert row.option_entry_trade_count == 12
+    assert row.option_entry_vwap == 4.05
     assert row.exit_reason == "profit_take"
     assert row.expected_pnl == 210.0
     assert row.realized_pnl_per_contract == 210.0

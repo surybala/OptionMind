@@ -48,11 +48,22 @@ class CandidateDatasetRow:
 
     underlying_close: float | None
     underlying_return_1d: float | None
+    underlying_return_5d: float | None
     underlying_range_pct: float | None
+    underlying_realized_vol_5d: float | None
+    underlying_realized_vol_20d: float | None
     underlying_volume: float | None
+    strike_distance_pct: float | None
+    moneyness: float | None
 
+    option_entry_open: float
+    option_entry_high: float
+    option_entry_low: float
     option_entry_price: float
+    option_entry_range_pct: float | None
     option_entry_volume: float | None
+    option_entry_trade_count: int | None
+    option_entry_vwap: float | None
     option_exit_price: float
     exit_timestamp: datetime
     exit_reason: str
@@ -156,10 +167,21 @@ class HistoricalCandidateDatasetBuilder:
                         source=contract.source,
                         underlying_close=underlying_features["underlying_close"],
                         underlying_return_1d=underlying_features["underlying_return_1d"],
+                        underlying_return_5d=underlying_features["underlying_return_5d"],
                         underlying_range_pct=underlying_features["underlying_range_pct"],
+                        underlying_realized_vol_5d=underlying_features["underlying_realized_vol_5d"],
+                        underlying_realized_vol_20d=underlying_features["underlying_realized_vol_20d"],
                         underlying_volume=underlying_features["underlying_volume"],
+                        strike_distance_pct=_strike_distance_pct(contract.strike, underlying_features["underlying_close"]),
+                        moneyness=_moneyness(contract.strike, underlying_features["underlying_close"]),
+                        option_entry_open=float(entry_bar.open),
+                        option_entry_high=float(entry_bar.high),
+                        option_entry_low=float(entry_bar.low),
                         option_entry_price=label.entry_price,
+                        option_entry_range_pct=_range_pct(entry_bar.high, entry_bar.low, entry_bar.close),
                         option_entry_volume=entry_bar.volume,
+                        option_entry_trade_count=entry_bar.trade_count,
+                        option_entry_vwap=entry_bar.vwap,
                         option_exit_price=label.exit_price,
                         exit_timestamp=label.exit_timestamp,
                         exit_reason=label.exit_reason,
@@ -200,7 +222,10 @@ def _underlying_features(bars: list[PriceBar], entry_timestamp: datetime) -> dic
         return {
             "underlying_close": None,
             "underlying_return_1d": None,
+            "underlying_return_5d": None,
             "underlying_range_pct": None,
+            "underlying_realized_vol_5d": None,
+            "underlying_realized_vol_20d": None,
             "underlying_volume": None,
         }
 
@@ -208,13 +233,61 @@ def _underlying_features(bars: list[PriceBar], entry_timestamp: datetime) -> dic
     previous = history[-2] if len(history) >= 2 else None
     prev_close = previous.close if previous else None
     return_1d = ((current.close / prev_close) - 1.0) if prev_close else None
-    range_pct = ((current.high - current.low) / current.close) if current.close else None
+    return_5d = _window_return(history, periods=5)
+    returns = _close_returns(history)
     return {
         "underlying_close": current.close,
         "underlying_return_1d": round(return_1d, 8) if return_1d is not None else None,
-        "underlying_range_pct": round(range_pct, 8) if range_pct is not None else None,
+        "underlying_return_5d": round(return_5d, 8) if return_5d is not None else None,
+        "underlying_range_pct": _range_pct(current.high, current.low, current.close),
+        "underlying_realized_vol_5d": _realized_vol(returns[-5:]),
+        "underlying_realized_vol_20d": _realized_vol(returns[-20:]),
         "underlying_volume": current.volume,
     }
+
+
+def _window_return(history: list[PriceBar], periods: int) -> float | None:
+    if len(history) <= periods:
+        return None
+    current = history[-1].close
+    previous = history[-(periods + 1)].close
+    if not previous:
+        return None
+    return (current / previous) - 1.0
+
+
+def _close_returns(history: list[PriceBar]) -> list[float]:
+    returns: list[float] = []
+    for previous, current in zip(history, history[1:]):
+        if previous.close:
+            returns.append((current.close / previous.close) - 1.0)
+    return returns
+
+
+def _realized_vol(returns: list[float]) -> float | None:
+    if len(returns) < 2:
+        return None
+    mean = sum(returns) / len(returns)
+    variance = sum((value - mean) ** 2 for value in returns) / (len(returns) - 1)
+    return round((variance ** 0.5) * (252 ** 0.5), 8)
+
+
+def _range_pct(high: float | None, low: float | None, close: float | None) -> float | None:
+    if high is None or low is None or not close:
+        return None
+    return round((float(high) - float(low)) / float(close), 8)
+
+
+def _strike_distance_pct(strike: float | None, underlying_close: float | None) -> float | None:
+    if strike is None or not underlying_close:
+        return None
+    return round((float(strike) - float(underlying_close)) / float(underlying_close), 8)
+
+
+def _moneyness(strike: float | None, underlying_close: float | None) -> float | None:
+    if strike is None or not underlying_close:
+        return None
+    return round(float(underlying_close) / float(strike), 8)
 
 
 def _first_bar_at_or_after(path: list[PriceBar], timestamp: datetime) -> PriceBar | None:
