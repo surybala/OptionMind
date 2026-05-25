@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-dte", type=int, default=7)
     parser.add_argument("--max-dte", type=int, default=45)
     parser.add_argument("--max-contracts", type=int, default=25)
+    parser.add_argument("--option-limit", type=int, default=100, help="Provider contract metadata page limit before local filtering.")
     parser.add_argument("--forward-days", type=int, default=30)
     parser.add_argument("--dataset-version", default="candidate_rows_v001")
     parser.add_argument("--output-dir", default="artifacts/datasets")
@@ -45,6 +46,7 @@ def main() -> int:
         min_dte=args.min_dte,
         max_dte=args.max_dte,
         contract_status=args.contract_status,
+        option_limit=args.option_limit,
         max_contracts_per_underlying=args.max_contracts,
         forward_days=args.forward_days,
     )

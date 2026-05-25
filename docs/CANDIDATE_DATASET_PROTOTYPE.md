@@ -73,6 +73,7 @@ The CLI writes partitioned Parquet rows and a manifest to `artifacts/`:
   --entry-start 2025-05-14 \
   --entry-end 2025-05-15 \
   --contract-status inactive \
+  --option-limit 1000 \
   --max-contracts 10 \
   --dataset-version candidate_rows_massive_v001 \
   --output-dir artifacts/datasets
