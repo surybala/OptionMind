@@ -50,6 +50,9 @@ DEFAULT_FEATURE_COLUMNS = [
     "underlying_skew_5d",
     # Idiosyncratic vs market vol: ETF moving faster/slower than SPY
     "underlying_vol_vs_market",
+    # Vol momentum: 5d realized vol relative to 10d — captures whether volatility
+    # is currently accelerating (>1) or decelerating (<1) independent of level.
+    "vol_acceleration",
     # Market regime
     "market_return_5d",
     "market_return_20d",
@@ -95,8 +98,8 @@ DEFAULT_FEATURE_COLUMNS = [
     "days_to_macro_event",
 ]
 
-DEFAULT_FEATURE_VERSION = "features_v004"
-DEFAULT_LABEL_VERSION = "short_option_labels_v001"
+DEFAULT_FEATURE_VERSION = "features_v005"
+DEFAULT_LABEL_VERSION = "short_option_labels_v002"
 
 
 @dataclass(frozen=True)
@@ -271,6 +274,12 @@ def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
         computed via Newton-Raphson Black-Scholes.  Approximates the slope of
         the vol surface between the two strikes — a wide positive spread on
         PCS signals steep put skew (protective demand).
+
+    New in features_v005:
+      - ``vol_acceleration``: 5d realized vol divided by 10d realized vol.
+        Ratio > 1 means vol is currently expanding; < 1 means it is contracting.
+        Complements ``underlying_volatility_ratio_5d_20d`` (5d/20d) by isolating
+        near-term momentum before the longer window absorbs the move.
     """
     df = df.copy()
 
@@ -292,6 +301,15 @@ def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
         und_vol = pd.to_numeric(df["underlying_realized_vol_5d"], errors="coerce")
         mkt_vol = pd.to_numeric(df["market_realized_vol_5d"], errors="coerce")
         df["underlying_vol_vs_market"] = (und_vol / mkt_vol.replace(0.0, np.nan)).round(8)
+
+    # Vol momentum: 5d realized vol divided by 10d realized vol.
+    # Ratio > 1 signals vol is expanding (spike in progress); < 1 signals mean-reversion.
+    # Distinct from underlying_volatility_ratio_5d_20d (5d/20d) — the 5d/10d window
+    # catches near-term acceleration that the longer ratio smooths away.
+    if "underlying_realized_vol_5d" in df.columns and "underlying_realized_vol_10d" in df.columns:
+        vol_5d = pd.to_numeric(df["underlying_realized_vol_5d"], errors="coerce")
+        vol_10d = pd.to_numeric(df["underlying_realized_vol_10d"], errors="coerce")
+        df["vol_acceleration"] = (vol_5d / vol_10d.replace(0.0, np.nan)).round(8)
 
     # Unusual option activity relative to recent baseline
     if "option_entry_trade_count" in df.columns and "option_trade_count_5d_avg" in df.columns:

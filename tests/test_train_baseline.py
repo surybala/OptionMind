@@ -195,3 +195,55 @@ def test_feature_columns_include_new_v004_features():
     new_features = {"underlying_vol_vs_market", "option_activity_spike", "iv_skew_wing"}
     for col in new_features:
         assert col in DEFAULT_FEATURE_COLUMNS, f"{col} missing from features_v004"
+
+
+# ---------------------------------------------------------------------------
+# features_v005: vol momentum / acceleration
+# ---------------------------------------------------------------------------
+
+def test_engineer_features_vol_acceleration_expanding():
+    """5d vol > 10d vol → ratio > 1, signalling vol is accelerating."""
+    df = pd.DataFrame([{
+        "underlying_realized_vol_5d": 0.30,
+        "underlying_realized_vol_10d": 0.20,
+    }])
+    out = _engineer_features(df)
+    assert "vol_acceleration" in out.columns
+    assert out["vol_acceleration"].iloc[0] == pytest.approx(1.5)
+
+
+def test_engineer_features_vol_acceleration_contracting():
+    """5d vol < 10d vol → ratio < 1, signalling vol is decelerating."""
+    df = pd.DataFrame([{
+        "underlying_realized_vol_5d": 0.10,
+        "underlying_realized_vol_10d": 0.20,
+    }])
+    out = _engineer_features(df)
+    assert out["vol_acceleration"].iloc[0] == pytest.approx(0.5)
+
+
+def test_engineer_features_vol_acceleration_zero_10d_is_nan():
+    df = pd.DataFrame([{"underlying_realized_vol_5d": 0.20, "underlying_realized_vol_10d": 0.0}])
+    out = _engineer_features(df)
+    assert pd.isna(out["vol_acceleration"].iloc[0])
+
+
+def test_engineer_features_vol_acceleration_skipped_when_columns_missing():
+    df = pd.DataFrame([{"underlying_realized_vol_5d": 0.20}])
+    out = _engineer_features(df)
+    assert "vol_acceleration" not in out.columns
+
+
+def test_feature_columns_include_v005_features():
+    assert "vol_acceleration" in DEFAULT_FEATURE_COLUMNS, "vol_acceleration missing from features_v005"
+
+
+def test_feature_columns_include_continuous_event_features():
+    """Continuous event proxies must be present; binary flags must be absent."""
+    continuous = {"days_to_earnings", "days_to_ex_dividend", "days_to_fomc", "days_to_macro_event"}
+    binary = {"has_earnings_in_forward_days", "has_dividend_in_forward_days",
+              "has_fomc_in_forward_days", "has_macro_event_in_forward_days"}
+    for col in continuous:
+        assert col in DEFAULT_FEATURE_COLUMNS, f"{col} missing from feature list"
+    for col in binary:
+        assert col not in DEFAULT_FEATURE_COLUMNS, f"binary flag {col} should not be in feature list"

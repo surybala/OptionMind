@@ -14,13 +14,13 @@ StrategyType = Literal["PCS", "CCS"]
 
 @dataclass(frozen=True)
 class CreditSpreadLabelConfig:
-    profit_take_pct: float = 0.50
+    profit_take_pct: float = 0.75
     stop_loss_multiple: float = 2.0
     stop_loss_max_loss_pct: float | None = 0.80
     large_loss_multiple: float = 1.0
     contract_multiplier: int = 100
     price_field: Literal["close"] = "close"
-    label_version: str = "credit_spread_labels_v001"
+    label_version: str = "credit_spread_labels_v002"
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.profit_take_pct < 1.0:
