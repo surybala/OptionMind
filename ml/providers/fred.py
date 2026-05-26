@@ -36,9 +36,12 @@ Usage
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -72,11 +75,12 @@ class FREDProvider:
     api_key: str
     base_url: str = _BASE_URL
     timeout: float = 30.0
+    cache_dir: Path | str | None = None
     session: Any = field(default_factory=requests.Session)
     source: str = "fred"
 
-    # Cache release dates so repeated calls within the same builder run
-    # (different date ranges, same instance) don't hit the network twice.
+    # In-memory cache: release_id → dates. Populated from disk cache on first
+    # access; avoids repeated JSON reads within the same builder run.
     _cache: dict[int, list[date]] = field(default_factory=dict, repr=False)
 
     @classmethod
@@ -88,7 +92,10 @@ class FREDProvider:
                 "FRED_API_KEY environment variable is required. "
                 "Get a free key at https://fred.stlouisfed.org/docs/api/api_key.html"
             )
-        return cls(api_key=api_key)
+        return cls(
+            api_key=api_key,
+            cache_dir=os.getenv("FRED_CACHE_DIR", "artifacts/cache/fred"),
+        )
 
     # ------------------------------------------------------------------
     # EconomicCalendarProvider
@@ -154,9 +161,23 @@ class FREDProvider:
     # ------------------------------------------------------------------
 
     def _release_dates(self, release_id: int) -> list[date]:
-        """Return all historical release dates for *release_id* (cached)."""
+        """Return all historical release dates for *release_id*.
+
+        Check order: in-memory cache → disk cache → FRED API.
+        FRED release calendars are stable (past dates never change), so both
+        layers are safe to keep indefinitely.
+        """
         if release_id in self._cache:
             return self._cache[release_id]
+
+        # Disk cache: one file per release_id, keyed by a stable name.
+        disk_path = self._release_cache_path(release_id)
+        if disk_path is not None and disk_path.exists():
+            raw = json.loads(disk_path.read_text(encoding="utf-8"))
+            dates = [_parse_date(s) for s in raw]
+            dates = [d for d in dates if d is not None]
+            self._cache[release_id] = dates
+            return dates
 
         url = f"{self.base_url}/release/dates"
         params = {
@@ -171,11 +192,18 @@ class FREDProvider:
         resp.raise_for_status()
         data = resp.json()
 
-        dates: list[date] = []
+        dates = []
         for item in data.get("release_dates", []):
             d = _parse_date(item.get("date"))
             if d is not None:
                 dates.append(d)
+
+        if disk_path is not None:
+            disk_path.parent.mkdir(parents=True, exist_ok=True)
+            disk_path.write_text(
+                json.dumps([d.isoformat() for d in dates], sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
 
         self._cache[release_id] = dates
         return dates
@@ -195,9 +223,17 @@ class FREDProvider:
             "observation_start": start.isoformat(),
             "observation_end": end.isoformat(),
         }
-        resp = self.session.get(url, params=params, timeout=self.timeout)
-        resp.raise_for_status()
-        data = resp.json()
+
+        disk_path = self._observations_cache_path(series_id, start, end)
+        if disk_path is not None and disk_path.exists():
+            data = json.loads(disk_path.read_text(encoding="utf-8"))
+        else:
+            resp = self.session.get(url, params=params, timeout=self.timeout)
+            resp.raise_for_status()
+            data = resp.json()
+            if disk_path is not None:
+                disk_path.parent.mkdir(parents=True, exist_ok=True)
+                disk_path.write_text(json.dumps(data, sort_keys=True) + "\n", encoding="utf-8")
 
         bars: list[PriceBar] = []
         for item in data.get("observations", []):
@@ -218,6 +254,27 @@ class FREDProvider:
                 )
             )
         return bars
+
+    # ------------------------------------------------------------------
+    # Disk cache helpers
+    # ------------------------------------------------------------------
+
+    def _release_cache_path(self, release_id: int) -> Path | None:
+        """Return the disk cache path for a release-dates response, or None."""
+        if self.cache_dir is None:
+            return None
+        return Path(self.cache_dir) / "releases" / f"release_{release_id}.json"
+
+    def _observations_cache_path(self, series_id: str, start: date, end: date) -> Path | None:
+        """Return the disk cache path for a series-observations response, or None."""
+        if self.cache_dir is None:
+            return None
+        key = json.dumps(
+            {"series_id": series_id, "start": start.isoformat(), "end": end.isoformat()},
+            sort_keys=True,
+        )
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        return Path(self.cache_dir) / "observations" / f"{digest}.json"
 
 
 def _parse_date(value: str | None) -> date | None:
