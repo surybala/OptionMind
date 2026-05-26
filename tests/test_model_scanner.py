@@ -97,6 +97,22 @@ class FakeLiveProvider:
         }
 
 
+class WiderSpreadLiveProvider(FakeLiveProvider):
+    def get_current_option_chain(self, underlying, expiration_gte=None, expiration_lte=None, limit=None):
+        chain = super().get_current_option_chain(underlying, expiration_gte, expiration_lte, limit)
+        chain.update(
+            {
+                "SPY260619P00085000": OptionChainSnapshot(
+                    "SPY260619P00085000", underlying, self.now, bid=0.20, ask=0.25, last=0.22, source="fake"
+                ),
+                "SPY260619C00120000": OptionChainSnapshot(
+                    "SPY260619C00120000", underlying, self.now, bid=0.15, ask=0.20, last=0.17, source="fake"
+                ),
+            }
+        )
+        return chain
+
+
 def _champion_registry(tmp_path):
     artifact_path = tmp_path / "linear.json"
     artifact_path.write_text(
@@ -162,3 +178,28 @@ def test_live_paper_inference_provider_scores_current_spreads_from_champion(tmp_
     assert picks[0]["long_strike"] == 90.0
     assert picks[0]["model_id"] == "champion"
     assert picks[0]["feature_version"] == "features_v002"
+
+
+def test_live_paper_inference_provider_can_emit_multiple_spread_widths(tmp_path):
+    provider = WiderSpreadLiveProvider()
+    registry_path = _champion_registry(tmp_path)
+    inference = LivePaperInferenceProvider(
+        {
+            "ml_scanner": {
+                "registry_path": str(registry_path),
+                "min_dte": 7,
+                "max_dte": 45,
+                "vix_symbol": "I:VIX",
+            },
+            "strategies": {
+                "put_credit_spread": {"enabled": True, "spread_widths": [5, 10], "min_net_credit": 0.10},
+                "call_credit_spread": {"enabled": False},
+            },
+        },
+        provider=provider,
+        now_fn=lambda: provider.now,
+    )
+
+    picks = inference.get_top_picks(["SPY"], n=10)
+
+    assert {pick["width"] for pick in picks if pick["strategy"] == "PCS"} == {5.0, 10.0}

@@ -84,6 +84,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", required=True, help="Parquet dataset directory or file.")
     parser.add_argument("--output", required=True, help="Output artifact JSON path.")
     parser.add_argument("--model-output", default=None, help="XGBoost model output path.")
+    parser.add_argument("--target", default=TARGET_COLUMN, choices=["large_loss_label", "stop_loss_hit"])
     parser.add_argument("--test-fraction", type=float, default=0.25)
     parser.add_argument("--walk-forward-folds", type=int, default=3)
     parser.add_argument("--min-walk-forward-train-rows", type=int, default=None)
@@ -121,6 +122,7 @@ def main() -> int:
     artifact = train_large_loss_classifier(
         df,
         model_output=model_output,
+        target_column=args.target,
         test_fraction=args.test_fraction,
         walk_forward_folds=args.walk_forward_folds,
         min_walk_forward_train_rows=args.min_walk_forward_train_rows,
@@ -148,6 +150,7 @@ def train_large_loss_classifier(
     df: pd.DataFrame,
     *,
     model_output: Path,
+    target_column: str = TARGET_COLUMN,
     test_fraction: float = 0.25,
     min_rows: int = 20,
     walk_forward_folds: int = 3,
@@ -179,12 +182,12 @@ def train_large_loss_classifier(
     """
     if xgb is None:
         raise ImportError("xgboost is required. Install xgboost and its native runtime dependencies.")
-    if TARGET_COLUMN not in df.columns:
-        raise ValueError(f"Missing target column '{TARGET_COLUMN}' in dataset.")
+    if target_column not in df.columns:
+        raise ValueError(f"Missing target column '{target_column}' in dataset.")
 
     clean = df.copy()
-    clean[TARGET_COLUMN] = pd.to_numeric(clean[TARGET_COLUMN], errors="coerce")
-    clean = clean.dropna(subset=[TARGET_COLUMN])
+    clean[target_column] = pd.to_numeric(clean[target_column], errors="coerce")
+    clean = clean.dropna(subset=[target_column])
     if len(clean) < min_rows:
         raise ValueError(f"Need at least {min_rows} labeled rows, found {len(clean)}")
     if "entry_timestamp" in clean.columns:
@@ -196,7 +199,7 @@ def train_large_loss_classifier(
         raise ValueError("No usable numeric feature columns found.")
 
     split_index = _split_index(len(clean), test_fraction)
-    y_all = clean[TARGET_COLUMN].to_numpy(dtype=float)
+    y_all = clean[target_column].to_numpy(dtype=float)
     y_train, y_test = y_all[:split_index], y_all[split_index:]
 
     # Auto-compute scale_pos_weight from training data if not provided.
@@ -236,6 +239,7 @@ def train_large_loss_classifier(
 
     walk_forward = _walk_forward_clf(
         clean,
+        target_column=target_column,
         feature_columns=feature_columns,
         fold_count=walk_forward_folds,
         min_train_rows=min_walk_forward_train_rows or max(min_rows, split_index),
@@ -250,9 +254,9 @@ def train_large_loss_classifier(
 
     artifact_metadata = _artifact_metadata(clean)
     return LargeLossClassifierArtifact(
-        model_type="xgboost_binary_large_loss_v001",
+        model_type="xgboost_binary_large_loss_v001" if target_column == TARGET_COLUMN else "xgboost_binary_risk_v001",
         created_at=datetime.now(UTC).isoformat(),
-        target_column=TARGET_COLUMN,
+        target_column=target_column,
         feature_version=artifact_metadata["feature_version"],
         label_version=artifact_metadata["label_version"],
         data_range=artifact_metadata["data_range"],
@@ -326,19 +330,7 @@ def _clf_metrics(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.15
     recall = tp / (tp + fn) if (tp + fn) > 0 else None
     f1 = (2 * precision * recall / (precision + recall)) if precision and recall else None
 
-    # AUC via Mann-Whitney U statistic — O(n_pos × n_neg), exact, no deprecated APIs.
-    try:
-        pos_probs = y_prob[y_true == 1]
-        neg_probs = y_prob[y_true == 0]
-        if len(pos_probs) == 0 or len(neg_probs) == 0:
-            auc = None
-        else:
-            # P(score(pos) > score(neg)); ties counted as 0.5
-            comparisons = (pos_probs[:, None] > neg_probs[None, :]).astype(float)
-            ties = (pos_probs[:, None] == neg_probs[None, :]).astype(float) * 0.5
-            auc = float(np.mean(comparisons + ties))
-    except Exception:
-        auc = None
+    auc = _auc_rank(y_true, y_prob)
 
     return {
         "rows": int(len(y_true)),
@@ -361,6 +353,7 @@ def _prefixed_clf_metrics(prefix: str, y_true: np.ndarray, y_prob: np.ndarray) -
 def _walk_forward_clf(
     df: pd.DataFrame,
     *,
+    target_column: str,
     feature_columns: list[str],
     fold_count: int,
     min_train_rows: int,
@@ -369,7 +362,7 @@ def _walk_forward_clf(
     embargo_days: int,
 ) -> list[dict[str, Any]]:
     folds: list[dict[str, Any]] = []
-    y_all = df[TARGET_COLUMN].to_numpy(dtype=float)
+    y_all = df[target_column].to_numpy(dtype=float)
     embargo_rows = _embargo_rows_from_days(df, embargo_days)
 
     for fold_number, train_start, train_end, test_start, test_end in _walk_forward_splits(
@@ -421,6 +414,25 @@ def _walk_forward_summary_clf(folds: list[dict[str, Any]]) -> dict[str, Any]:
         summary[f"walk_forward_{key}_mean"] = round(float(np.mean(numeric)), 6) if numeric else None
     summary["walk_forward_test_rows"] = int(sum(f["test_rows"] for f in folds))
     return summary
+
+
+def _auc_rank(y_true: np.ndarray, y_prob: np.ndarray) -> float | None:
+    """Return ROC AUC using average ranks, O(n log n) memory-safe for large corpora."""
+    y_true = np.asarray(y_true, dtype=float)
+    y_prob = np.asarray(y_prob, dtype=float)
+    mask = np.isfinite(y_true) & np.isfinite(y_prob)
+    y_true = y_true[mask]
+    y_prob = y_prob[mask]
+    pos = y_true == 1
+    neg = y_true == 0
+    n_pos = int(np.sum(pos))
+    n_neg = int(np.sum(neg))
+    if n_pos == 0 or n_neg == 0:
+        return None
+    ranks = pd.Series(y_prob).rank(method="average").to_numpy(dtype=float)
+    rank_sum_pos = float(np.sum(ranks[pos]))
+    auc = (rank_sum_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+    return float(auc)
 
 
 def _feature_importance(booster) -> dict[str, float]:

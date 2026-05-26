@@ -32,6 +32,7 @@ from ml.datasets.candidate_dataset import (
 from ml.models.registry import ModelRegistryEntry, load_champion_artifact
 from ml.providers.calendar import fomc_events
 from ml.providers.models import DividendEvent, EarningsEvent, EconomicEvent, OptionChainSnapshot, OptionContract, PriceBar
+from src.pick_selection import select_top_picks_with_scanner_controls
 
 _log = logging.getLogger("optionwheel")
 
@@ -63,8 +64,7 @@ class ModelScanner:
         candidates = self._call_provider(ticker_list, n)
         normalized = [self._normalize_candidate(candidate) for candidate in candidates]
         normalized = [candidate for candidate in normalized if candidate is not None]
-        normalized.sort(key=lambda item: item.get("model_score", item.get("score", 0.0)), reverse=True)
-        return normalized[:n]
+        return select_top_picks_with_scanner_controls(normalized, n=n, config=self.config)
 
     def _load_provider(self) -> Any | None:
         provider_path = self.scanner_config.get("provider")
@@ -208,8 +208,7 @@ class LivePaperInferenceProvider:
             )
             picks.extend(self._spread_picks(underlying, scored, now))
 
-        picks.sort(key=lambda item: item.get("model_score", item.get("score", 0.0)), reverse=True)
-        return picks[:n]
+        return select_top_picks_with_scanner_controls(picks, n=n, config=self.config)
 
     def _load_champion(self) -> None:
         registry_path = self.scanner_config.get("registry_path", "artifacts/model_registry.json")
@@ -323,7 +322,7 @@ class LivePaperInferenceProvider:
         strategy_config: dict[str, Any],
     ) -> list[dict]:
         strategy = "PCS" if option_type == "put" else "CCS"
-        width = float(strategy_config.get("strike_width", self.scanner_config.get("strike_width", 5)) or 5)
+        widths = _spread_widths(strategy_config, self.scanner_config)
         min_credit = float(strategy_config.get("min_net_credit", self.scanner_config.get("min_net_credit", 0.01)) or 0.01)
         min_prob = float(strategy_config.get("min_prob_profit", 0.0) or 0.0)
         picks: list[dict] = []
@@ -334,67 +333,68 @@ class LivePaperInferenceProvider:
                 continue
             if option_type == "call" and short.contract.strike <= spot:
                 continue
-            long_strike = short.contract.strike - width if option_type == "put" else short.contract.strike + width
-            long = by_key.get((short.contract.expiration, option_type, _money(long_strike)))
-            if long is None or short.bid is None or long.ask is None:
-                continue
-            credit = round(short.bid - long.ask, 4)
-            if credit < min_credit:
-                continue
-            prob_win = _probability_from_delta(short.row.get("option_delta"))
-            if prob_win < min_prob:
-                continue
-            actual_width = abs(float(short.contract.strike) - float(long.contract.strike))
-            max_loss = max(0.01, actual_width - credit)
-            dte = int(short.row.get("dte") or max(1, (short.contract.expiration - timestamp.date()).days))
-            roi = credit / max_loss
-            pick = {
-                "strategy": strategy,
-                "symbol": underlying,
-                "expiry": short.contract.expiration.isoformat(),
-                "current_price": round(float(spot), 2),
-                "short_strike": _money(short.contract.strike),
-                "long_strike": _money(long.contract.strike),
-                "width": round(actual_width, 4),
-                "premium": credit,
-                "max_loss": round(max_loss, 4),
-                "prob_win": round(prob_win, 4),
-                "roi": round(roi, 4),
-                "annualized_roi": round(roi * (365 / max(1, dte)), 4),
-                "model_score": round(float(short.score), 6),
-                "score": round(float(short.score), 6),
-                "mispricing_score": round(float(short.score), 6),
-                "mispricing_score_basis": "Champion ML expected-P&L score on the short leg; deterministic risk gates still apply.",
-                "source": "ml_model",
-                "quantity": 1,
-                "short_option_symbol": short.contract.symbol,
-                "long_option_symbol": long.contract.symbol,
-                "feature_version": self.model.feature_version if self.model else None,
-                "label_version": self.model.label_version if self.model else None,
-                "model_type": self.model.model_type if self.model else None,
-                "model_version": self.registry_entry.model_id if self.registry_entry else self.model.model_type if self.model else None,
-                "model_artifact_path": (
-                    self.registry_entry.artifact_manifest.artifact_path if self.registry_entry else self.scanner_config.get("artifact_path")
-                ),
-                "model_id": self.registry_entry.model_id if self.registry_entry else None,
-                "features_hash": _features_hash(short.row, self.model.feature_columns if self.model else []),
-                "features": _feature_subset(short.row, self.model.feature_columns if self.model else []),
-                "score_components": {
-                    "short_leg_score": round(float(short.score), 6),
-                    "short_option_price": short.option_price,
-                    "short_bid": short.bid,
-                    "long_ask": long.ask,
-                    "net_credit": credit,
-                    "prob_win_from_delta": round(prob_win, 4),
-                },
-            }
-            if option_type == "put":
-                pick["short_put"] = pick["short_strike"]
-                pick["long_put"] = pick["long_strike"]
-            else:
-                pick["short_call"] = pick["short_strike"]
-                pick["long_call"] = pick["long_strike"]
-            picks.append(pick)
+            for width in widths:
+                long_strike = short.contract.strike - width if option_type == "put" else short.contract.strike + width
+                long = by_key.get((short.contract.expiration, option_type, _money(long_strike)))
+                if long is None or short.bid is None or long.ask is None:
+                    continue
+                credit = round(short.bid - long.ask, 4)
+                if credit < min_credit:
+                    continue
+                prob_win = _probability_from_delta(short.row.get("option_delta"))
+                if prob_win < min_prob:
+                    continue
+                actual_width = abs(float(short.contract.strike) - float(long.contract.strike))
+                max_loss = max(0.01, actual_width - credit)
+                dte = int(short.row.get("dte") or max(1, (short.contract.expiration - timestamp.date()).days))
+                roi = credit / max_loss
+                pick = {
+                    "strategy": strategy,
+                    "symbol": underlying,
+                    "expiry": short.contract.expiration.isoformat(),
+                    "current_price": round(float(spot), 2),
+                    "short_strike": _money(short.contract.strike),
+                    "long_strike": _money(long.contract.strike),
+                    "width": round(actual_width, 4),
+                    "premium": credit,
+                    "max_loss": round(max_loss, 4),
+                    "prob_win": round(prob_win, 4),
+                    "roi": round(roi, 4),
+                    "annualized_roi": round(roi * (365 / max(1, dte)), 4),
+                    "model_score": round(float(short.score), 6),
+                    "score": round(float(short.score), 6),
+                    "mispricing_score": round(float(short.score), 6),
+                    "mispricing_score_basis": "Champion ML expected-P&L score on the short leg; deterministic risk gates still apply.",
+                    "source": "ml_model",
+                    "quantity": 1,
+                    "short_option_symbol": short.contract.symbol,
+                    "long_option_symbol": long.contract.symbol,
+                    "feature_version": self.model.feature_version if self.model else None,
+                    "label_version": self.model.label_version if self.model else None,
+                    "model_type": self.model.model_type if self.model else None,
+                    "model_version": self.registry_entry.model_id if self.registry_entry else self.model.model_type if self.model else None,
+                    "model_artifact_path": (
+                        self.registry_entry.artifact_manifest.artifact_path if self.registry_entry else self.scanner_config.get("artifact_path")
+                    ),
+                    "model_id": self.registry_entry.model_id if self.registry_entry else None,
+                    "features_hash": _features_hash(short.row, self.model.feature_columns if self.model else []),
+                    "features": _feature_subset(short.row, self.model.feature_columns if self.model else []),
+                    "score_components": {
+                        "short_leg_score": round(float(short.score), 6),
+                        "short_option_price": short.option_price,
+                        "short_bid": short.bid,
+                        "long_ask": long.ask,
+                        "net_credit": credit,
+                        "prob_win_from_delta": round(prob_win, 4),
+                    },
+                }
+                if option_type == "put":
+                    pick["short_put"] = pick["short_strike"]
+                    pick["long_put"] = pick["long_strike"]
+                else:
+                    pick["short_call"] = pick["short_strike"]
+                    pick["long_call"] = pick["long_strike"]
+                picks.append(pick)
         return picks
 
     def _earnings_events(self, underlying: str, start: date, end: date) -> list[EarningsEvent]:
@@ -610,6 +610,20 @@ def _money(value: Any) -> float | None:
     if value is None:
         return None
     return round(float(value), 4)
+
+
+def _spread_widths(strategy_config: dict[str, Any], scanner_config: dict[str, Any]) -> list[float]:
+    raw = strategy_config.get("spread_widths", scanner_config.get("spread_widths"))
+    if raw is None:
+        raw = [strategy_config.get("strike_width", scanner_config.get("strike_width", 5)) or 5]
+    if isinstance(raw, str):
+        values = [item.strip() for item in raw.split(",") if item.strip()]
+    elif isinstance(raw, (list, tuple, set)):
+        values = list(raw)
+    else:
+        values = [raw]
+    widths = sorted({round(float(value), 4) for value in values if float(value) > 0})
+    return widths or [5.0]
 
 
 def _float_or_none(value: Any) -> float | None:

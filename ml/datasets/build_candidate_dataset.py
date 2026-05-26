@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--contract-status", default="inactive", choices=["active", "inactive"], help="Option contract status.")
     parser.add_argument("--strategy-family", default="credit-spreads", choices=["short-option", "credit-spreads"], help="Label family to generate.")
     parser.add_argument("--strategy-types", default="PCS,CCS", help="Comma-separated strategy types for credit-spreads.")
-    parser.add_argument("--spread-widths", default="5,10,15", help="Comma-separated spread widths to pair for PCS/CCS rows.")
+    parser.add_argument("--spread-widths", default="5,10,15,20", help="Comma-separated spread widths to pair for PCS/CCS rows.")
     parser.add_argument("--spread-stop-loss-max-loss-pct", type=float, default=0.80, help="For spreads, stop when close debit reaches entry credit plus this fraction of max loss. Use a negative value to disable.")
     parser.add_argument("--min-dte", type=int, default=7)
     parser.add_argument("--max-dte", type=int, default=45)

@@ -2,6 +2,8 @@ import pandas as pd
 import pytest
 import numpy as np
 
+pytest.importorskip("xgboost")
+
 from ml.models.train_xgboost import (
     AsymmetricLossConfig,
     _asymmetric_objective,

@@ -103,11 +103,11 @@ def _make_vix_bars() -> list[PriceBar]:
 
 
 def _make_option_bars(symbol: str) -> list[PriceBar]:
-    """6 pre-entry bars (for lookback) + 1 entry bar + 3 forward bars (for labeling).
+    """6 pre-entry bars (for lookback) + 1 entry bar + 5 forward bars (for labeling).
 
     Pre-entry bars: 6 days before entry → 5 fall inside the 5d lookback window
     Entry bar: close 4.0, realistic spread and volume
-    Forward bars: declining toward profit-take
+    Forward bars: declining toward profit-take (5 bars satisfies min_forward_bars=5)
     """
     bars = []
     # pre-entry lookback bars (entry-6 to entry-1)
@@ -117,8 +117,8 @@ def _make_option_bars(symbol: str) -> list[PriceBar]:
     # entry bar
     bars.append(PriceBar(symbol, _ENTRY, 3.9, 4.2, 3.8, 4.0, volume=150.0, trade_count=15, vwap=4.05))
     # forward bars — option value declines (profitable short)
-    for offset in range(1, 4):
-        close = 4.0 - offset * 0.8
+    for offset in range(1, 6):
+        close = 4.0 - offset * 0.5
         day = _ENTRY + timedelta(days=offset)
         bars.append(PriceBar(symbol, day, close - 0.1, close + 0.1, close - 0.2, close, volume=60.0, trade_count=6))
     return bars

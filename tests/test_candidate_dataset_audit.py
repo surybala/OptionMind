@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from ml.datasets.audit_candidate_dataset import load_dataset, render_markdown, summarize_candidate_dataset
 
@@ -67,6 +68,7 @@ def test_audit_summarizes_jsonl_candidate_dataset(tmp_path):
 
 
 def test_audit_loads_parquet_directory(tmp_path):
+    pytest.importorskip("pyarrow")
     dataset_dir = tmp_path / "dataset"
     part_dir = dataset_dir / "source=fake"
     part_dir.mkdir(parents=True)

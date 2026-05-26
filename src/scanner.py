@@ -9,13 +9,14 @@ import logging
 import math
 import time
 import threading
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
+from src.pick_selection import select_top_picks_with_scanner_controls
 
 _log = logging.getLogger('optionwheel')
 
@@ -1048,78 +1049,4 @@ class OptionScanner:
         if not all_results:
             return []
 
-        # Sort globally by score (descending) — preserved inside each bucket
-        all_results.sort(key=lambda x: x.get('score', 0), reverse=True)
-
-        ic_pct         = float(self.ic_params.get('ic_allocation_pct', 1.0))
-        max_ic_slots   = max(1, int(ic_pct * n))       # e.g. 0.50 * 10 = 5
-        max_per_ticker = self.config.get('max_picks_per_ticker')  # None = unlimited
-
-        # -- Step 1: build per-strategy pools, honouring per-ticker + IC caps --
-        # Each pool holds at most n picks (IC: max_ic_slots), with at most
-        # max_picks_per_ticker from any single symbol.
-        pools:          dict[str, list[dict]]             = defaultdict(list)
-        pool_ticker_ct: dict[str, dict[str, int]]         = defaultdict(lambda: defaultdict(int))
-
-        for pick in all_results:
-            strat = pick.get('strategy', '')
-            sym   = pick.get('symbol',   '')
-            pool_quota = max_ic_slots if (strat == 'IC' and ic_pct < 1.0) else n
-            if len(pools[strat]) >= pool_quota:
-                continue
-            if max_per_ticker is not None and pool_ticker_ct[strat][sym] >= max_per_ticker:
-                continue
-            pools[strat].append(pick)
-            pool_ticker_ct[strat][sym] += 1
-
-        if not pools:
-            return []
-
-        # -- Step 2: per-strategy quotas: n divided evenly, IC capped ----------
-        num_strats  = len(pools)
-        per_strat_q = max(1, n // num_strats)
-
-        # -- Step 3: take top per_strat_q from each strategy -------------------
-        # Track the pool pointer (next unused index) for each strategy so
-        # step 4 can continue exactly where step 3 left off — no id() tricks
-        # needed, which avoids false deduplication when tests mock the same
-        # dict object for multiple tickers.
-        selected: list[dict] = []
-        pool_ptr: dict[str, int] = {}
-        for strat, group in sorted(pools.items()):   # sorted for determinism
-            q = min(per_strat_q, max_ic_slots) if strat == 'IC' else per_strat_q
-            selected.extend(group[:q])
-            pool_ptr[strat] = q   # index of first unused pick in this pool
-
-        # -- Step 4: fill remaining n slots from per-strategy pool leftovers --
-        remaining = n - len(selected)
-        if remaining > 0:
-            # Collect picks not yet taken (pool[ptr:] for each strategy)
-            extras: list[dict] = []
-            for strat, group in sorted(pools.items()):
-                extras.extend(group[pool_ptr[strat]:])
-            extras.sort(key=lambda x: x.get('score', 0), reverse=True)
-
-            ic_in_selected   = sum(1 for p in selected if p.get('strategy') == 'IC')
-            global_ticker_ct: dict[str, int] = defaultdict(int)
-            for p in selected:
-                global_ticker_ct[p.get('symbol', '')] += 1
-
-            for pick in extras:
-                if remaining <= 0:
-                    break
-                sym   = pick.get('symbol',   '')
-                strat = pick.get('strategy', '')
-                if max_per_ticker is not None and global_ticker_ct[sym] >= max_per_ticker:
-                    continue
-                if strat == 'IC' and ic_pct < 1.0 and ic_in_selected >= max_ic_slots:
-                    continue
-                selected.append(pick)
-                global_ticker_ct[sym] += 1
-                if strat == 'IC':
-                    ic_in_selected += 1
-                remaining -= 1
-
-        # Final sort by score and trim to n
-        selected.sort(key=lambda x: x.get('score', 0), reverse=True)
-        return selected[:n]
+        return select_top_picks_with_scanner_controls(all_results, n=n, config=self.config)

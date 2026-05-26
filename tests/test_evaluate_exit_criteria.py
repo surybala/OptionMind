@@ -35,6 +35,27 @@ def test_selection_metrics_reports_tail_and_concentration():
     assert metrics["single_underlying_share"] == 1.0
 
 
+def test_selection_metrics_drawdown_uses_chronological_selected_rows():
+    df = pd.DataFrame(
+        {
+            "entry_timestamp": ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"],
+            "prediction": [0.1, 0.9, 0.8, 1.0],
+            "expected_pnl": [0, 100, -50, -100],
+            "max_profit": [1, 1, 1, 1],
+            "max_adverse_excursion": [0, 0, 0, 0],
+            "return_on_risk": [0.0, 1.0, -0.5, -1.0],
+            "large_loss_label": [0, 0, 0, 0],
+            "stop_loss_hit": [0, 0, 1, 1],
+            "strategy": ["PCS", "PCS", "PCS", "PCS"],
+            "underlying": ["SPY", "SPY", "SPY", "SPY"],
+        }
+    )
+
+    metrics = _selection_metrics(df, "prediction", ExitCriteriaConfig(selection_fraction=0.75))
+
+    assert metrics["max_drawdown"] == 150.0
+
+
 def test_exit_gates_fail_on_unstable_walk_forward():
     cfg = ExitCriteriaConfig(
         min_dataset_rows=4,

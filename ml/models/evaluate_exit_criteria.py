@@ -185,6 +185,8 @@ def _selection_metrics(df: pd.DataFrame, prediction_column: str, config: ExitCri
     selected_rows = max(1, int(np.ceil(len(df) * config.selection_fraction)))
     selected_index = np.argsort(pred)[-selected_rows:]
     selected = df.iloc[selected_index].copy()
+    if "entry_timestamp" in selected:
+        selected = selected.sort_values("entry_timestamp")
     pnl = pd.to_numeric(selected["expected_pnl"], errors="coerce").dropna().to_numpy(dtype=float)
     slippage_adjusted_pnl = _slippage_adjusted_pnl(selected, config)
     all_pnl = pd.to_numeric(df["expected_pnl"], errors="coerce").dropna().to_numpy(dtype=float)

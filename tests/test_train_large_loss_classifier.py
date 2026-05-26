@@ -5,8 +5,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
+pytest.importorskip("xgboost")
+
 from ml.models.train_large_loss_classifier import (
     LargeLossClassifierArtifact,
+    _auc_rank,
     _clf_metrics,
     _compute_fill_values,
     train_large_loss_classifier,
@@ -105,6 +108,25 @@ def test_train_large_loss_classifier_scale_pos_weight_override(tmp_path):
     assert artifact.params["scale_pos_weight"] == 3.0
 
 
+def test_train_binary_risk_classifier_can_target_stop_loss(tmp_path):
+    frame = _frame(40)
+    frame["stop_loss_hit"] = frame["large_loss_label"]
+
+    artifact = train_large_loss_classifier(
+        frame,
+        model_output=tmp_path / "stop_loss.json",
+        target_column="stop_loss_hit",
+        test_fraction=0.25,
+        walk_forward_folds=0,
+        num_boost_round=5,
+        val_fraction=0.0,
+        early_stopping_rounds=0,
+    )
+
+    assert artifact.model_type == "xgboost_binary_risk_v001"
+    assert artifact.target_column == "stop_loss_hit"
+
+
 def test_train_large_loss_classifier_missing_target_raises():
     df = pd.DataFrame([{"dte": 30, "underlying_close": 500}])
     with pytest.raises(ValueError, match="large_loss_label"):
@@ -135,6 +157,16 @@ def test_clf_metrics_random_classifier():
     m = _clf_metrics(y_true, y_prob, threshold=0.5)
     # AUC of a random classifier should be close to 0.5
     assert 0.4 < m["auc"] < 0.6
+
+
+def test_auc_rank_handles_large_inputs_without_pairwise_matrix():
+    y_true = np.array([1, 0] * 5000)
+    y_prob = np.linspace(0.0, 1.0, len(y_true))
+
+    auc = _auc_rank(y_true, y_prob)
+
+    assert auc is not None
+    assert 0.0 <= auc <= 1.0
 
 
 def test_compute_fill_values_uses_median():

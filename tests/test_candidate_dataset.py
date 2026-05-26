@@ -473,6 +473,34 @@ def test_candidate_contract_selection_can_be_uncapped():
     assert len(selected) == 6
 
 
+def test_credit_spread_default_widths_include_additional_twenty_wide_spread():
+    from ml.datasets.candidate_dataset import _credit_spread_pairs
+
+    contracts = [
+        OptionContract("SPY260117P00500000", "SPY", date(2026, 1, 17), 500.0, "put", source="fake"),
+        OptionContract("SPY260117P00495000", "SPY", date(2026, 1, 17), 495.0, "put", source="fake"),
+        OptionContract("SPY260117P00480000", "SPY", date(2026, 1, 17), 480.0, "put", source="fake"),
+    ]
+    by_key = {
+        (contract.expiration, contract.option_type, contract.strike): contract
+        for contract in contracts
+    }
+
+    pairs = _credit_spread_pairs(
+        contracts,
+        by_key,
+        CandidateDatasetConfig(
+            underlyings=["SPY"],
+            entry_start=datetime(2026, 1, 1, tzinfo=UTC),
+            entry_end=datetime(2026, 1, 2, tzinfo=UTC),
+        ),
+    )
+
+    widths = {width for _, _, _, width in pairs}
+    assert 20.0 in widths
+    assert 5.0 in widths
+
+
 # ---------------------------------------------------------------------------
 # New feature tests
 # ---------------------------------------------------------------------------

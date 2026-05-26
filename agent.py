@@ -54,18 +54,6 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
-# ── Load .env from the project directory (if present) ─────────────────────────
-# Allows storing ALPACA_API_KEY / ALPACA_API_SECRET in a local .env file
-# instead of exporting them in every shell session.  python-dotenv is optional:
-# if it is not installed the agent falls back to whatever is already in os.environ.
-# Priority: existing env vars > .env file > config.json (dotenv's override=False).
-try:
-    from dotenv import load_dotenv as _load_dotenv
-    _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
-    _load_dotenv(_env_path, override=False)   # won't clobber vars already exported
-except ImportError:
-    pass   # python-dotenv not installed — rely on shell env vars or config.json
-
 from src.database import TradeDatabase
 from src.executor import AlpacaExecutor
 from src.notifier import EmailNotifier
@@ -74,7 +62,6 @@ from src.position_reconciler import PositionReconciler
 from src.position_monitor import PositionMonitor
 from src.portfolio_risk import PortfolioRiskService
 from src.regime import RegimeResult, RegimeService
-from src.model_scanner import ModelScanner
 from src.utils import get_logger, load_config
 
 log = get_logger()
@@ -256,9 +243,10 @@ def _write_scan_audit(
     db: TradeDatabase | None = None,
     path: str = SCAN_AUDIT_PATH,
     max_rejected: int = 25,
+    scanner_type: str = 'ml',
 ) -> None:
-    """Persist latest model-candidate plan/rejections for the dashboard."""
-    if db is not None:
+    """Persist latest candidate plan/rejections for the dashboard."""
+    if db is not None and scanner_type == 'ml':
         _record_model_decisions(db, selected, rejected)
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
     selected_rows = [_pick_audit_row(p, 'SELECTED') for p in selected]
@@ -278,9 +266,20 @@ def _write_scan_audit(
         reverse=True,
     )[:max_rejected]
     rejected_rows = [_pick_audit_row(p, 'REJECTED') for p in interesting_rejected]
+    if scanner_type == 'ml':
+        score_basis = (
+            'Higher means the ML inference layer ranked the candidate as more '
+            'attractive; deterministic risk gates still apply.'
+        )
+    else:
+        score_basis = (
+            'Deterministic scanner score (legacy heuristic); '
+            'higher is more attractive per the rule-based ranker.'
+        )
     payload = {
         'generated_at': datetime.now().isoformat(),
-        'score_basis': 'Higher means the ML inference layer ranked the candidate as more attractive; deterministic risk gates still apply.',
+        'scanner': scanner_type,
+        'score_basis': score_basis,
         'selected': selected_rows,
         'rejected': rejected_rows,
     }
@@ -1298,6 +1297,19 @@ def _parse_args() -> argparse.Namespace:
         '--db', default='data/trades.db', metavar='PATH', dest='db_path',
         help='Path to the SQLite trades database (default: data/trades.db).',
     )
+    parser.add_argument(
+        '--scanner',
+        choices=['ml', 'legacy'],
+        default=None,       # None = read from config["scanner"], fallback "ml"
+        dest='scanner',
+        metavar='TYPE',
+        help=(
+            'Scanner to use: "ml" (default) — ML inference engine with the champion '
+            'registry model (LivePaperInferenceProvider); '
+            '"legacy" — deterministic rule-based scanner (useful for side-by-side '
+            'comparison with an already-running legacy instance).'
+        ),
+    )
 
     # ── Manual close options (short-circuit the normal candidate flow) ────────
     close_group = parser.add_argument_group(
@@ -1547,6 +1559,60 @@ def run_daemon(args) -> None:
         time.sleep(90)
 
 
+# ── Scanner factory ───────────────────────────────────────────────────────────
+
+def _build_scanner(config: dict, scanner_type: str):
+    """Return the configured scanner instance.
+
+    scanner_type == 'ml'     (default)
+        Uses LivePaperInferenceProvider directly — loads the champion model from
+        the registry and scores short-option candidates with it.  Falls back to
+        a configured ml_scanner.provider if one is set in config.
+        Automatically injects pick_selection.mode=model_ranked unless the user
+        has already set a mode in config.
+
+    scanner_type == 'legacy'
+        Uses the deterministic OptionScanner from src.scanner.  Useful for
+        running side-by-side with the ML agent to compare candidate quality.
+    """
+    if scanner_type == 'legacy':
+        from src.scanner import OptionScanner
+        log.info("[agent] Scanner: legacy deterministic (OptionScanner)")
+        return OptionScanner(config)
+
+    # ML path — default pick_selection to model_ranked unless overridden
+    ml_config = dict(config)
+    ps = ml_config.get('pick_selection')
+    if not isinstance(ps, dict) or 'mode' not in ps:
+        ml_config['pick_selection'] = dict(ps or {})
+        ml_config['pick_selection'].setdefault('mode', 'model_ranked')
+
+    ml_cfg = ml_config.get('ml_scanner', {})
+    explicit_provider = ml_cfg.get('provider')
+
+    if explicit_provider:
+        from src.model_scanner import ModelScanner
+        log.info("[agent] Scanner: ML (ModelScanner, provider=%s)", explicit_provider)
+        return ModelScanner(ml_config)
+
+    from src.model_scanner import LivePaperInferenceProvider
+    try:
+        scanner = LivePaperInferenceProvider(ml_config)
+        log.info(
+            "[agent] Scanner: ML (LivePaperInferenceProvider, registry=%s, mode=model_ranked)",
+            ml_cfg.get('registry_path', 'artifacts/model_registry.json'),
+        )
+        return scanner
+    except Exception as exc:
+        log.warning(
+            "[agent] LivePaperInferenceProvider init failed (%s: %s) — "
+            "no ML picks will be generated this run.",
+            type(exc).__name__, exc,
+        )
+        from src.model_scanner import ModelScanner
+        return ModelScanner({'ml_scanner': {'enabled': False}})
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def _run_once(args, headless: bool = False) -> None:
@@ -1588,7 +1654,7 @@ def _run_once(args, headless: bool = False) -> None:
     capital_budget = args.max_capital or config.get('max_capital_per_period')
 
     # ── Bootstrap components ──────────────────────────────────────────────────
-    db       = TradeDatabase(args.db_path)
+    db = TradeDatabase(args.db_path)
 
     # Self-heal any open positions whose premium was stored as a negative value
     # (Alpaca returns filled_avg_price < 0 for net-credit MLEG orders; the
@@ -1599,7 +1665,12 @@ def _run_once(args, headless: bool = False) -> None:
         log.warning("[agent] Corrected %d open position(s) with negative entry "
                     "premium (Alpaca MLEG sign convention).", _fixed)
 
-    scanner  = ModelScanner(config)
+    # Resolve scanner type: CLI --scanner > config["scanner"] > default "ml"
+    scanner_type: str = (
+        getattr(args, 'scanner', None)
+        or config.get('scanner', 'ml')
+    )
+    scanner  = _build_scanner(config, scanner_type)
     executor = AlpacaExecutor(args.config)
 
     # ── Fetch current VIX for account-level regime controls ───────────────────
@@ -1677,19 +1748,31 @@ def _run_once(args, headless: bool = False) -> None:
         log.error("No tickers loaded — exiting.")
         return
 
-    # ── Model candidate scoring ───────────────────────────────────────────────
-    log.info(f"Requesting up to {scan_top_n} ML-ranked candidates from {len(tickers)} tickers ...")
+    # ── Candidate scoring ─────────────────────────────────────────────────────
+    scanner_label = 'ML' if scanner_type == 'ml' else 'legacy'
+    log.info(
+        "Requesting up to %d %s-ranked candidates from %d tickers ...",
+        scan_top_n, scanner_label, len(tickers),
+    )
     picks = scanner.get_top_picks(tickers, n=scan_top_n)
+    # Tag picks with their scanner source for audit/comparison
+    default_source = 'ml_model' if scanner_type == 'ml' else 'legacy_scanner'
+    for _p in picks:
+        _p.setdefault('source', default_source)
     risk_rejected: list[dict] = []
     _annotate_mispricing_scores(picks)
-    _record_model_predictions(db, picks)
+    if scanner_type == 'ml':
+        _record_model_predictions(db, picks)
 
     if not picks:
-        log.info(
-            "No model candidates returned. This is expected until ml_scanner.provider "
-            "points at a trained inference provider."
-        )
-        _write_scan_audit([], [], db=db)
+        if scanner_type == 'ml':
+            log.info(
+                "No ML candidates returned — check that the champion model registry "
+                "exists at ml_scanner.registry_path and that Alpaca credentials are set."
+            )
+        else:
+            log.info("No legacy scanner candidates returned.")
+        _write_scan_audit([], [], db=db, scanner_type=scanner_type)
         return
 
     # ── Deduplicate against open positions ───────────────────────────────────
@@ -1714,7 +1797,7 @@ def _run_once(args, headless: bool = False) -> None:
 
     if not picks:
         log.info("All picks are already held as open positions — nothing new to trade.")
-        _write_scan_audit([], risk_rejected, db=db)
+        _write_scan_audit([], risk_rejected, db=db, scanner_type=scanner_type)
         return
 
     # ── Pre-flight: filter picks whose contracts are inactive on Alpaca ───────
@@ -1730,7 +1813,7 @@ def _run_once(args, headless: bool = False) -> None:
         risk_rejected.append(_pick)
     if not picks:
         log.info("No picks survived pre-flight contract validation — nothing to trade.")
-        _write_scan_audit([], risk_rejected, db=db)
+        _write_scan_audit([], risk_rejected, db=db, scanner_type=scanner_type)
         return
 
     before_gate = list(picks)
@@ -1747,7 +1830,7 @@ def _run_once(args, headless: bool = False) -> None:
     )
     if not picks:
         log.info("No picks survived max-loss multiple filtering — nothing to trade.")
-        _write_scan_audit([], risk_rejected, db=db)
+        _write_scan_audit([], risk_rejected, db=db, scanner_type=scanner_type)
         return
 
     # ── Apply capital budget (net of already-deployed capital) ───────────────
@@ -1767,7 +1850,7 @@ def _run_once(args, headless: bool = False) -> None:
                 _item['reject_reason'] = 'No remaining capital budget after open positions'
                 _item['mispricing_score'] = _mispricing_score_for_pick(_item)
                 risk_rejected.append(_item)
-            _write_scan_audit([], risk_rejected, db=db)
+            _write_scan_audit([], risk_rejected, db=db, scanner_type=scanner_type)
             return
         max_contracts = int(config.get('max_contracts_per_pick', 50))
         picks_sorted  = sorted(picks, key=lambda x: x.get('score', 0.0), reverse=True)
@@ -1782,7 +1865,7 @@ def _run_once(args, headless: bool = False) -> None:
         )
         if not affordable:
             log.info("No picks fit within the remaining capital budget.")
-            _write_scan_audit([], risk_rejected, db=db)
+            _write_scan_audit([], risk_rejected, db=db, scanner_type=scanner_type)
             return
         # Equal-split remaining budget across affordable picks, then size each
         per_pick_alloc = remaining_budget / len(affordable)
@@ -1803,7 +1886,7 @@ def _run_once(args, headless: bool = False) -> None:
     picks = _apply_regime_quantity_multiplier(picks, regime)
     if not picks:
         log.info("No picks survived regime quantity throttle — nothing to trade.")
-        _write_scan_audit([], risk_rejected, db=db)
+        _write_scan_audit([], risk_rejected, db=db, scanner_type=scanner_type)
         return
     if regime.quantity_multiplier < 1.0:
         log.info(
@@ -1826,7 +1909,7 @@ def _run_once(args, headless: bool = False) -> None:
     )
     if not picks:
         log.info("No picks survived directional exposure caps — nothing to trade.")
-        _write_scan_audit([], risk_rejected, db=db)
+        _write_scan_audit([], risk_rejected, db=db, scanner_type=scanner_type)
         return
 
     before_gate = list(picks)
@@ -1842,11 +1925,11 @@ def _run_once(args, headless: bool = False) -> None:
     )
     if not picks:
         log.info("No picks survived portfolio gamma-risk controls — nothing to trade.")
-        _write_scan_audit([], risk_rejected, db=db)
+        _write_scan_audit([], risk_rejected, db=db, scanner_type=scanner_type)
         return
 
     _annotate_mispricing_scores(picks)
-    _write_scan_audit(picks, risk_rejected, db=db)
+    _write_scan_audit(picks, risk_rejected, db=db, scanner_type=scanner_type)
 
     # ── Print open positions with current P&L ────────────────────────────────
     if open_positions:
@@ -1948,8 +2031,11 @@ def _run_once(args, headless: bool = False) -> None:
             if not new_picks:
                 log.info("[agent] Fresh model request returned no picks — aborting cycle.")
                 return
+            for _p in new_picks:
+                _p.setdefault('source', default_source)
             _annotate_mispricing_scores(new_picks)
-            _record_model_predictions(db, new_picks)
+            if scanner_type == 'ml':
+                _record_model_predictions(db, new_picks)
             if open_keys:
                 new_picks = [p for p in new_picks
                              if (p['symbol'], p['strategy']) not in open_keys]
@@ -2022,6 +2108,12 @@ def _run_once(args, headless: bool = False) -> None:
 
 
 def run_agent(argv=None) -> None:
+    try:
+        from dotenv import load_dotenv as _load_dotenv
+        _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+        _load_dotenv(_env_path, override=False)
+    except ImportError:
+        pass
     args = _parse_args()
     if args.log_file:
         get_logger('optionwheel', log_file=args.log_file)

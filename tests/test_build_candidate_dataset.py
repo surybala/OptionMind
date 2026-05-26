@@ -64,6 +64,7 @@ def test_parse_args_defaults_to_full_contract_metadata_pagination(monkeypatch):
     args = parse_args()
     assert args.option_limit is None
     assert args.max_contracts == 300
+    assert args.spread_widths == "5,10,15,20"
     assert args.dividend_provider == "massive"
     assert args.min_output_rows == 0
     assert args.append is False

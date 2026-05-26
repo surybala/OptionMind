@@ -7,9 +7,18 @@ import unittest
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
-# Mock yfinance and requests before importing universe
+# Mock yfinance and requests before importing universe.
+# Preserve the real exception classes so downstream tests that catch
+# requests.RequestException / requests.ConnectionError still work correctly
+# even when sys.modules['requests'] points at this mock.
+import requests as _real_requests
+_requests_mock = MagicMock()
+_requests_mock.RequestException = _real_requests.RequestException
+_requests_mock.ConnectionError = _real_requests.ConnectionError
+_requests_mock.Request = _real_requests.Request
+_requests_mock.exceptions = _real_requests.exceptions
 sys.modules['yfinance'] = MagicMock()
-sys.modules['requests'] = MagicMock()
+sys.modules['requests'] = _requests_mock
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.universe import (

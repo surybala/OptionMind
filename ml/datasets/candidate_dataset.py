@@ -50,7 +50,7 @@ class CandidateDatasetConfig:
     min_option_entry_volume: int = 1
     strategy_family: str = "short_option"
     strategy_types: tuple[str, ...] = ("PCS", "CCS")
-    spread_widths: tuple[float, ...] = (5.0, 10.0, 15.0)
+    spread_widths: tuple[float, ...] = (5.0, 10.0, 15.0, 20.0)
     spread_stop_loss_max_loss_pct: float | None = 0.80
     build_window_days: int = 45
     vix_symbol: str = "I:VIX"
