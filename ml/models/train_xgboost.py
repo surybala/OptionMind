@@ -243,9 +243,13 @@ def train_xgboost(
     train_pred = _inverse_transform_target(_predict_model(booster, x_train), loss)
     test_pred = _inverse_transform_target(_predict_model(booster, x_test), loss) if len(x_test) else np.array([])
 
-    metrics = _prefixed_metrics("train", _evaluation_metrics(y_train, train_pred))
+    train_metrics = _evaluation_metrics(y_train, train_pred)
+    train_metrics.update(_credit_spread_selection_metrics(clean.iloc[:split_index], train_pred))
+    metrics = _prefixed_metrics("train", train_metrics)
     if len(x_test):
-        metrics.update(_prefixed_metrics("test", _evaluation_metrics(y_test, test_pred)))
+        test_metrics = _evaluation_metrics(y_test, test_pred)
+        test_metrics.update(_credit_spread_selection_metrics(clean.iloc[split_index:], test_pred))
+        metrics.update(_prefixed_metrics("test", test_metrics))
     else:
         metrics.update(_empty_test_metrics("test"))
 
@@ -450,6 +454,7 @@ def _walk_forward_validation(
         )
         pred = _inverse_transform_target(_predict_model(booster, x_test), loss_config)
         fold_metrics = _evaluation_metrics(y_all[test_start:test_end], pred)
+        fold_metrics.update(_credit_spread_selection_metrics(df.iloc[test_start:test_end], pred))
         folds.append(
             {
                 "fold": fold_number,
@@ -461,6 +466,7 @@ def _walk_forward_validation(
                 "train_rows": int(train_end - train_start),
                 "test_rows": int(test_end - test_start),
                 "metrics": fold_metrics,
+                "feature_importance": _feature_importance(booster),
             }
         )
     return folds
@@ -472,6 +478,43 @@ def _feature_importance(booster) -> dict[str, float]:
         key: round(float(value), 6)
         for key, value in sorted(scores.items(), key=lambda item: (-item[1], item[0]))
     }
+
+
+def _credit_spread_selection_metrics(df: pd.DataFrame, y_pred: np.ndarray) -> dict[str, float | None]:
+    if len(df) == 0 or len(y_pred) == 0:
+        return {
+            "top_decile_max_adverse_excursion": None,
+            "top_decile_large_loss_rate": None,
+            "top_decile_stop_loss_rate": None,
+            "top_decile_return_on_risk_mean": None,
+        }
+    top_n = max(1, int(np.ceil(len(y_pred) * 0.1)))
+    top_indices = np.argsort(y_pred)[-top_n:]
+    selected = df.iloc[top_indices]
+    return {
+        "top_decile_max_adverse_excursion": _column_max(selected, "max_adverse_excursion"),
+        "top_decile_large_loss_rate": _column_mean(selected, "large_loss_label"),
+        "top_decile_stop_loss_rate": _column_mean(selected, "stop_loss_hit"),
+        "top_decile_return_on_risk_mean": _column_mean(selected, "return_on_risk"),
+    }
+
+
+def _column_mean(df: pd.DataFrame, column: str) -> float | None:
+    if column not in df:
+        return None
+    numeric = pd.to_numeric(df[column], errors="coerce").dropna()
+    if numeric.empty:
+        return None
+    return round(float(numeric.mean()), 6)
+
+
+def _column_max(df: pd.DataFrame, column: str) -> float | None:
+    if column not in df:
+        return None
+    numeric = pd.to_numeric(df[column], errors="coerce").dropna()
+    if numeric.empty:
+        return None
+    return round(float(numeric.max()), 6)
 
 
 def _cap_rows_per_underlying(df: pd.DataFrame, max_rows: int) -> pd.DataFrame:

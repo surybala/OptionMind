@@ -4,6 +4,7 @@ from ml.providers.alpaca import AlpacaProvider
 from ml.providers.fmp import FMPProvider
 from ml.providers.fred import FREDProvider
 from ml.providers.massive import MassiveProvider
+from ml.providers.yfinance_provider import YFinanceProvider
 from ml.providers.models import (
     DividendEvent,
     EarningsEvent,
@@ -38,6 +39,7 @@ __all__ = [
     "Greeks",
     "MarketDataProvider",
     "MassiveProvider",
+    "YFinanceProvider",
     "OptionChainProvider",
     "OptionContract",
     "OptionContractProvider",

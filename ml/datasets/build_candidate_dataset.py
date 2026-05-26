@@ -13,13 +13,24 @@ from dotenv import load_dotenv
 from ml.datasets import CandidateDatasetConfig, HistoricalCandidateDatasetBuilder
 from ml.datasets.candidate_dataset import CandidateDatasetRow
 from ml.datasets.etf_universe import broad_etf_underlyings
-from ml.providers import AlpacaProvider, FMPProvider, FREDProvider, MassiveProvider
+from ml.providers import AlpacaProvider, FMPProvider, FREDProvider, MassiveProvider, YFinanceProvider
 from ml.storage import ParquetDatasetWriter
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build prototype option candidate dataset rows.")
-    parser.add_argument("--provider", default="alpaca", choices=["alpaca", "massive"], help="Provider adapter to use.")
+    parser.add_argument("--provider", default="alpaca", choices=["alpaca", "massive"], help="Provider adapter to use for option data (contracts, option bars, dividends).")
+    parser.add_argument(
+        "--stock-provider",
+        default="same",
+        choices=["same", "yfinance"],
+        help=(
+            "Provider for underlying stock bars. "
+            "'same' (default) uses the same provider as --provider. "
+            "'yfinance' uses Yahoo Finance for stock bars — recommended when the main "
+            "provider has a limited stock bar retention window (e.g. Massive's 2-year cap)."
+        ),
+    )
     parser.add_argument("--underlyings", default="SPY", help="Comma-separated underlying symbols, or 'broad-etfs'.")
     parser.add_argument(
         "--underlying-preset",
@@ -124,6 +135,7 @@ def main() -> int:
     load_dotenv()
 
     provider = _provider_from_args(args.provider)
+    stock_provider = _stock_provider_from_args(args.stock_provider, provider)
     event_provider = _event_provider_from_args(args.event_provider)
     dividend_provider = _dividend_provider_from_args(args.dividend_provider, provider)
     economic_provider = _economic_provider_from_args(args.economic_calendar)
@@ -161,7 +173,7 @@ def main() -> int:
         build_window_days=args.build_window_days,
     )
     rows = HistoricalCandidateDatasetBuilder(
-        provider,
+        stock_provider,
         provider,
         provider,
         event_provider=event_provider,
@@ -205,6 +217,7 @@ def main() -> int:
             "event_provider": args.event_provider,
             "dividend_provider": args.dividend_provider,
             "volatility_provider": args.volatility_provider,
+            "stock_provider": args.stock_provider,
             "underlying_preset": underlying_preset,
             "min_output_rows": args.min_output_rows,
         },
@@ -262,6 +275,21 @@ def _provider_from_args(provider_name: str):
     if provider_name == "massive":
         return MassiveProvider.from_env()
     raise ValueError(f"Unsupported provider: {provider_name}")
+
+
+def _stock_provider_from_args(name: str, market_provider=None):
+    """Return the MarketDataProvider used exclusively for underlying stock bars.
+
+    'same' reuses the main market_provider (e.g. Massive) — suitable when the
+    provider has sufficient historical stock bar coverage.  'yfinance' swaps in
+    Yahoo Finance, which covers the full date range for free and is the right
+    choice when Massive returns only the most-recent 2 years of daily bars.
+    """
+    if name == "same":
+        return market_provider
+    if name == "yfinance":
+        return YFinanceProvider()
+    raise ValueError(f"Unsupported stock provider: {name}")
 
 
 def _event_provider_from_args(name: str):

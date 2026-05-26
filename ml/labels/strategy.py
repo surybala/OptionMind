@@ -115,6 +115,10 @@ def label_credit_spread_path(
     for timestamp, debit in forward_pairs:
         if debit < 0.0:
             raise ValueError("forward spread debit must be non-negative")
+        # Cap debit at spread width: a credit spread's exit cost can never exceed its width.
+        # Zero-priced long-leg bars (stale quotes on illiquid options) can produce debit > width;
+        # capping here prevents wildly inflated losses that exceed the theoretical maximum.
+        debit = min(debit, resolved_width)
         max_debit = max(max_debit, debit)
         min_debit = min(min_debit, debit)
         exit_timestamp = timestamp
