@@ -30,17 +30,24 @@ class CandidateDatasetConfig:
     max_contracts_per_underlying: int | None = 300
     max_rows_per_underlying: int | None = None
     max_abs_strike_distance_pct: float | None = 0.30
-    min_forward_bars: int = 2
+    min_forward_bars: int = 5
     sample_every_n_bars: int = 1
     stock_lookback_days: int = 60
     market_regime_symbol: str = "SPY"
     forward_days: int = 30
-    profit_take_pct: float = 0.50
+    profit_take_pct: float = 0.75
     stop_loss_multiple: float = 2.0
     option_timeframe: str = "1Day"
     stock_timeframe: str = "1Day"
     large_loss_multiple: float = 1.0
-    label_version: str = "short_option_labels_v001"
+    label_version: str = "short_option_labels_v002"
+    # Data quality gates applied at row construction time.
+    # min_option_entry_price: skip bars where the option closed at or below this
+    #   value — sub-nickel options are deep OTM noise or near-expiry junk.
+    # min_option_entry_volume: skip bars with no real trading activity that day;
+    #   zero-volume quotes are stale or synthetic and produce unreliable labels.
+    min_option_entry_price: float = 0.05
+    min_option_entry_volume: int = 1
     strategy_family: str = "short_option"
     strategy_types: tuple[str, ...] = ("PCS", "CCS")
     spread_widths: tuple[float, ...] = (5.0, 10.0, 15.0)
@@ -448,6 +455,14 @@ class HistoricalCandidateDatasetBuilder:
                 entry_dte = _dte(entry_bar.timestamp, contract.expiration)
                 if entry_dte is None or entry_dte < config.min_dte or entry_dte > config.max_dte:
                     continue
+                # Data quality gates: skip penny options and zero-volume bars.
+                # Sub-nickel closes are deep-OTM noise or near-expiry junk with
+                # no reliable forward path; zero volume means no actual trade
+                # occurred that day and the quote is stale or synthetic.
+                if entry_bar.close < config.min_option_entry_price:
+                    continue
+                if (entry_bar.volume is None or entry_bar.volume < config.min_option_entry_volume):
+                    continue
                 future_path = [
                     bar
                     for bar in path
@@ -571,6 +586,17 @@ class HistoricalCandidateDatasetBuilder:
 
                 entry_dte = _dte(short_entry_bar.timestamp, short_contract.expiration)
                 if entry_dte is None or entry_dte < config.min_dte or entry_dte > config.max_dte:
+                    continue
+                # Data quality gates: both legs must have real prices and volume.
+                # Zero-volume or sub-nickel quotes on either leg mean the spread
+                # cannot be executed at a reliable price — skip the row entirely.
+                if short_entry_bar.close < config.min_option_entry_price:
+                    continue
+                if (short_entry_bar.volume is None or short_entry_bar.volume < config.min_option_entry_volume):
+                    continue
+                if long_entry_bar.close < config.min_option_entry_price:
+                    continue
+                if (long_entry_bar.volume is None or long_entry_bar.volume < config.min_option_entry_volume):
                     continue
                 future_short_path = [
                     bar

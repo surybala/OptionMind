@@ -56,12 +56,17 @@ class FakeProvider:
         ]
 
     def get_option_bars(self, symbols, start, end, timeframe, limit=None):
+        # 6 bars: entry + 5 forward days.  Prices decay to 0.90 by day 4, which
+        # is ≤ 25% of the $4.00 entry (75% profit-take threshold = $1.00).
         data = {}
         for symbol in symbols:
             data[symbol] = [
-                PriceBar(symbol, self.entry, 4.00, 4.20, 3.90, 4.00, volume=100, trade_count=12, vwap=4.05),
-                PriceBar(symbol, self.entry + timedelta(days=1), 2.40, 2.50, 2.00, 2.20, volume=90, trade_count=10, vwap=2.25),
-                PriceBar(symbol, self.entry + timedelta(days=2), 1.90, 2.00, 1.80, 1.90, volume=80, trade_count=8, vwap=1.92),
+                PriceBar(symbol, self.entry,                      4.00, 4.20, 3.90, 4.00, volume=100, trade_count=12, vwap=4.05),
+                PriceBar(symbol, self.entry + timedelta(days=1),  2.20, 2.50, 2.00, 2.20, volume=90,  trade_count=10, vwap=2.25),
+                PriceBar(symbol, self.entry + timedelta(days=2),  1.50, 1.60, 1.40, 1.50, volume=80,  trade_count=8,  vwap=1.52),
+                PriceBar(symbol, self.entry + timedelta(days=3),  1.20, 1.30, 1.10, 1.20, volume=70,  trade_count=7,  vwap=1.22),
+                PriceBar(symbol, self.entry + timedelta(days=4),  0.90, 1.00, 0.85, 0.90, volume=60,  trade_count=6,  vwap=0.92),
+                PriceBar(symbol, self.entry + timedelta(days=5),  0.70, 0.80, 0.65, 0.70, volume=50,  trade_count=5,  vwap=0.72),
             ]
         return data
 
@@ -71,10 +76,15 @@ class FakeProvider:
 
 class StopLossProvider(FakeProvider):
     def get_option_bars(self, symbols, start, end, timeframe, limit=None):
+        # Stop fires on day 1 (8.30 ≥ 2× entry $4.00 = $8.00).  Days 2-4 are
+        # padding to satisfy min_forward_bars=5; they don't affect the label.
         return {
             symbol: [
-                PriceBar(symbol, self.entry, 4.00, 4.20, 3.90, 4.00, volume=100, trade_count=12, vwap=4.05),
-                PriceBar(symbol, self.entry + timedelta(days=1), 8.30, 8.50, 8.10, 8.30, volume=90, trade_count=9, vwap=8.32),
+                PriceBar(symbol, self.entry,                      4.00, 4.20, 3.90, 4.00, volume=100, trade_count=12, vwap=4.05),
+                PriceBar(symbol, self.entry + timedelta(days=1),  8.30, 8.50, 8.10, 8.30, volume=90,  trade_count=9,  vwap=8.32),
+                PriceBar(symbol, self.entry + timedelta(days=2),  1.00, 1.10, 0.90, 1.00, volume=80,  trade_count=8,  vwap=1.02),
+                PriceBar(symbol, self.entry + timedelta(days=3),  1.00, 1.10, 0.90, 1.00, volume=70,  trade_count=7,  vwap=1.02),
+                PriceBar(symbol, self.entry + timedelta(days=4),  1.00, 1.10, 0.90, 1.00, volume=60,  trade_count=6,  vwap=1.02),
             ]
             for symbol in symbols
         }
@@ -97,11 +107,15 @@ class CreditSpreadProvider(FakeProvider):
         ]
 
     def get_option_bars(self, symbols, start, end, timeframe, limit=None):
+        # 6 bars per leg.  PCS profit-take (75%) fires when spread debit ≤ 0.75:
+        #   day4 short=1.00, long=0.40 → debit=0.60 ≤ 0.75 → profit_take.
+        # CCS profit-take (75%) fires when debit ≤ 0.50:
+        #   day4 short=0.80, long=0.40 → debit=0.40 ≤ 0.50 → profit_take.
         prices = {
-            "SPY260626P00500000": [4.0, 3.0, 2.2],
-            "SPY260626P00495000": [1.0, 1.0, 0.8],
-            "SPY260626C00510000": [3.0, 2.2, 1.7],
-            "SPY260626C00515000": [1.0, 0.9, 0.7],
+            "SPY260626P00500000": [4.0, 3.0, 2.2, 1.5, 1.0, 0.9],
+            "SPY260626P00495000": [1.0, 1.0, 0.8, 0.6, 0.4, 0.25],
+            "SPY260626C00510000": [3.0, 2.2, 1.7, 1.2, 0.8, 0.5],
+            "SPY260626C00515000": [1.0, 0.9, 0.7, 0.5, 0.4, 0.3],
         }
         return {
             symbol: [
@@ -184,10 +198,10 @@ def test_candidate_dataset_builder_emits_profit_take_rows():
     assert row.option_entry_trade_count == 12
     assert row.option_entry_vwap == 4.05
     assert row.exit_reason == "profit_take"
-    assert row.expected_pnl == 210.0
-    assert row.realized_pnl_per_contract == 210.0
-    assert row.days_to_exit == 2.0
-    assert row.label_version == "short_option_labels_v001"
+    assert row.expected_pnl == 310.0   # entry $4.00 − exit $0.90 = $3.10 × 100
+    assert row.realized_pnl_per_contract == 310.0
+    assert row.days_to_exit == 4.0     # fires on day 4 at 75% profit-take threshold
+    assert row.label_version == "short_option_labels_v002"
     assert row.profit_label == 1
     assert row.stop_loss_hit == 0
     # FakeProvider has no pre-entry option bars (lookback) and no event provider,
@@ -314,7 +328,7 @@ def test_candidate_dataset_builder_emits_credit_spread_rows():
     assert pcs.entry_credit == 3.0
     assert pcs.max_loss == 200.0
     assert pcs.credit_to_width == 0.6
-    assert pcs.expected_pnl == 160.0
+    assert pcs.expected_pnl == 240.0   # exit debit 0.60 on day 4 (75% take); (3.00−0.60)×100
     assert pcs.option_entry_price == pcs.entry_credit
 
 

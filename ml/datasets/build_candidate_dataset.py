@@ -40,7 +40,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--option-limit", type=int, default=None, help="Optional provider metadata cap per underlying/window. Omit to fetch all paginated contract metadata before local filtering.")
     parser.add_argument("--max-rows-per-underlying", type=int, default=None)
     parser.add_argument("--max-abs-strike-distance-pct", type=float, default=0.30)
-    parser.add_argument("--min-forward-bars", type=int, default=2)
+    parser.add_argument("--min-forward-bars", type=int, default=5)
+    parser.add_argument("--min-option-entry-price", type=float, default=0.05, help="Skip entry bars whose close is at or below this value (penny/junk option filter).")
+    parser.add_argument("--min-option-entry-volume", type=int, default=1, help="Skip entry bars with volume below this threshold (zero-volume stale quote filter).")
     parser.add_argument("--sample-every-n-bars", type=int, default=1)
     parser.add_argument("--stock-lookback-days", type=int, default=60)
     parser.add_argument("--market-regime-symbol", default="SPY", help="Benchmark symbol used for market regime features.")
@@ -151,7 +153,10 @@ def main() -> int:
         strategy_types=tuple(item.strip().upper() for item in args.strategy_types.split(",") if item.strip()),
         spread_widths=tuple(float(item.strip()) for item in args.spread_widths.split(",") if item.strip()),
         spread_stop_loss_max_loss_pct=None if args.spread_stop_loss_max_loss_pct < 0 else args.spread_stop_loss_max_loss_pct,
-        label_version="credit_spread_labels_v001" if args.strategy_family == "credit-spreads" else "short_option_labels_v001",
+        label_version="credit_spread_labels_v002" if args.strategy_family == "credit-spreads" else "short_option_labels_v002",
+        profit_take_pct=0.75,
+        min_option_entry_price=args.min_option_entry_price,
+        min_option_entry_volume=args.min_option_entry_volume,
         max_workers=args.max_workers,
         build_window_days=args.build_window_days,
     )
@@ -183,11 +188,14 @@ def main() -> int:
             "option_limit": config.option_limit,
             "max_abs_strike_distance_pct": config.max_abs_strike_distance_pct,
             "min_forward_bars": config.min_forward_bars,
+            "min_option_entry_price": config.min_option_entry_price,
+            "min_option_entry_volume": config.min_option_entry_volume,
+            "profit_take_pct": config.profit_take_pct,
             "sample_every_n_bars": config.sample_every_n_bars,
             "stock_lookback_days": config.stock_lookback_days,
             "market_regime_symbol": config.market_regime_symbol,
             "build_window_days": config.build_window_days,
-            "feature_set_version": "features_v002",
+            "feature_set_version": "features_v005",
             "label_version": config.label_version,
             "strategy_family": config.strategy_family,
             "strategy_types": list(config.strategy_types),
