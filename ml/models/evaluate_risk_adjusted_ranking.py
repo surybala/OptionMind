@@ -192,8 +192,9 @@ def evaluate_risk_adjusted_ranking(
         max_stop_loss_probability=cfg.max_stop_loss_probability,
     )
     gate_cfg = ExitCriteriaConfig(selection_fraction=cfg.selection_fraction)
-    raw = _selection_metrics(scored, "prediction", gate_cfg)
-    adjusted = _selection_metrics(scored, "risk_adjusted_score", gate_cfg)
+    ror_selection = _selection_metrics(scored, "risk_adjusted_score", gate_cfg)
+    scored["sortino_score"] = compute_sortino_score(scored["risk_adjusted_score"], scored)
+    sortino_selection = _selection_metrics(scored, "sortino_score", gate_cfg)
     portfolio_selection = None
     portfolio_deltas = None
     portfolio_eligible_rows = None
@@ -216,7 +217,7 @@ def evaluate_risk_adjusted_ranking(
             if portfolio_eligible_rows
             else {"rows": int(len(scored)), "selected_rows": 0}
         )
-        portfolio_deltas = _metric_deltas(raw, portfolio_selection)
+        portfolio_deltas = _metric_deltas(ror_selection, portfolio_selection)
     return {
         "dataset_path": str(dataset_path),
         "ranker_artifact": str(ranker_artifact_path),
@@ -226,15 +227,15 @@ def evaluate_risk_adjusted_ranking(
         "resolved_risk_penalty_basis": risk_penalty_basis,
         "holdout_rows": int(len(scored)),
         "risk_eligible_rows": int(np.isfinite(pd.to_numeric(scored["risk_adjusted_score"], errors="coerce")).sum()),
-        "raw_selection": raw,
-        "risk_adjusted_selection": adjusted,
+        "ror_selection": ror_selection,
+        "sortino_selection": sortino_selection,
+        "ror_vs_sortino_deltas": _metric_deltas(ror_selection, sortino_selection),
         "portfolio_risk_selection": portfolio_selection,
         "large_loss_gate_selection": trade_pipeline["large_loss_gate_selection"],
         "trade_pipeline_selection": trade_pipeline["trade_pipeline_selection"],
-        "deltas": _metric_deltas(raw, adjusted),
         "portfolio_risk_deltas": portfolio_deltas,
-        "large_loss_gate_deltas": _metric_deltas(raw, trade_pipeline["large_loss_gate_selection"]),
-        "trade_pipeline_deltas": _metric_deltas(raw, trade_pipeline["trade_pipeline_selection"]),
+        "large_loss_gate_deltas": _metric_deltas(ror_selection, trade_pipeline["large_loss_gate_selection"]),
+        "trade_pipeline_deltas": _metric_deltas(ror_selection, trade_pipeline["trade_pipeline_selection"]),
         "risk_probability_summary": {
             "large_loss_probability": _prob_summary(scored["large_loss_probability"]),
             "stop_loss_probability": _prob_summary(scored["stop_loss_probability"]),
@@ -382,9 +383,41 @@ def _score_classifier(df: pd.DataFrame, artifact_path: Path) -> np.ndarray:
     return _predict_prob(booster, frame)
 
 
+def compute_sortino_score(risk_adjusted_score: pd.Series, df: pd.DataFrame) -> pd.Series:
+    """Per-trade Sortino proxy: risk_adjusted_score / downside-vol factor.
+
+    sortino_score = risk_adjusted_score / max(iv × sqrt(dte / 252), ε)
+
+    The denominator (Black-Scholes expected-move factor) is a per-trade proxy for
+    downside standard deviation over the spread's remaining life.  It up-ranks
+    trades that earn the same predicted RoR with lower underlying volatility or
+    shorter DTE, favouring low-risk capital efficiency.
+
+    Classifier-vetoed rows (-inf score) remain -inf after division.
+    """
+    pred = pd.to_numeric(risk_adjusted_score, errors="coerce").fillna(-np.inf)
+    iv = (
+        pd.to_numeric(df.get("implied_volatility", pd.Series(dtype=float)), errors="coerce")
+        .fillna(0.25)
+        .clip(lower=0.01)
+    )
+    dte = (
+        pd.to_numeric(df.get("dte", pd.Series(dtype=float)), errors="coerce")
+        .fillna(30.0)
+        .clip(lower=1.0)
+    )
+    vol_factor = (iv * np.sqrt(dte / 252.0)).clip(lower=1e-4)
+    result = pd.Series(-np.inf, index=df.index, dtype=float)
+    finite_mask = np.isfinite(pred)
+    result.loc[finite_mask] = pred.loc[finite_mask] / vol_factor.loc[finite_mask]
+    return result
+
+
 def _metric_deltas(raw: dict[str, Any], adjusted: dict[str, Any]) -> dict[str, Any]:
     metrics = (
         "mean_pnl",
+        "mean_return_on_risk",
+        "sortino_ratio",
         "slippage_adjusted_mean_pnl",
         "profit_factor",
         "slippage_adjusted_profit_factor",

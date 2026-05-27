@@ -209,6 +209,7 @@ def _selection_metrics(df: pd.DataFrame, prediction_column: str, config: ExitCri
         "median_pnl": _percentile(pnl, 50),
         "total_pnl": round(float(np.sum(pnl)), 6) if len(pnl) else None,
         "profit_factor": _profit_factor(pnl),
+        "sortino_ratio": _sortino_ratio(pnl),
         "win_rate": _rate(pnl > 0),
         "p05_pnl": _percentile(pnl, 5),
         "p01_pnl": _percentile(pnl, 1),
@@ -493,6 +494,25 @@ def _rate(values: np.ndarray) -> float | None:
     if len(values) == 0:
         return None
     return round(float(np.mean(values)), 6)
+
+
+def _sortino_ratio(pnl: np.ndarray) -> float | None:
+    """Sortino ratio: mean(pnl) / std(negative pnl only).
+
+    Uses only downside deviations (pnl < 0) as the risk denominator, making it
+    more appropriate than Sharpe for asymmetric credit-spread return distributions
+    where upside is capped and downside is fat-tailed.  Returns None when there
+    are fewer than 2 losing trades (no meaningful downside std).
+    """
+    if len(pnl) == 0:
+        return None
+    neg = pnl[pnl < 0]
+    if len(neg) < 2:
+        return None
+    downside_std = float(np.std(neg, ddof=1))
+    if downside_std <= 0:
+        return None
+    return round(float(np.mean(pnl)) / downside_std, 6)
 
 
 def _float_or_none(value: Any) -> float | None:
