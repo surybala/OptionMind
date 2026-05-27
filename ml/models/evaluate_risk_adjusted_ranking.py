@@ -13,10 +13,18 @@ import pandas as pd
 
 from ml.datasets.audit_candidate_dataset import load_dataset
 from ml.models.evaluate_exit_criteria import ExitCriteriaConfig, _selection_metrics, _score_holdout
+from ml.models.portfolio_controls import (
+    apply_portfolio_risk_controls,
+    load_scanner_config,
+    _entry_dates,
+    _float_value,
+    _pick_from_scored_row,
+    _positive_float,
+    _positive_int,
+    _scanner_top_n,
+)
 from ml.models.train_large_loss_classifier import _predict_prob, _transform_frame
 from ml.models.train_xgboost import _engineer_features
-from src.pick_selection import select_top_picks_with_scanner_controls
-from src.portfolio_risk import PortfolioRiskService
 
 try:
     import xgboost as xgb
@@ -27,11 +35,11 @@ except Exception:  # pragma: no cover
 @dataclass(frozen=True)
 class RiskAdjustedConfig:
     selection_fraction: float = 0.10
-    large_loss_penalty_multiple: float = 1.0
-    stop_loss_penalty_multiple: float = 0.50
-    max_large_loss_probability: float | None = None
-    max_stop_loss_probability: float | None = None
-    portfolio_risk_controls: bool = False
+    large_loss_penalty_multiple: float = 0.0
+    stop_loss_penalty_multiple: float = 0.0
+    max_large_loss_probability: float | None = 0.70
+    max_stop_loss_probability: float | None = 0.70
+    portfolio_risk_controls: bool = True
     portfolio_account_capital: float = 50_000.0
     portfolio_max_candidates_per_entry_date: int = 50
     scanner_controls: bool = True
@@ -54,7 +62,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--portfolio-risk-controls",
         action="store_true",
-        help="Apply the existing PortfolioRiskService default portfolio-level controls to selected spreads.",
+        default=True,
+        help="Apply portfolio-level risk controls to selected spreads (default: on).",
+    )
+    parser.add_argument(
+        "--no-portfolio-risk-controls",
+        dest="portfolio_risk_controls",
+        action="store_false",
+        help="Disable portfolio-level risk controls.",
     )
     parser.add_argument("--portfolio-account-capital", type=float, default=RiskAdjustedConfig.portfolio_account_capital)
     parser.add_argument(
@@ -142,7 +157,7 @@ def evaluate_risk_adjusted_ranking(
     portfolio_selection = None
     portfolio_deltas = None
     portfolio_eligible_rows = None
-    scanner_config = _load_scanner_config(cfg.scanner_config_path)
+    scanner_config = load_scanner_config(cfg.scanner_config_path)
     if cfg.portfolio_risk_controls:
         scored["portfolio_risk_score"] = apply_portfolio_risk_controls(
             scored,
@@ -217,127 +232,6 @@ def apply_probability_caps(
     return capped
 
 
-def apply_portfolio_risk_controls(
-    df: pd.DataFrame,
-    score_column: str,
-    *,
-    account_capital: float = 50_000.0,
-    max_candidates_per_entry_date: int | None = 50,
-    scanner_controls: bool = True,
-    scanner_config: dict[str, Any] | None = None,
-    scanner_top_n_per_entry_date: int | None = None,
-) -> pd.Series:
-    """Keep only rows accepted by the existing live portfolio risk service.
-
-    Historical rows are evaluated one entry date at a time. Expiry is normalized
-    to today + row.dte because PortfolioRiskService is intentionally live-time
-    code and computes DTE from calendar dates.
-    """
-    out = pd.Series(-np.inf, index=df.index, dtype=float)
-    if df.empty:
-        return out
-    svc = PortfolioRiskService({"risk_parameters": {"portfolio_gamma_risk": {}}})
-    working = df.copy()
-    working["_portfolio_entry_date"] = _entry_dates(working)
-    scores = pd.to_numeric(working[score_column], errors="coerce")
-    for _, group in working[np.isfinite(scores)].groupby("_portfolio_entry_date", sort=True):
-        ranked = group.assign(_portfolio_score=scores.loc[group.index]).sort_values(
-            "_portfolio_score", ascending=False
-        )
-        candidate_limit = (
-            scanner_top_n_per_entry_date
-            or _scanner_top_n(scanner_config)
-            or max_candidates_per_entry_date
-        )
-        if scanner_controls:
-            picks = [_pick_from_scored_row(index, row) for index, row in ranked.iterrows()]
-            picks = [pick for pick in picks if pick is not None]
-            picks = select_top_picks_with_scanner_controls(
-                picks,
-                n=int(candidate_limit or len(picks)),
-                config=scanner_config or {},
-            )
-        else:
-            if max_candidates_per_entry_date is not None and max_candidates_per_entry_date > 0:
-                ranked = ranked.head(max_candidates_per_entry_date)
-            picks = [_pick_from_scored_row(index, row) for index, row in ranked.iterrows()]
-            picks = [pick for pick in picks if pick is not None]
-        accepted = svc.filter_picks(picks, [], account_capital=account_capital)
-        for pick in accepted:
-            out.loc[pick["_row_index"]] = float(pick["_portfolio_score"])
-    return out
-
-
-def _load_scanner_config(path: str | None) -> dict[str, Any]:
-    if not path:
-        return {}
-    config_path = Path(path)
-    if not config_path.exists():
-        return {}
-    return json.loads(config_path.read_text(encoding="utf-8"))
-
-
-def _scanner_top_n(config: dict[str, Any] | None) -> int | None:
-    cfg = config or {}
-    value = (
-        cfg.get("ml_scanner", {}).get("top_n")
-        if isinstance(cfg.get("ml_scanner"), dict)
-        else None
-    )
-    if value is None:
-        value = cfg.get("top_n_picks", cfg.get("top_n_per_strategy"))
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _entry_dates(df: pd.DataFrame) -> pd.Series:
-    if "entry_timestamp" in df:
-        return pd.to_datetime(df["entry_timestamp"], errors="coerce").dt.date.astype(str)
-    if "entry_date" in df:
-        return df["entry_date"].astype(str)
-    return pd.Series(["all"] * len(df), index=df.index)
-
-
-def _pick_from_scored_row(index: Any, row: pd.Series) -> dict[str, Any] | None:
-    strategy = str(row.get("strategy") or "").upper()
-    if strategy not in {"PCS", "CCS"}:
-        return None
-    dte = _positive_int(row.get("dte"))
-    spot = _positive_float(row.get("underlying_close"))
-    short_strike = _positive_float(row.get("short_strike") or row.get("strike"))
-    long_strike = _positive_float(row.get("long_strike"))
-    if dte is None or spot is None or short_strike is None or long_strike is None:
-        return None
-    short_iv = _positive_float(row.get("implied_volatility")) or 0.25
-    iv_skew = _float_value(row.get("iv_skew_wing")) or 0.0
-    long_iv = max(0.01, short_iv + iv_skew)
-    score = _float_value(row.get("_portfolio_score"))
-    if score is None:
-        return None
-    pick = {
-        "_row_index": index,
-        "_portfolio_score": score,
-        "strategy": strategy,
-        "symbol": str(row.get("underlying") or row.get("symbol") or "?"),
-        "expiry": (date.today() + timedelta(days=dte)).isoformat(),
-        "current_price": spot,
-        "short_strike": short_strike,
-        "long_strike": long_strike,
-        "premium": _positive_float(row.get("entry_credit")) or _positive_float(row.get("option_entry_price")) or 0.01,
-        "quantity": 1,
-        "score": score,
-        "short_iv": short_iv,
-        "long_iv": long_iv,
-    }
-    if strategy == "PCS":
-        pick["short_put"] = short_strike
-        pick["long_put"] = long_strike
-    else:
-        pick["short_call"] = short_strike
-        pick["long_call"] = long_strike
-    return pick
 
 
 def _score_classifier(df: pd.DataFrame, artifact_path: Path) -> np.ndarray:
@@ -397,22 +291,6 @@ def _float_or_none(value: Any) -> float | None:
     return float(value)
 
 
-def _float_value(value: Any) -> float | None:
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-    return numeric if np.isfinite(numeric) else None
-
-
-def _positive_float(value: Any) -> float | None:
-    numeric = _float_value(value)
-    return numeric if numeric is not None and numeric > 0 else None
-
-
-def _positive_int(value: Any) -> int | None:
-    numeric = _positive_float(value)
-    return max(1, int(round(numeric))) if numeric is not None else None
 
 
 def _jsonable(report: dict[str, Any]) -> dict[str, Any]:

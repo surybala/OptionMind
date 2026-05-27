@@ -105,8 +105,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--event-provider",
         default="fmp",
-        choices=["fmp", "none"],
-        help="Source for earnings calendar (requires FMP_API_KEY when set to 'fmp').",
+        choices=["fmp", "yfinance", "none"],
+        help=(
+            "Source for earnings calendar. "
+            "'fmp' requires FMP_API_KEY and covers the full date range in 90-day chunks. "
+            "'yfinance' uses Yahoo Finance (free, no API key) with ~6 years of history. "
+            "'none' disables earnings features (days_to_earnings will be null)."
+        ),
     )
     parser.add_argument(
         "--dividend-provider",
@@ -296,6 +301,8 @@ def _event_provider_from_args(name: str):
     """Return an EventDataProvider or None."""
     if name == "fmp":
         return FMPProvider.from_env()
+    if name == "yfinance":
+        return YFinanceProvider()
     if name == "none":
         return None
     raise ValueError(f"Unsupported event provider: {name}")

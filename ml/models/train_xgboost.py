@@ -18,7 +18,9 @@ from ml.models.train_baseline import (
     _empty_test_metrics,
     _engineer_features,
     _evaluation_metrics,
+    _max_drawdown,
     _prefixed_metrics,
+    _profit_factor,
     _row_timestamp,
     _select_feature_columns,
     _split_index,
@@ -71,7 +73,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", required=True, help="JSONL file, parquet file, or dataset directory.")
     parser.add_argument("--output", required=True, help="Output artifact JSON path.")
     parser.add_argument("--model-output", default=None, help="Optional XGBoost model output path.")
-    parser.add_argument("--target", default="expected_pnl")
+    parser.add_argument("--target", default="return_on_risk")
     parser.add_argument("--test-fraction", type=float, default=0.25)
     parser.add_argument("--min-rows", type=int, default=20)
     parser.add_argument("--walk-forward-folds", type=int, default=3)
@@ -92,8 +94,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--downside-penalty", type=float, default=1.5)
     parser.add_argument("--overprediction-penalty", type=float, default=1.0)
     parser.add_argument("--max-multiplier", type=float, default=30.0)
-    parser.add_argument("--target-scale", type=float, default=100.0, help="Signed log1p target scaling denominator for the custom objective.")
-    parser.add_argument("--target-clip", type=float, default=5000.0, help="Absolute target cap before signed log1p scaling.")
+    parser.add_argument("--target-scale", type=float, default=0.10, help="Signed log1p target scaling denominator for the custom objective. Use 0.10 for return_on_risk (0–1 range), 100.0 for expected_pnl (dollar range).")
+    parser.add_argument("--target-clip", type=float, default=5.0, help="Absolute target cap before signed log1p scaling. Use 5.0 for return_on_risk, 5000.0 for expected_pnl.")
     parser.add_argument("--huber-delta", type=float, default=1.0, help="Pseudo-Huber transition point in transformed target units.")
     parser.add_argument("--gradient-clip", type=float, default=10.0, help="Absolute custom-objective gradient clip.")
     parser.add_argument("--hessian-floor", type=float, default=1e-6, help="Minimum custom-objective hessian.")
@@ -164,7 +166,7 @@ def train_xgboost(
     df: pd.DataFrame,
     *,
     model_output: Path,
-    target_column: str = "expected_pnl",
+    target_column: str = "return_on_risk",
     test_fraction: float = 0.25,
     min_rows: int = 20,
     walk_forward_folds: int = 3,
@@ -481,8 +483,22 @@ def _feature_importance(booster) -> dict[str, float]:
 
 
 def _credit_spread_selection_metrics(df: pd.DataFrame, y_pred: np.ndarray) -> dict[str, float | None]:
+    """Top-decile selection metrics always reported in dollar PnL units.
+
+    Overrides the target-unit values written by _evaluation_metrics so that
+    exit criteria gates remain calibrated in dollars regardless of training target
+    (e.g. return_on_risk vs expected_pnl).
+    """
     if len(df) == 0 or len(y_pred) == 0:
         return {
+            "top_decile_count": None,
+            "top_decile_actual_mean": None,
+            "top_decile_predicted_mean": None,
+            "top_decile_win_rate": None,
+            "top_decile_profit_factor": None,
+            "top_decile_tail_loss_p05": None,
+            "top_decile_worst_actual": None,
+            "top_decile_max_drawdown": None,
             "top_decile_max_adverse_excursion": None,
             "top_decile_large_loss_rate": None,
             "top_decile_stop_loss_rate": None,
@@ -491,7 +507,17 @@ def _credit_spread_selection_metrics(df: pd.DataFrame, y_pred: np.ndarray) -> di
     top_n = max(1, int(np.ceil(len(y_pred) * 0.1)))
     top_indices = np.argsort(y_pred)[-top_n:]
     selected = df.iloc[top_indices]
+    # Dollar PnL from the dataset column — independent of what the training target is.
+    pnl = pd.to_numeric(selected.get("expected_pnl", pd.Series(dtype=float)), errors="coerce").dropna().to_numpy(dtype=float)
     return {
+        "top_decile_count": int(len(selected)),
+        "top_decile_actual_mean": round(float(np.mean(pnl)), 6) if len(pnl) else None,
+        "top_decile_predicted_mean": round(float(np.mean(y_pred[top_indices])), 6),
+        "top_decile_win_rate": round(float(np.mean(pnl > 0)), 6) if len(pnl) else None,
+        "top_decile_profit_factor": _profit_factor(pnl),
+        "top_decile_tail_loss_p05": round(float(np.percentile(pnl, 5)), 6) if len(pnl) >= 20 else None,
+        "top_decile_worst_actual": round(float(np.min(pnl)), 6) if len(pnl) else None,
+        "top_decile_max_drawdown": _max_drawdown(pnl),
         "top_decile_max_adverse_excursion": _column_max(selected, "max_adverse_excursion"),
         "top_decile_large_loss_rate": _column_mean(selected, "large_loss_label"),
         "top_decile_stop_loss_rate": _column_mean(selected, "stop_loss_hit"),
