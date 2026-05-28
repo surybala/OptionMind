@@ -106,27 +106,29 @@ Champion training dataset (balanced): `candidate_rows_massive_broad_etfs_pcs_ccs
 500K rows, derived from base via sqrt-frequency hierarchical sampling (max 12% per underlying).  
 Located at: `artifacts/datasets/candidate_rows/dataset_version=<name>`
 
-## Current model artifacts (V006c — champion)
+## Current model artifacts (V006c ranker + V006d classifier — champions)
 
-V006c ranker is the registered champion in `artifacts/model_registry.json` and is loaded by the
-live agent automatically. Trained via 2-pass Optuna optimisation (100 HP trials + 64 feature
-trials) on the balanced 500K dataset. Passes all 33 exit criteria (V006b passed 16/33).
+V006c ranker and V006d large-loss classifier are registered champions in `artifacts/model_registry.json`
+and are loaded by the live agent automatically.
 
 | Artifact | File | Notes |
 |----------|------|-------|
-| XGBoost ranker (champion) | `xgboost_v006c_500r_dp28.json` | PF 2.47 (+26%), RoR 0.167 (+10%), WR 78.6%; 38 features |
-| Large-loss classifier | `large_loss_classifier_v006c.json` | WF AUC 0.8519 (+0.4%), precision +5.7%, F1 +4.9%; 33 features |
+| XGBoost ranker (champion) | `xgboost_v006c_500r_dp28.json` | PF 2.47 (+26%), RoR 0.167 (+10%), WR 78.6%; 39 features |
+| Large-loss classifier (champion) | `large_loss_classifier_v006d.json` | WF AUC 0.8502, recall 98.8% (best), FN 190 (best); 61 features |
 | Stop-loss classifier | `stop_loss_classifier_v006b.json` | AUC 0.804, recall 99.7% (not yet re-optimised) |
 
-V006c key HP changes vs V006b: `reg_lambda` 10→37.5 (heavy L2), `colsample_bytree` 0.85→0.42
-(aggressive column dropout), `eta` 0.05→0.020, `downside_penalty` 2.5→2.83, `huber_delta` 1.0→2.20.
+### V006c ranker details
 
-V006c drops 23 features (5 groups) vs V006b: `underlying_price` (directional returns add bias),
-`market_regime` (SPY-level features confound ETF-specific ranking), `vix_features` (macro fear
-index hurts individual option quality assessment), `vol_momentum` (redundant with absolute vol),
+Trained via 2-pass Optuna (100 HP trials + 64 feature trials). Passes all 33 exit criteria (V006b: 16/33).
+
+Key HP vs V006b: `reg_lambda` 10→37.5 (heavy L2), `colsample_bytree` 0.85→0.42 (aggressive dropout),
+`eta` 0.05→0.020, `downside_penalty` 2.5→2.83, `huber_delta` 1.0→2.20.
+
+Drops 23 features (5 groups): `underlying_price` (directional bias), `market_regime` (SPY confounds
+ETF ranking), `vix_features` (macro fear hurts option quality assessment), `vol_momentum` (redundant),
 `credit_efficiency` (credit_to_width already captures this).
 
-Canonical retrain command (V006c):
+Canonical retrain command (V006c ranker):
 ```
 PYTHONPATH=. .venv/bin/python -m ml.models.train_xgboost \
   --input  artifacts/datasets/candidate_rows/candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k \
@@ -142,10 +144,38 @@ PYTHONPATH=. .venv/bin/python -m ml.models.train_xgboost \
 
 Rollback (ranker): `xgboost_v006b_500r_dp25.json` (PF 1.96, passes 16/33 exit criteria).
 
-V006c large-loss classifier uses 33 features (from 60). Keeps: underlying_price, option_entry,
-vix_features, credit_efficiency. Drops: greeks, iv_surface, event_risk, underlying_vol,
-option_activity, market_regime, vol_momentum. HP unchanged from V006b (HP search failed due to
---reg-alpha CLI bug, now fixed — re-run `optimize_large_loss_classifier --mode hp` for further gains).
+### V006d large-loss classifier details
+
+Trained via full 2-pass Optuna (75 HP trials + 11 feature trials). **Key lever: `reg_alpha=3.86`**
+(L1 regularisation — V006b had 0.0). L1 eliminates spurious correlations internally, making manual
+feature group exclusion unnecessary — all 11 toggleable groups included.
+
+| Metric | V006b | V006c | V006d |
+|--------|-------|-------|-------|
+| WF AUC | 0.8482 | 0.8519 | **0.8502** |
+| Recall | 98.2% | 97.6% | **98.8%** |
+| FN | 280 | 371 | **190** |
+| mean_prob_positive | 0.695 | 0.702 | **0.755** |
+| Features | 60 | 33 | 61 |
+
+Canonical retrain command (V006d large-loss classifier):
+```
+PYTHONPATH=. .venv/bin/python -m ml.models.train_large_loss_classifier \
+  --input  artifacts/datasets/candidate_rows/candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k \
+  --output artifacts/models/large_loss_classifier_v006d.json \
+  --target large_loss_label --embargo-days 30 \
+  --num-boost-round 500 \
+  --eta 0.045008498955439846 \
+  --max-depth 4 \
+  --min-child-weight 22.655215632674313 \
+  --subsample 0.5668613673345367 \
+  --colsample-bytree 0.8032706228748546 \
+  --reg-lambda 17.76545691458812 \
+  --reg-alpha 3.8622802600545603 \
+  --scale-pos-weight 12.18600024160314
+```
+
+Rollback (classifier): `large_loss_classifier_v006c.json` (WF AUC 0.8519, recall 97.6%, 33 features).
 
 Previous artifacts (V006, trained on full 1.44M enriched dataset — kept as reference):
 
