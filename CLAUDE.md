@@ -115,8 +115,8 @@ trials) on the balanced 500K dataset. Passes all 33 exit criteria (V006b passed 
 | Artifact | File | Notes |
 |----------|------|-------|
 | XGBoost ranker (champion) | `xgboost_v006c_500r_dp28.json` | PF 2.47 (+26%), RoR 0.167 (+10%), WR 78.6%; 38 features |
-| Large-loss classifier | `large_loss_classifier_v006b.json` | AUC 0.848, recall 98.2% |
-| Stop-loss classifier | `stop_loss_classifier_v006b.json` | AUC 0.804, recall 99.7% |
+| Large-loss classifier | `large_loss_classifier_v006c.json` | WF AUC 0.8519 (+0.4%), precision +5.7%, F1 +4.9%; 33 features |
+| Stop-loss classifier | `stop_loss_classifier_v006b.json` | AUC 0.804, recall 99.7% (not yet re-optimised) |
 
 V006c key HP changes vs V006b: `reg_lambda` 10→37.5 (heavy L2), `colsample_bytree` 0.85→0.42
 (aggressive column dropout), `eta` 0.05→0.020, `downside_penalty` 2.5→2.83, `huber_delta` 1.0→2.20.
@@ -140,7 +140,12 @@ PYTHONPATH=. .venv/bin/python -m ml.models.train_xgboost \
   --exclude-features underlying_close,underlying_return_1d,underlying_return_3d,underlying_return_5d,underlying_return_20d,underlying_range_pct,underlying_sma_20_distance_pct,underlying_above_sma_20,underlying_volume,underlying_volatility_ratio_5d_20d,underlying_vol_vs_market,vol_acceleration,market_return_5d,market_return_20d,market_realized_vol_5d,market_realized_vol_20d,market_sma_20_distance_pct,market_above_sma_20,market_volatility_ratio_5d_20d,vix_regime,vix_return_5d,vix_realized_vol_5d,credit_per_day_per_risk
 ```
 
-Rollback: `xgboost_v006b_500r_dp25.json` (PF 1.96, passes 16/33 exit criteria).
+Rollback (ranker): `xgboost_v006b_500r_dp25.json` (PF 1.96, passes 16/33 exit criteria).
+
+V006c large-loss classifier uses 33 features (from 60). Keeps: underlying_price, option_entry,
+vix_features, credit_efficiency. Drops: greeks, iv_surface, event_risk, underlying_vol,
+option_activity, market_regime, vol_momentum. HP unchanged from V006b (HP search failed due to
+--reg-alpha CLI bug, now fixed — re-run `optimize_large_loss_classifier --mode hp` for further gains).
 
 Previous artifacts (V006, trained on full 1.44M enriched dataset — kept as reference):
 

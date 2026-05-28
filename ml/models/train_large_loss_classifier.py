@@ -96,6 +96,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--colsample-bytree", type=float, default=0.85)
     parser.add_argument("--min-child-weight", type=float, default=20.0)
     parser.add_argument("--reg-lambda", type=float, default=20.0)
+    parser.add_argument("--reg-alpha", type=float, default=0.0)
     parser.add_argument("--early-stopping-rounds", type=int, default=20)
     parser.add_argument("--val-fraction", type=float, default=0.15)
     parser.add_argument(
@@ -149,6 +150,7 @@ def main() -> int:
             "colsample_bytree": args.colsample_bytree,
             "min_child_weight": args.min_child_weight,
             "lambda": args.reg_lambda,
+            "alpha": args.reg_alpha,
         },
     )
     output.parent.mkdir(parents=True, exist_ok=True)

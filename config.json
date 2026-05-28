@@ -29,8 +29,8 @@
     "risk_free_rate": 0.045,
     "spread_widths": [5, 10, 15, 20],
     "_spread_widths_note": "Dollar widths evaluated for each PCS/CCS short leg. Multiple widths let the model score and rank different risk/reward profiles per expiry; the highest-scored width wins selection.",
-    "large_loss_classifier_path": "artifacts/models/large_loss_classifier_v006b.json",
-    "_large_loss_classifier_note": "Large-loss classifier artifact. Spreads where p(large_loss) > large_loss_veto_threshold are vetoed before portfolio controls run.",
+    "large_loss_classifier_path": "artifacts/models/large_loss_classifier_v006c.json",
+    "_large_loss_classifier_note": "Large-loss classifier artifact. Spreads where p(large_loss) > large_loss_veto_threshold are vetoed before portfolio controls run. V006c: WF AUC 0.8519, 33 features, 4957 fewer false vetoes vs V006b.",
     "large_loss_veto_threshold": 0.70
   },
 
