@@ -107,6 +107,15 @@ def parse_args() -> argparse.Namespace:
             "Defaults to (negative_count / positive_count) from training data."
         ),
     )
+    parser.add_argument(
+        "--exclude-features",
+        default="",
+        help=(
+            "Comma-separated feature names to drop before training. "
+            "Used by the feature-selection optimizer to mask feature groups. "
+            "Example: --exclude-features vix_regime,market_return_5d"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -119,6 +128,7 @@ def main() -> int:
         else output.with_name(f"{output.stem}.xgboost.json")
     )
     df = load_dataset(Path(args.input))
+    exclude_features = {f.strip() for f in args.exclude_features.split(",") if f.strip()}
     artifact = train_large_loss_classifier(
         df,
         model_output=model_output,
@@ -131,6 +141,7 @@ def main() -> int:
         val_fraction=args.val_fraction,
         early_stopping_rounds=args.early_stopping_rounds,
         scale_pos_weight=args.scale_pos_weight,
+        exclude_features=exclude_features,
         params={
             "max_depth": args.max_depth,
             "eta": args.eta,
@@ -160,6 +171,7 @@ def train_large_loss_classifier(
     early_stopping_rounds: int = 20,
     num_boost_round: int = 200,
     scale_pos_weight: float | None = None,
+    exclude_features: set[str] | None = None,
     params: dict[str, Any] | None = None,
 ) -> LargeLossClassifierArtifact:
     """Train and evaluate a binary large-loss classifier.
@@ -195,6 +207,8 @@ def train_large_loss_classifier(
 
     clean = _engineer_features(clean)
     feature_columns = _select_feature_columns(clean)
+    if exclude_features:
+        feature_columns = [f for f in feature_columns if f not in exclude_features]
     if not feature_columns:
         raise ValueError("No usable numeric feature columns found.")
 
