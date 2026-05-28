@@ -203,3 +203,118 @@ def test_live_paper_inference_provider_can_emit_multiple_spread_widths(tmp_path)
     picks = inference.get_top_picks(["SPY"], n=10)
 
     assert {pick["width"] for pick in picks if pick["strategy"] == "PCS"} == {5.0, 10.0}
+
+
+def _large_loss_classifier_artifact(tmp_path, always_veto: bool = False):
+    """Write a minimal linear-model artifact that mimics the large-loss classifier interface."""
+    score = 0.95 if always_veto else 0.10
+    artifact_path = tmp_path / "large_loss_clf.json"
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "model_type": "linear_least_squares_v001",
+                "created_at": "2026-05-27T00:00:00+00:00",
+                "target_column": "large_loss_label",
+                "feature_version": "features_v005",
+                "label_version": "credit_spread_labels_v002",
+                "data_range": {"start": "2022-01-01T00:00:00+00:00", "end": "2026-04-25T00:00:00+00:00"},
+                "feature_columns": ["option_entry_price"],
+                "fill_values": {"option_entry_price": 0.0},
+                "intercept": score,
+                "coefficients": {"option_entry_price": 0.0},
+                "metrics": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return artifact_path
+
+
+def test_large_loss_classifier_veto_removes_picks(tmp_path):
+    """All spreads should be vetoed when the classifier always predicts p=0.95 > threshold."""
+    provider = FakeLiveProvider()
+    registry_path = _champion_registry(tmp_path)
+    clf_path = _large_loss_classifier_artifact(tmp_path, always_veto=True)
+
+    inference = LivePaperInferenceProvider(
+        {
+            "ml_scanner": {
+                "registry_path": str(registry_path),
+                "min_dte": 7,
+                "max_dte": 45,
+                "vix_symbol": "I:VIX",
+                "large_loss_classifier_path": str(clf_path),
+                "large_loss_veto_threshold": 0.70,
+            },
+            "strategies": {
+                "put_credit_spread": {"enabled": True, "strike_width": 5, "min_net_credit": 0.10},
+                "call_credit_spread": {"enabled": True, "strike_width": 5, "min_net_credit": 0.10},
+            },
+        },
+        provider=provider,
+        now_fn=lambda: provider.now,
+    )
+
+    picks = inference.get_top_picks(["SPY"], n=5)
+
+    assert picks == [], "Classifier with p=0.95 should veto all spreads"
+
+
+def test_large_loss_classifier_pass_includes_prob_in_pick(tmp_path):
+    """Picks that survive the classifier should carry large_loss_prob in the pick dict."""
+    provider = FakeLiveProvider()
+    registry_path = _champion_registry(tmp_path)
+    clf_path = _large_loss_classifier_artifact(tmp_path, always_veto=False)
+
+    inference = LivePaperInferenceProvider(
+        {
+            "ml_scanner": {
+                "registry_path": str(registry_path),
+                "min_dte": 7,
+                "max_dte": 45,
+                "vix_symbol": "I:VIX",
+                "large_loss_classifier_path": str(clf_path),
+            },
+            "strategies": {
+                "put_credit_spread": {"enabled": True, "strike_width": 5, "min_net_credit": 0.10},
+                "call_credit_spread": {"enabled": True, "strike_width": 5, "min_net_credit": 0.10},
+            },
+        },
+        provider=provider,
+        now_fn=lambda: provider.now,
+    )
+
+    picks = inference.get_top_picks(["SPY"], n=5)
+
+    assert len(picks) > 0, "Low-risk classifier should pass some spreads"
+    assert all("large_loss_prob" in p for p in picks)
+    assert all(p["large_loss_prob"] is not None for p in picks)
+
+
+def test_no_large_loss_classifier_leaves_large_loss_prob_none(tmp_path):
+    """Without a classifier configured, large_loss_prob should be None in picks."""
+    provider = FakeLiveProvider()
+    registry_path = _champion_registry(tmp_path)
+
+    inference = LivePaperInferenceProvider(
+        {
+            "ml_scanner": {
+                "registry_path": str(registry_path),
+                "min_dte": 7,
+                "max_dte": 45,
+                "vix_symbol": "I:VIX",
+            },
+            "strategies": {
+                "put_credit_spread": {"enabled": True, "strike_width": 5, "min_net_credit": 0.10},
+                "call_credit_spread": {"enabled": True, "strike_width": 5, "min_net_credit": 0.10},
+            },
+        },
+        provider=provider,
+        now_fn=lambda: provider.now,
+    )
+
+    picks = inference.get_top_picks(["SPY"], n=5)
+
+    assert len(picks) > 0
+    assert all(p.get("large_loss_prob") is None for p in picks)

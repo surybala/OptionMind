@@ -96,6 +96,10 @@ DEFAULT_FEATURE_COLUMNS = [
     # Macro event risk (continuous only; binary flags had zero importance)
     "days_to_fomc",
     "days_to_macro_event",
+    # Credit efficiency: premium per DTE per dollar at risk
+    # Normalises entry_credit by both time and capital exposure so the model can
+    # compare trades across different DTEs and spread widths on equal footing.
+    "credit_per_day_per_risk",
 ]
 
 DEFAULT_FEATURE_VERSION = "features_v005"
@@ -316,6 +320,18 @@ def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
         today_cnt = pd.to_numeric(df["option_entry_trade_count"], errors="coerce")
         avg_cnt = pd.to_numeric(df["option_trade_count_5d_avg"], errors="coerce")
         df["option_activity_spike"] = (today_cnt / avg_cnt.replace(0.0, np.nan)).round(8)
+
+    # Credit efficiency: entry credit per DTE per dollar at risk.
+    # Normalises raw credit across different expirations and spread widths so
+    # a 7-DTE trade paying $0.50 on a $5-wide spread compares fairly to a
+    # 45-DTE trade paying $1.50 on a $10-wide spread.
+    if "entry_credit" in df.columns and "dte" in df.columns and "max_loss" in df.columns:
+        credit = pd.to_numeric(df["entry_credit"], errors="coerce")
+        dte = pd.to_numeric(df["dte"], errors="coerce")
+        max_loss = pd.to_numeric(df["max_loss"], errors="coerce")
+        df["credit_per_day_per_risk"] = (
+            credit / (dte.replace(0.0, np.nan) * max_loss.replace(0.0, np.nan))
+        ).round(8)
 
     # IV skew wing: long-leg IV minus short-leg IV.
     # Requires columns present in credit-spread rows only; silently skipped for

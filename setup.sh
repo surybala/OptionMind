@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup.sh — install dependencies, validate config, run tests, launch OptionWheel
+# setup.sh — install dependencies, validate config, run tests, launch OptionMind
 # Works on Linux, macOS, and Windows Git Bash.
 set -euo pipefail
 
@@ -11,7 +11,7 @@ err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 info() { echo -e "${CYAN}[INFO]${NC}  $*"; }
 
 echo "============================================"
-echo "   OptionWheel | Setup & Launch"
+echo "   OptionMind | Setup & Launch"
 echo "============================================"
 echo
 
@@ -116,10 +116,10 @@ echo
 
 # ── 7. Launch ─────────────────────────────────────────────────────────────────
 echo "============================================"
-echo "   Launching OptionWheel Agent"
+echo "   Launching OptionMind Agent"
 echo "============================================"
 echo
 python agent.py
 
 echo
-ok "OptionWheel finished."
+ok "OptionMind finished."

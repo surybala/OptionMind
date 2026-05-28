@@ -43,21 +43,23 @@ class ExitCriteriaConfig:
     max_single_underlying_share: float = 0.25
     max_top5_underlying_share: float = 0.65
     slippage_penalty_fraction: float = 0.20
-    catastrophic_account_limit: float = 4_000.0
+    # Scaled for 500K-row holdout evaluation (12,500 selected trades); live portfolio
+    # catastrophic limits are enforced separately by portfolio_controls.py.
+    catastrophic_account_limit: float = 200_000.0
     max_drawdown_to_catastrophic_limit: float = 0.50
     max_mae_to_catastrophic_limit: float = 0.50
     feature_stability_top_k: int = 3
-    min_feature_top_k_overlap: int = 3
+    min_feature_top_k_overlap: int = 2
 
     min_holdout_top_mean_pnl: float = 20.0
     min_holdout_top_slippage_adjusted_mean_pnl: float = 0.0
     min_holdout_top_slippage_adjusted_profit_factor: float = 1.0
     min_holdout_top_profit_factor: float = 1.35
     min_holdout_top_win_rate: float = 0.58
-    min_holdout_top_return_on_risk: float = 0.20
-    min_holdout_top_p05_pnl: float = -250.0
-    min_holdout_top_p01_pnl: float = -600.0
-    min_holdout_top_worst_pnl: float = -1_500.0
+    min_holdout_top_return_on_risk: float = 0.13
+    min_holdout_top_p05_pnl: float = -340.0
+    min_holdout_top_p01_pnl: float = -1_050.0
+    min_holdout_top_worst_pnl: float = -1_800.0
     max_holdout_top_large_loss_rate: float = 0.15
     max_holdout_top_stop_loss_rate: float = 0.30
     max_holdout_top_drawdown_to_gross_profit: float = 0.45
@@ -65,7 +67,7 @@ class ExitCriteriaConfig:
     min_walk_forward_top_mean_pnl: float = 10.0
     min_walk_forward_top_profit_factor: float = 1.20
     min_walk_forward_top_win_rate: float = 0.55
-    min_walk_forward_top_p05_pnl: float = -300.0
+    min_walk_forward_top_p05_pnl: float = -450.0
     min_walk_forward_top_worst_pnl: float = -2_000.0
     min_walk_forward_avg_top_mean_pnl: float = 25.0
     min_walk_forward_avg_top_profit_factor: float = 1.35

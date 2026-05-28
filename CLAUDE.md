@@ -65,9 +65,10 @@ PYTHONPATH=. .venv/bin/python -m ml.models.evaluate_risk_adjusted_ranking \
   --input              artifacts/datasets/candidate_rows/<dataset_version> \
   --ranker-artifact    artifacts/models/xgboost_<version>.json \
   --large-loss-artifact artifacts/models/large_loss_classifier_<version>.json \
-  --stop-loss-artifact  artifacts/models/stop_loss_classifier_<version>.json \
   --json-output        artifacts/models/risk_adjusted_<version>_eval.json
 ```
+
+Note: `--stop-loss-artifact` is not a recognised argument for `evaluate_risk_adjusted_ranking`; omit it.
 
 Step 2 defaults to hard-filter mode: classifiers with `p > 0.70` veto a trade outright;
 no soft penalty is applied. Portfolio controls are available via `--portfolio-risk-controls`
@@ -98,11 +99,50 @@ even when training on `return_on_risk`.
 
 ### Golden dataset
 
-Current golden dataset: `candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_20wide_enriched`  
-Located at: `artifacts/datasets/candidate_rows/dataset_version=<name>`  
+Base dataset: `candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_20wide_enriched`  
 1.44M rows, 39 ETF underlyings, features_v005, labels_v002.
 
-## Current model artifacts (V006)
+Champion training dataset (balanced): `candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k`  
+500K rows, derived from base via sqrt-frequency hierarchical sampling (max 12% per underlying).  
+Located at: `artifacts/datasets/candidate_rows/dataset_version=<name>`
+
+## Current model artifacts (V006c — champion)
+
+V006c ranker is the registered champion in `artifacts/model_registry.json` and is loaded by the
+live agent automatically. Trained via 2-pass Optuna optimisation (100 HP trials + 64 feature
+trials) on the balanced 500K dataset. Passes all 33 exit criteria (V006b passed 16/33).
+
+| Artifact | File | Notes |
+|----------|------|-------|
+| XGBoost ranker (champion) | `xgboost_v006c_500r_dp28.json` | PF 2.47 (+26%), RoR 0.167 (+10%), WR 78.6%; 38 features |
+| Large-loss classifier | `large_loss_classifier_v006b.json` | AUC 0.848, recall 98.2% |
+| Stop-loss classifier | `stop_loss_classifier_v006b.json` | AUC 0.804, recall 99.7% |
+
+V006c key HP changes vs V006b: `reg_lambda` 10→37.5 (heavy L2), `colsample_bytree` 0.85→0.42
+(aggressive column dropout), `eta` 0.05→0.020, `downside_penalty` 2.5→2.83, `huber_delta` 1.0→2.20.
+
+V006c drops 23 features (5 groups) vs V006b: `underlying_price` (directional returns add bias),
+`market_regime` (SPY-level features confound ETF-specific ranking), `vix_features` (macro fear
+index hurts individual option quality assessment), `vol_momentum` (redundant with absolute vol),
+`credit_efficiency` (credit_to_width already captures this).
+
+Canonical retrain command (V006c):
+```
+PYTHONPATH=. .venv/bin/python -m ml.models.train_xgboost \
+  --input  artifacts/datasets/candidate_rows/candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k \
+  --output artifacts/models/xgboost_v006c_500r_dp28.json \
+  --target return_on_risk --target-scale 0.10 --target-clip 5.0 \
+  --num-boost-round 500 --val-fraction 0.0 --early-stopping-rounds 0 --embargo-days 30 \
+  --eta 0.02033541341546644 --max-depth 3 --min-child-weight 5.467924645206163 \
+  --subsample 0.6688247220130267 --colsample-bytree 0.41677825864481716 \
+  --reg-lambda 37.4687664351599 --reg-alpha 0.1564206251204104 \
+  --downside-penalty 2.829276302091746 --huber-delta 2.2027261783930134 \
+  --exclude-features underlying_close,underlying_return_1d,underlying_return_3d,underlying_return_5d,underlying_return_20d,underlying_range_pct,underlying_sma_20_distance_pct,underlying_above_sma_20,underlying_volume,underlying_volatility_ratio_5d_20d,underlying_vol_vs_market,vol_acceleration,market_return_5d,market_return_20d,market_realized_vol_5d,market_realized_vol_20d,market_sma_20_distance_pct,market_above_sma_20,market_volatility_ratio_5d_20d,vix_regime,vix_return_5d,vix_realized_vol_5d,credit_per_day_per_risk
+```
+
+Rollback: `xgboost_v006b_500r_dp25.json` (PF 1.96, passes 16/33 exit criteria).
+
+Previous artifacts (V006, trained on full 1.44M enriched dataset — kept as reference):
 
 | Artifact | File |
 |----------|------|

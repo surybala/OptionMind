@@ -140,7 +140,12 @@ class LivePaperInferenceProvider:
         self.now_fn = now_fn or (lambda: datetime.now(UTC))
         self.registry_entry: ModelRegistryEntry | None = None
         self.model: _ChampionModel | None = None
+        self.large_loss_model: _ChampionModel | None = None
+        self.large_loss_veto_threshold: float = float(
+            self.scanner_config.get("large_loss_veto_threshold", 0.70)
+        )
         self._load_champion()
+        self._load_large_loss_classifier()
 
     def get_top_picks(self, ticker_list: list[str], n: int = 10) -> list[dict]:
         if self.model is None:
@@ -226,6 +231,21 @@ class LivePaperInferenceProvider:
             artifact = dict(artifact)
             artifact["model_path"] = entry.artifact_manifest.model_path
         self.model = _ChampionModel(artifact)
+
+    def _load_large_loss_classifier(self) -> None:
+        path = self.scanner_config.get("large_loss_classifier_path")
+        if not path:
+            return
+        try:
+            artifact = json.loads(Path(path).read_text(encoding="utf-8"))
+            self.large_loss_model = _ChampionModel(artifact)
+            _log.info(
+                "[scanner] Large-loss classifier loaded: %s (veto threshold=%.2f)",
+                path,
+                self.large_loss_veto_threshold,
+            )
+        except Exception as exc:
+            _log.warning("[scanner] Failed to load large-loss classifier %s: %s", path, exc)
 
     def _load_data_provider(self) -> Any:
         provider_path = self.scanner_config.get("data_provider")
@@ -348,6 +368,14 @@ class LivePaperInferenceProvider:
                 max_loss = max(0.01, actual_width - credit)
                 dte = int(short.row.get("dte") or max(1, (short.contract.expiration - timestamp.date()).days))
                 roi = credit / max_loss
+                large_loss_prob: float | None = None
+                if self.large_loss_model is not None:
+                    clf_row = _classifier_feature_row(
+                        short.row, long, option_type, credit, actual_width
+                    )
+                    large_loss_prob = float(self.large_loss_model.score_rows([clf_row])[0])
+                    if large_loss_prob > self.large_loss_veto_threshold:
+                        continue
                 pick = {
                     "strategy": strategy,
                     "symbol": underlying,
@@ -377,6 +405,7 @@ class LivePaperInferenceProvider:
                         self.registry_entry.artifact_manifest.artifact_path if self.registry_entry else self.scanner_config.get("artifact_path")
                     ),
                     "model_id": self.registry_entry.model_id if self.registry_entry else None,
+                    "large_loss_prob": round(large_loss_prob, 4) if large_loss_prob is not None else None,
                     "features_hash": _features_hash(short.row, self.model.feature_columns if self.model else []),
                     "features": _feature_subset(short.row, self.model.feature_columns if self.model else []),
                     "score_components": {
@@ -670,6 +699,34 @@ def _unique(values: list[str]) -> list[str]:
             seen.add(normalized)
             out.append(normalized)
     return out
+
+
+def _classifier_feature_row(
+    short_row: dict[str, Any],
+    long: "_ScoredOption",
+    option_type: str,
+    credit: float,
+    width: float,
+) -> dict[str, Any]:
+    """Build a feature row for the large-loss classifier from spread components.
+
+    Combines the short-leg feature dict with spread-level fields that are only
+    known after pair construction. Units match the training dataset:
+    max_loss / max_profit are in dollars per contract (× 100).
+    """
+    row = dict(short_row)
+    row["is_pcs"] = 1.0 if option_type == "put" else 0.0
+    row["is_ccs"] = 1.0 if option_type == "call" else 0.0
+    row["spread_width"] = width
+    row["entry_credit"] = credit
+    row["max_profit"] = round(credit * 100.0, 4)
+    row["max_loss"] = round(max(0.01, width - credit) * 100.0, 4)
+    row["credit_to_width"] = round(credit / width, 8) if width > 0 else 0.0
+    row["long_option_entry_price"] = long.option_price
+    row["long_option_entry_volume"] = long.row.get("option_entry_volume")
+    row["long_option_entry_trade_count"] = long.row.get("option_entry_trade_count")
+    row["long_option_entry_vwap"] = long.ask or long.option_price
+    return row
 
 
 def _feature_subset(row: dict[str, Any], feature_columns: list[str]) -> dict[str, Any]:

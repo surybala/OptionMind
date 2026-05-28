@@ -120,6 +120,15 @@ def parse_args() -> argparse.Namespace:
             "Interim measure until 2022-2023 high-vol data is added to the corpus."
         ),
     )
+    parser.add_argument(
+        "--exclude-features",
+        default="",
+        help=(
+            "Comma-separated feature names to drop before training. "
+            "Used by the feature-selection optimizer to mask feature groups. "
+            "Example: --exclude-features vix_regime,vix_return_5d,option_gamma"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -128,6 +137,7 @@ def main() -> int:
     output = Path(args.output)
     model_output = Path(args.model_output) if args.model_output else output.with_name(f"{output.stem}.xgboost.json")
     df = load_dataset(Path(args.input))
+    exclude_features = {f.strip() for f in args.exclude_features.split(",") if f.strip()}
     artifact = train_xgboost(
         df,
         model_output=model_output,
@@ -143,6 +153,7 @@ def main() -> int:
         num_boost_round=args.num_boost_round,
         max_rows_per_underlying=args.max_rows_per_underlying,
         high_vol_oversample_factor=args.high_vol_oversample_factor,
+        exclude_features=exclude_features,
         loss_config=AsymmetricLossConfig(
             downside_scale=args.downside_scale,
             error_scale=args.error_scale,
@@ -179,6 +190,7 @@ def train_xgboost(
     loss_config: AsymmetricLossConfig | None = None,
     max_rows_per_underlying: int | None = None,
     high_vol_oversample_factor: int = 1,
+    exclude_features: set[str] | None = None,
 ) -> XGBoostModelArtifact:
     if xgb is None:
         raise ImportError("xgboost is required and must be loadable. Install xgboost and its native runtime dependencies.")
@@ -200,6 +212,8 @@ def train_xgboost(
 
     clean = _engineer_features(clean)
     feature_columns = _select_feature_columns(clean)
+    if exclude_features:
+        feature_columns = [f for f in feature_columns if f not in exclude_features]
     if not feature_columns:
         raise ValueError("No usable numeric feature columns found")
 
