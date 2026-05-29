@@ -466,7 +466,7 @@ class HistoricalCandidateDatasetBuilder:
                 future_path = [
                     bar
                     for bar in path
-                    if entry_bar.timestamp <= bar.timestamp
+                    if entry_bar.timestamp < bar.timestamp
                     <= entry_bar.timestamp + timedelta(days=config.forward_days)
                 ]
                 if len(future_path) < config.min_forward_bars:
@@ -601,13 +601,13 @@ class HistoricalCandidateDatasetBuilder:
                 future_short_path = [
                     bar
                     for bar in short_path
-                    if short_entry_bar.timestamp <= bar.timestamp
+                    if short_entry_bar.timestamp < bar.timestamp
                     <= short_entry_bar.timestamp + timedelta(days=config.forward_days)
                 ]
                 future_long_path = [
                     bar
                     for bar in long_path
-                    if short_entry_bar.timestamp <= bar.timestamp
+                    if short_entry_bar.timestamp < bar.timestamp
                     <= short_entry_bar.timestamp + timedelta(days=config.forward_days)
                 ]
                 if min(len(future_short_path), len(future_long_path)) < config.min_forward_bars:

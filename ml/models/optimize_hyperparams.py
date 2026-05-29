@@ -93,6 +93,7 @@ def _objective(
     reg_alpha = trial.suggest_float("reg_alpha", 0.0, 5.0)
     downside_penalty = trial.suggest_float("downside_penalty", 1.5, 5.0)
     huber_delta = trial.suggest_float("huber_delta", 0.3, 3.0)
+    downside_scale = trial.suggest_float("downside_scale", 0.5, 10.0, log=True)
 
     trial_dir = storage_dir / "trials"
     trial_dir.mkdir(parents=True, exist_ok=True)
@@ -123,6 +124,8 @@ def _objective(
         "--reg-alpha", str(reg_alpha),
         "--downside-penalty", str(downside_penalty),
         "--huber-delta", str(huber_delta),
+        "--downside-scale", str(downside_scale),
+        "--error-scale", str(downside_scale),
     ]
 
     t0 = time.time()
@@ -146,9 +149,12 @@ def _objective(
     artifact_path.unlink(missing_ok=True)
     model_path.unlink(missing_ok=True)
 
-    if r.returncode != 0:
+    # Exit code 2 = gates evaluated but model didn't pass — JSON is still valid and
+    # must be scored so TPE can distinguish good-but-failing from bad-but-failing.
+    # Any other non-zero code is a real crash; return -inf in that case.
+    if r.returncode not in (0, 2):
         stderr = r.stderr.decode()[-1000:]
-        print(f"\n[trial {trial.number}] EVAL FAILED:\n{stderr}")
+        print(f"\n[trial {trial.number}] EVAL FAILED (exit {r.returncode}):\n{stderr}")
         return float("-inf")
 
     with open(eval_path) as f:
@@ -217,7 +223,7 @@ def _print_summary(study: optuna.Study) -> None:
     defaults = dict(
         eta=0.05, max_depth=3, min_child_weight=5.0, subsample=0.85,
         colsample_bytree=0.85, reg_lambda=10.0, reg_alpha=0.0,
-        downside_penalty=2.5, huber_delta=1.0,
+        downside_penalty=2.5, huber_delta=1.0, downside_scale=1000.0,
     )
     for k, v in params.items():
         arrow = "  <-- changed" if abs(v - defaults.get(k, v)) > 1e-9 else ""
@@ -255,6 +261,7 @@ def main() -> None:
             "reg_alpha": 0.0,
             "downside_penalty": 2.5,
             "huber_delta": 1.0,
+            "downside_scale": 1000.0,
         })
     else:
         print(f"Resuming study with {len(completed)} completed trial(s) already in storage.")

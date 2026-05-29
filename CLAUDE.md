@@ -106,15 +106,15 @@ Champion training dataset (balanced): `candidate_rows_massive_broad_etfs_pcs_ccs
 500K rows, derived from base via sqrt-frequency hierarchical sampling (max 12% per underlying).  
 Located at: `artifacts/datasets/candidate_rows/dataset_version=<name>`
 
-## Current model artifacts (V006c ranker + V006d classifier — champions)
+## Current model artifacts (V006c ranker + V006e classifier — champions)
 
-V006c ranker and V006d large-loss classifier are registered champions in `artifacts/model_registry.json`
+V006c ranker and V006e large-loss classifier are registered champions in `artifacts/model_registry.json`
 and are loaded by the live agent automatically.
 
 | Artifact | File | Notes |
 |----------|------|-------|
 | XGBoost ranker (champion) | `xgboost_v006c_500r_dp28.json` | PF 2.47 (+26%), RoR 0.167 (+10%), WR 78.6%; 39 features |
-| Large-loss classifier (champion) | `large_loss_classifier_v006d.json` | WF AUC 0.8502, recall 98.8% (best), FN 190 (best); 61 features |
+| Large-loss classifier (champion) | `large_loss_classifier_v006e.json` | WF AUC 0.8502, WF recall 98.85%, holdout recall 98.8% (best), FN 190 (best); 61 features |
 | Stop-loss classifier | `stop_loss_classifier_v006b.json` | AUC 0.804, recall 99.7% (not yet re-optimised) |
 
 ### V006c ranker details
@@ -128,7 +128,14 @@ Drops 23 features (5 groups): `underlying_price` (directional bias), `market_reg
 ETF ranking), `vix_features` (macro fear hurts option quality assessment), `vol_momentum` (redundant),
 `credit_efficiency` (credit_to_width already captures this).
 
-Canonical retrain command (V006c ranker):
+**NOTE on loss design**: `downside_scale=1000.0` (effectively symmetric Huber) is the correct default for
+the ranker. Symmetric loss gives the cleanest RoR ranking signal; downside protection is the LLC's job.
+Optuna HP search (ror_v007, 101 trials) independently confirmed this — TPE converged to scale=4–10
+(near-symmetric) even when given freedom to search from 0.5. V006d ranker (scale=0.10, 7.8× asymmetric
+gradient) was rejected: mean PnL $11 vs $66, RoR 0.013 vs 0.167. Do not reduce `downside_scale` below
+the default 1000.0 for the ranker.
+
+Canonical retrain command (V006c ranker — `--downside-scale` and `--error-scale` omitted since 1000.0 is now the default):
 ```
 PYTHONPATH=. .venv/bin/python -m ml.models.train_xgboost \
   --input  artifacts/datasets/candidate_rows/candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k \
@@ -144,25 +151,32 @@ PYTHONPATH=. .venv/bin/python -m ml.models.train_xgboost \
 
 Rollback (ranker): `xgboost_v006b_500r_dp25.json` (PF 1.96, passes 16/33 exit criteria).
 
-### V006d large-loss classifier details
+### V006e large-loss classifier details
+
+Same trained model as V006d (identical `model_sha256 = 21e40d9a...`). Only difference: the WF
+evaluation now uses the optimized `scale_pos_weight=12.19` in every fold instead of a per-fold
+recomputed natural ratio (~7.0). This makes WF metrics production-accurate.
 
 Trained via full 2-pass Optuna (75 HP trials + 11 feature trials). **Key lever: `reg_alpha=3.86`**
 (L1 regularisation — V006b had 0.0). L1 eliminates spurious correlations internally, making manual
 feature group exclusion unnecessary — all 11 toggleable groups included.
 
-| Metric | V006b | V006c | V006d |
-|--------|-------|-------|-------|
-| WF AUC | 0.8482 | 0.8519 | **0.8502** |
-| Recall | 98.2% | 97.6% | **98.8%** |
-| FN | 280 | 371 | **190** |
-| mean_prob_positive | 0.695 | 0.702 | **0.755** |
-| Features | 60 | 33 | 61 |
+| Metric | V006b | V006c | V006d | V006e |
+|--------|-------|-------|-------|-------|
+| WF AUC | 0.8482 | 0.8519 | 0.8502* | **0.8502** |
+| WF Recall | 98.0% | 97.8% | 98.00%* | **98.85%** |
+| Holdout Recall | 98.2% | 97.6% | **98.8%** | **98.8%** |
+| FN | 280 | 371 | **190** | **190** |
+| mean_prob_positive | 0.695 | 0.702 | **0.755** | **0.755** |
+| Features | 60 | 33 | 61 | 61 |
 
-Canonical retrain command (V006d large-loss classifier):
+*V006d WF metrics were computed with SPW≈7.0 per fold (bug), not the deployed 12.19. V006e fixes this.
+
+Canonical retrain command (V006e large-loss classifier):
 ```
 PYTHONPATH=. .venv/bin/python -m ml.models.train_large_loss_classifier \
   --input  artifacts/datasets/candidate_rows/candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k \
-  --output artifacts/models/large_loss_classifier_v006d.json \
+  --output artifacts/models/large_loss_classifier_v006e.json \
   --target large_loss_label --embargo-days 30 \
   --num-boost-round 500 \
   --eta 0.045008498955439846 \
@@ -175,7 +189,7 @@ PYTHONPATH=. .venv/bin/python -m ml.models.train_large_loss_classifier \
   --scale-pos-weight 12.18600024160314
 ```
 
-Rollback (classifier): `large_loss_classifier_v006c.json` (WF AUC 0.8519, recall 97.6%, 33 features).
+Rollback (classifier): `large_loss_classifier_v006d.json` (same model, WF recall 98.00% with SPW bug).
 
 Previous artifacts (V006, trained on full 1.44M enriched dataset — kept as reference):
 

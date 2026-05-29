@@ -89,8 +89,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-child-weight", type=float, default=5.0)
     parser.add_argument("--reg-lambda", type=float, default=10.0)
     parser.add_argument("--reg-alpha", type=float, default=0.0)
-    parser.add_argument("--downside-scale", type=float, default=1000.0)
-    parser.add_argument("--error-scale", type=float, default=1000.0)
+    parser.add_argument("--downside-scale", type=float, default=1000.0,
+                        help="Scaling denominator for the downside gradient weight. "
+                             "1000.0 (default) gives effectively symmetric Huber loss — "
+                             "the correct setting for a ranker protected by the LLC. "
+                             "Smaller values add asymmetric downside penalty (not needed).")
+    parser.add_argument("--error-scale", type=float, default=1000.0,
+                        help="Scaling denominator for the over-prediction gradient weight.")
     parser.add_argument("--downside-penalty", type=float, default=1.5)
     parser.add_argument("--overprediction-penalty", type=float, default=1.0)
     parser.add_argument("--max-multiplier", type=float, default=30.0)

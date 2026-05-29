@@ -104,7 +104,7 @@ CHAMPION_GROUPS = {g: True for g in TOGGLEABLE}
 DEFAULT_HP = dict(
     eta=0.05, max_depth=3, min_child_weight=5.0, subsample=0.85,
     colsample_bytree=0.85, reg_lambda=10.0, reg_alpha=0.0,
-    downside_penalty=2.5, huber_delta=1.0,
+    downside_penalty=2.5, huber_delta=1.0, downside_scale=1000.0,
 )
 
 
@@ -133,6 +133,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--reg-alpha", type=float, default=None)
     p.add_argument("--downside-penalty", type=float, default=None)
     p.add_argument("--huber-delta", type=float, default=None)
+    p.add_argument("--downside-scale", type=float, default=None)
     return p.parse_args()
 
 
@@ -156,6 +157,7 @@ def _load_hp(args: argparse.Namespace) -> dict:
         subsample=args.subsample, colsample_bytree=args.colsample_bytree,
         reg_lambda=args.reg_lambda, reg_alpha=args.reg_alpha,
         downside_penalty=args.downside_penalty, huber_delta=args.huber_delta,
+        downside_scale=args.downside_scale,
     )
     for k, v in overrides.items():
         if v is not None:
@@ -240,6 +242,8 @@ def _objective(
         "--reg-alpha", str(hp["reg_alpha"]),
         "--downside-penalty", str(hp["downside_penalty"]),
         "--huber-delta", str(hp["huber_delta"]),
+        "--downside-scale", str(hp["downside_scale"]),
+        "--error-scale", str(hp["downside_scale"]),
     ]
     if excluded:
         cmd_train += ["--exclude-features", ",".join(excluded)]
@@ -262,8 +266,11 @@ def _objective(
     artifact_path.unlink(missing_ok=True)
     model_path.unlink(missing_ok=True)
 
-    if r.returncode != 0:
-        print(f"\n[feat trial {trial.number}] EVAL FAILED:\n{r.stderr.decode()[-800:]}")
+    # Exit code 2 = gates evaluated but model didn't pass — JSON is still valid and
+    # must be scored so TPE can distinguish good-but-failing from bad-but-failing.
+    # Any other non-zero code is a real crash; return -inf in that case.
+    if r.returncode not in (0, 2):
+        print(f"\n[feat trial {trial.number}] EVAL FAILED (exit {r.returncode}):\n{r.stderr.decode()[-800:]}")
         return float("-inf")
 
     with open(eval_path) as f:

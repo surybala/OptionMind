@@ -655,7 +655,9 @@ def _profit_factor(values: np.ndarray) -> float | None:
     gains = float(np.sum(values[values > 0]))
     losses = float(np.sum(values[values < 0]))
     if losses == 0.0:
-        return None
+        # All-win set: return inf so _gte gates pass correctly; return None only
+        # when there are neither wins nor losses (empty or all-zero slice).
+        return float("inf") if gains > 0.0 else None
     return round(gains / abs(losses), 6)
 
 

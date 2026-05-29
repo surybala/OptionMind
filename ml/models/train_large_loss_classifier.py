@@ -391,15 +391,11 @@ def _walk_forward_clf(
         test_df = df.iloc[test_start:test_end]
         fold_fill = _compute_fill_values(train_df, feature_columns)
 
-        # Recompute scale_pos_weight per fold from fold training labels.
+        # Use the optimized scale_pos_weight from params unchanged so walk-forward
+        # metrics reflect the same model configuration that will be deployed.
         y_fold_train = y_all[train_start:train_end]
-        neg_f = float(np.sum(y_fold_train == 0))
-        pos_f = float(np.sum(y_fold_train == 1))
-        fold_spw = neg_f / pos_f if pos_f > 0 else 1.0
-        fold_params = {**params, "scale_pos_weight": round(fold_spw, 4)}
-
         dtrain = _build_dmatrix(train_df, feature_columns, fold_fill, y_fold_train)
-        booster = xgb.train(fold_params, dtrain, num_boost_round=num_boost_round, verbose_eval=False)
+        booster = xgb.train(params, dtrain, num_boost_round=num_boost_round, verbose_eval=False)
 
         x_test_frame = _transform_frame(test_df, feature_columns, fold_fill)
         prob = _predict_prob(booster, x_test_frame)
