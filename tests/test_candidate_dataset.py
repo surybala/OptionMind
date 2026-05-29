@@ -67,6 +67,7 @@ class FakeProvider:
                 PriceBar(symbol, self.entry + timedelta(days=3),  1.20, 1.30, 1.10, 1.20, volume=70,  trade_count=7,  vwap=1.22),
                 PriceBar(symbol, self.entry + timedelta(days=4),  0.90, 1.00, 0.85, 0.90, volume=60,  trade_count=6,  vwap=0.92),
                 PriceBar(symbol, self.entry + timedelta(days=5),  0.70, 0.80, 0.65, 0.70, volume=50,  trade_count=5,  vwap=0.72),
+                PriceBar(symbol, self.entry + timedelta(days=6),  0.60, 0.70, 0.55, 0.60, volume=40,  trade_count=4,  vwap=0.62),
             ]
         return data
 
@@ -85,6 +86,7 @@ class StopLossProvider(FakeProvider):
                 PriceBar(symbol, self.entry + timedelta(days=2),  1.00, 1.10, 0.90, 1.00, volume=80,  trade_count=8,  vwap=1.02),
                 PriceBar(symbol, self.entry + timedelta(days=3),  1.00, 1.10, 0.90, 1.00, volume=70,  trade_count=7,  vwap=1.02),
                 PriceBar(symbol, self.entry + timedelta(days=4),  1.00, 1.10, 0.90, 1.00, volume=60,  trade_count=6,  vwap=1.02),
+                PriceBar(symbol, self.entry + timedelta(days=5),  1.00, 1.10, 0.90, 1.00, volume=50,  trade_count=5,  vwap=1.02),
             ]
             for symbol in symbols
         }

@@ -40,3 +40,7 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Stale venv references
+path/
+include/

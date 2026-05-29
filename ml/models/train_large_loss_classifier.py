@@ -42,6 +42,7 @@ from ml.models.train_baseline import (
     _artifact_metadata,
     _embargo_rows_from_days,
     _engineer_features,
+    _feature_importance,
     _select_feature_columns,
     _split_index,
     _walk_forward_splits,
@@ -445,14 +446,6 @@ def _auc_rank(y_true: np.ndarray, y_prob: np.ndarray) -> float | None:
     rank_sum_pos = float(np.sum(ranks[pos]))
     auc = (rank_sum_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
     return float(auc)
-
-
-def _feature_importance(booster) -> dict[str, float]:
-    scores = booster.get_score(importance_type="gain")
-    return {
-        key: round(float(val), 6)
-        for key, val in sorted(scores.items(), key=lambda x: (-x[1], x[0]))
-    }
 
 
 if __name__ == "__main__":

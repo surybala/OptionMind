@@ -264,8 +264,9 @@ class TestSendTradeExecuted(unittest.TestCase):
         self.assertIn('Trade Executed', body)
         self.assertIn('AAPL', body)
 
+    @patch('src.notifier.time.sleep')
     @patch('src.notifier.smtplib.SMTP')
-    def test_smtp_failure_does_not_raise(self, mock_smtp_cls):
+    def test_smtp_failure_does_not_raise(self, mock_smtp_cls, _mock_sleep):
         mock_smtp_cls.side_effect = ConnectionRefusedError("refused")
         n = _make_notifier()
         # Should not raise
@@ -345,8 +346,9 @@ class TestSendTradePlan(unittest.TestCase):
         raw_msg = mock_smtp.sendmail.call_args[0][2]
         self.assertIn(f'[token:{token}]', raw_msg)
 
+    @patch('src.notifier.time.sleep')
     @patch('src.notifier.smtplib.SMTP')
-    def test_smtp_failure_returns_none(self, mock_smtp_cls):
+    def test_smtp_failure_returns_none(self, mock_smtp_cls, _mock_sleep):
         mock_smtp_cls.side_effect = OSError("network error")
         n = _make_notifier()
         self.assertIsNone(n.send_trade_plan([_PICK]))
@@ -858,8 +860,9 @@ class TestSendDailyRiskReport(unittest.TestCase):
         self.assertIn('TSLA', body)
         self.assertIn('SPY', body)
 
+    @patch('src.notifier.time.sleep')
     @patch('src.notifier.smtplib.SMTP')
-    def test_smtp_failure_returns_false(self, mock_smtp_cls):
+    def test_smtp_failure_returns_false(self, mock_smtp_cls, _mock_sleep):
         mock_smtp_cls.side_effect = OSError('connection refused')
         n = _make_notifier()
         result = n.send_daily_risk_report(_SNAPSHOT)
@@ -1932,8 +1935,9 @@ class TestSendWeeklyDigest(unittest.TestCase):
         self.assertIn('NVDA', body)
         self.assertIn('AMZN', body)
 
+    @patch('src.notifier.time.sleep')
     @patch('src.notifier.smtplib.SMTP')
-    def test_smtp_failure_returns_false(self, mock_smtp_cls):
+    def test_smtp_failure_returns_false(self, mock_smtp_cls, _mock_sleep):
         mock_smtp_cls.side_effect = OSError('connection refused')
         n = _make_notifier()
         result = n.send_weekly_digest(

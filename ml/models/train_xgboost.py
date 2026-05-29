@@ -18,6 +18,7 @@ from ml.models.train_baseline import (
     _empty_test_metrics,
     _engineer_features,
     _evaluation_metrics,
+    _feature_importance,
     _max_drawdown,
     _prefixed_metrics,
     _profit_factor,
@@ -491,14 +492,6 @@ def _walk_forward_validation(
             }
         )
     return folds
-
-
-def _feature_importance(booster) -> dict[str, float]:
-    scores = booster.get_score(importance_type="gain")
-    return {
-        key: round(float(value), 6)
-        for key, value in sorted(scores.items(), key=lambda item: (-item[1], item[0]))
-    }
 
 
 def _credit_spread_selection_metrics(df: pd.DataFrame, y_pred: np.ndarray) -> dict[str, float | None]:

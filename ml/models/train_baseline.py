@@ -688,5 +688,13 @@ def _row_timestamp(df: pd.DataFrame, index: int) -> str | None:
     return timestamp.isoformat()
 
 
+def _feature_importance(booster) -> dict[str, float]:
+    scores = booster.get_score(importance_type="gain")
+    return {
+        key: round(float(val), 6)
+        for key, val in sorted(scores.items(), key=lambda x: (-x[1], x[0]))
+    }
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

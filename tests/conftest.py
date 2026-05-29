@@ -17,7 +17,29 @@ from unittest.mock import MagicMock
 
 import numpy   # noqa: F401  — registers real numpy in sys.modules
 import pandas  # noqa: F401  — registers real pandas in sys.modules
+import pytest
 
 # Provide a stub for yfinance so the src imports below do not attempt
 # any live HTTP calls.
 sys.modules.setdefault('yfinance', MagicMock())
+
+
+# dashboard.py calls load_dotenv() at module import time.  When pytest
+# collects test_dashboard.py during its collection phase, real credentials
+# from .env leak into os.environ and break "missing credential → None" tests
+# in test_alpaca_data.py and test_executor.py.  Clear them before every test.
+_CREDENTIAL_ENV_VARS = (
+    'ALPACA_API_KEY',
+    'ALPACA_API_SECRET',
+    'ALPACA_PAPER',
+    'MASSIVE_API_KEY',
+    'FMP_API_KEY',
+    'FRED_API_KEY',
+    'OPTIONWHEEL_EMAIL_PASSWORD',
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_credential_env_vars(monkeypatch):
+    for key in _CREDENTIAL_ENV_VARS:
+        monkeypatch.delenv(key, raising=False)

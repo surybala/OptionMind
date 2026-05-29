@@ -123,7 +123,7 @@ def label_credit_spread_path(
         min_debit = min(min_debit, debit)
         exit_timestamp = timestamp
         exit_debit = debit
-        if debit > stop_debit:
+        if debit >= stop_debit:
             exit_reason = "stop_loss"
             break
         if debit <= profit_take_debit:
