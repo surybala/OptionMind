@@ -4,10 +4,11 @@ src.notify
 
 Email notification sub-package.
 
-``sender.py``    — :class:`EmailNotifier` (SMTP + IMAP)
 ``formatter.py`` — all rendering / formatting helpers
+
+The :class:`EmailNotifier` class lives in ``src/notifier.py`` (the
+top-level module); it imports rendering helpers from ``formatter.py``.
 """
-from .sender import EmailNotifier
 from .formatter import (
     _build_mime,
     _extract_plain_body,
@@ -29,7 +30,6 @@ from .formatter import (
 )
 
 __all__ = [
-    'EmailNotifier',
     '_build_mime',
     '_extract_plain_body',
     '_extract_token_from_msgid',

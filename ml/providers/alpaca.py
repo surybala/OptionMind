@@ -2,16 +2,13 @@
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from types import SimpleNamespace
 from typing import Any
 
 from ml.providers.models import Greeks, OptionChainSnapshot, OptionContract, OptionTrade, PriceBar
-
-
-_OSI_RE = re.compile(r"^([A-Z./]+)(\d{6})([CP])(\d{8})$")
+from src.osi import parse_osi
 
 
 @dataclass
@@ -220,15 +217,15 @@ def _normalize_trades(result: Any, source: str) -> dict[str, list[OptionTrade]]:
 
 def _normalize_contract(contract: Any, source: str) -> OptionContract:
     symbol = str(getattr(contract, "symbol", ""))
-    parsed = _parse_osi(symbol)
+    parsed = parse_osi(symbol)
     underlying = (
         getattr(contract, "underlying_symbol", None)
         or getattr(contract, "underlying", None)
-        or (parsed["underlying"] if parsed else "")
+        or (parsed.underlying if parsed else "")
     )
-    expiration = getattr(contract, "expiration_date", None) or (parsed["expiration"] if parsed else None)
-    strike = getattr(contract, "strike_price", None) or (parsed["strike"] if parsed else None)
-    option_type = getattr(contract, "type", None) or (parsed["option_type"] if parsed else None)
+    expiration = getattr(contract, "expiration_date", None) or (parsed.expiration if parsed else None)
+    strike = getattr(contract, "strike_price", None) or (parsed.strike if parsed else None)
+    option_type = getattr(contract, "type", None) or (parsed.option_type if parsed else None)
     status = getattr(contract, "status", "unknown")
 
     return OptionContract(
@@ -327,18 +324,6 @@ def _contracts_from_response(response: Any) -> list[Any]:
     return []
 
 
-def _parse_osi(symbol: str) -> dict[str, Any] | None:
-    match = _OSI_RE.match(symbol)
-    if not match:
-        return None
-    yy, mm, dd = int(match.group(2)[:2]), int(match.group(2)[2:4]), int(match.group(2)[4:6])
-    year = 2000 + yy if yy < 70 else 1900 + yy
-    return {
-        "underlying": match.group(1),
-        "expiration": date(year, mm, dd),
-        "option_type": "call" if match.group(3) == "C" else "put",
-        "strike": int(match.group(4)) / 1000.0,
-    }
 
 
 def _float_or_none(value: Any) -> float | None:

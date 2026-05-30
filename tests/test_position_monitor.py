@@ -86,13 +86,13 @@ class TestBuildOsiSymbol(unittest.TestCase):
         self.assertEqual(result, 'TSLA250117C00500000')
 
     def test_round_trip_parse(self):
-        """OSI we build should parse back to original values via _parse_osi."""
-        from src.alpaca_data import _parse_osi
+        """OSI we build should parse back to original values via parse_osi."""
+        from src.osi import parse_osi
         osi = PositionMonitor._build_osi_symbol('MSFT', '2025-06-20', 350.0, 'put')
-        opt_type, strike, expiry = _parse_osi(osi)
-        self.assertEqual(opt_type, 'put')
-        self.assertAlmostEqual(strike, 350.0)
-        self.assertEqual(expiry, '2025-06-20')
+        parsed = parse_osi(osi)
+        self.assertEqual(parsed.option_type, 'put')
+        self.assertAlmostEqual(parsed.strike, 350.0)
+        self.assertEqual(parsed.expiration.isoformat(), '2025-06-20')
 
 
 # ══════════════════════════════════════════════════════════════════════════════

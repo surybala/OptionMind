@@ -29,10 +29,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from src.alpaca_data import (
     AlpacaDataClient,
     OptionChain,
-    _parse_osi,
     _snapshot_to_row,
     make_alpaca_data_client,
 )
+from src.osi import parse_osi as _parse_osi
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -83,44 +83,44 @@ class TestParseOsi(unittest.TestCase):
     def test_valid_call_symbol(self):
         result = _parse_osi('AAPL240119C00200000')
         self.assertIsNotNone(result)
-        opt_type, strike, expiry = result
-        self.assertEqual(opt_type, 'call')
-        self.assertAlmostEqual(strike, 200.0)
-        self.assertEqual(expiry, '2024-01-19')
+        self.assertEqual(result.option_type, 'call')
+        self.assertAlmostEqual(result.strike, 200.0)
+        self.assertEqual(result.expiration.isoformat(), '2024-01-19')
+        self.assertEqual(result.underlying, 'AAPL')
 
     def test_valid_put_symbol(self):
-        opt_type, strike, expiry = _parse_osi('SPY250117P00400000')
-        self.assertEqual(opt_type, 'put')
-        self.assertAlmostEqual(strike, 400.0)
-        self.assertEqual(expiry, '2025-01-17')
+        result = _parse_osi('SPY250117P00400000')
+        self.assertEqual(result.option_type, 'put')
+        self.assertAlmostEqual(result.strike, 400.0)
+        self.assertEqual(result.expiration.isoformat(), '2025-01-17')
 
     def test_fractional_strike(self):
         # 185500 / 1000 = 185.5
-        opt_type, strike, expiry = _parse_osi('AAPL240119C00185500')
-        self.assertEqual(opt_type, 'call')
-        self.assertAlmostEqual(strike, 185.5)
-        self.assertEqual(expiry, '2024-01-19')
+        result = _parse_osi('AAPL240119C00185500')
+        self.assertEqual(result.option_type, 'call')
+        self.assertAlmostEqual(result.strike, 185.5)
+        self.assertEqual(result.expiration.isoformat(), '2024-01-19')
 
     def test_multi_char_root(self):
-        opt_type, strike, expiry = _parse_osi('TSLA250117C00500000')
-        self.assertEqual(opt_type, 'call')
-        self.assertAlmostEqual(strike, 500.0)
-        self.assertEqual(expiry, '2025-01-17')
+        result = _parse_osi('TSLA250117C00500000')
+        self.assertEqual(result.option_type, 'call')
+        self.assertAlmostEqual(result.strike, 500.0)
+        self.assertEqual(result.expiration.isoformat(), '2025-01-17')
 
     def test_year_2000_epoch(self):
         # yy=00 → 2000
-        _, _, expiry = _parse_osi('AAPL000119C00100000')
-        self.assertEqual(expiry[:4], '2000')
+        result = _parse_osi('AAPL000119C00100000')
+        self.assertEqual(result.expiration.year, 2000)
 
     def test_year_2069_upper_boundary(self):
         # yy=69 → 2069 (not 1969)
-        _, _, expiry = _parse_osi('SPY690117C00100000')
-        self.assertEqual(expiry[:4], '2069')
+        result = _parse_osi('SPY690117C00100000')
+        self.assertEqual(result.expiration.year, 2069)
 
     def test_year_1970_lower_boundary(self):
         # yy=70 → 1970 (not 2070)
-        _, _, expiry = _parse_osi('SPY700117C00100000')
-        self.assertEqual(expiry[:4], '1970')
+        result = _parse_osi('SPY700117C00100000')
+        self.assertEqual(result.expiration.year, 1970)
 
     def test_invalid_symbol_returns_none(self):
         self.assertIsNone(_parse_osi('NOT_VALID'))
@@ -132,9 +132,9 @@ class TestParseOsi(unittest.TestCase):
 
     def test_zero_strike(self):
         # Strike 00000000 = 0.0; still a valid parse
-        opt_type, strike, _ = _parse_osi('AAPL240119C00000000')
-        self.assertEqual(opt_type, 'call')
-        self.assertAlmostEqual(strike, 0.0)
+        result = _parse_osi('AAPL240119C00000000')
+        self.assertEqual(result.option_type, 'call')
+        self.assertAlmostEqual(result.strike, 0.0)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

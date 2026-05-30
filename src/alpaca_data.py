@@ -46,6 +46,8 @@ from typing import Optional
 
 import pandas as pd
 
+from src.osi import parse_osi
+
 _log = logging.getLogger('optionwheel')
 
 # ── Public namedtuple mirrors yfinance's option_chain return value ─────────────
@@ -56,9 +58,6 @@ _CHAIN_COLS = [
     # Greeks sourced directly from Alpaca (None when snapshot has no greeks field)
     'delta', 'gamma', 'theta', 'vega', 'rho',
 ]
-
-# OSI option symbol: ROOT YYMMDD C|P STRIKE(8 digits, /1000 = dollars)
-_OSI_RE = re.compile(r'^([A-Z./]+)(\d{6})([CP])(\d{8})$')
 
 # Class-share symbols: our universe uses dash notation (LEN-B, BRK-B) sourced
 # from Wikipedia via universe_indices._clean().  Alpaca's stock data endpoints
@@ -73,37 +72,15 @@ def _to_alpaca_sym(s: str) -> str:
     return f"{m.group(1)}.{m.group(2)}" if m else s
 
 
-def _parse_osi(symbol: str) -> Optional[tuple[str, float, str]]:
-    """
-    Parse an OSI option symbol into (option_type, strike_dollars, expiry_iso).
-
-    Example: 'AAPL240119C00200000' -> ('call', 200.0, '2024-01-19')
-    Returns None if the symbol does not match the expected format.
-    """
-    m = _OSI_RE.match(symbol)
-    if not m:
-        return None
-    opt_type = 'call' if m.group(3) == 'C' else 'put'
-    strike   = int(m.group(4)) / 1000.0
-
-    # Parse YYMMDD expiry from the symbol
-    d = m.group(2)                              # e.g. '240119'
-    yy, mm, dd = int(d[0:2]), int(d[2:4]), int(d[4:6])
-    year = 2000 + yy if yy < 70 else 1900 + yy  # handles Y2.1K: valid through 2069
-    expiry_iso = f"{year:04d}-{mm:02d}-{dd:02d}"
-
-    return opt_type, strike, expiry_iso
-
-
 def _snapshot_to_row(symbol: str, snapshot) -> Optional[dict]:
     """
     Convert an alpaca-py OptionsSnapshot to a dict matching the
     yfinance option-chain DataFrame row format.
     """
-    parsed = _parse_osi(symbol)
+    parsed = parse_osi(symbol)
     if parsed is None:
         return None
-    opt_type, strike, _expiry = parsed
+    opt_type, strike = parsed.option_type, parsed.strike
 
     q = getattr(snapshot, 'latest_quote', None)
     bid  = float(getattr(q, 'bid_price', 0) or 0) if q else 0.0
@@ -417,10 +394,11 @@ class AlpacaDataClient:
 
         items = data.items() if hasattr(data, 'items') else chain.items()
         for opt_symbol, snapshot in items:
-            parsed = _parse_osi(opt_symbol)
+            parsed = parse_osi(opt_symbol)
             if parsed is None:
                 continue
-            opt_type, strike, expiry_iso = parsed
+            opt_type, strike = parsed.option_type, parsed.strike
+            expiry_iso = parsed.expiration.isoformat()
 
             q   = getattr(snapshot, 'latest_quote', None)
             bid = float(getattr(q, 'bid_price', 0) or 0) if q else 0.0

@@ -1,9 +1,7 @@
 """ML scanner hook for OptionMind.
 
-This is the only scanner entry point the app should use going forward.
-The inherited deterministic scanner lives in ``src/scanner.py`` as legacy
-reference code, but it should not be used as a fallback for live candidate
-generation.
+This is the sole scanner entry point: option chain snapshots are scored by
+the XGBoost ranker and filtered by the large-loss classifier.
 """
 from __future__ import annotations
 
@@ -32,6 +30,7 @@ from ml.datasets.candidate_dataset import (
 from ml.models.registry import ModelRegistryEntry, load_champion_artifact
 from ml.providers.calendar import fomc_events
 from ml.providers.models import DividendEvent, EarningsEvent, EconomicEvent, OptionChainSnapshot, OptionContract, PriceBar
+from src.osi import parse_osi
 from src.pick_selection import select_top_picks_with_scanner_controls
 
 _log = logging.getLogger("optionwheel")
@@ -584,34 +583,18 @@ def _live_feature_row(
 
 
 def _contract_from_snapshot(symbol: str, underlying: str, snapshot: OptionChainSnapshot) -> OptionContract:
-    parsed = _parse_osi(symbol)
+    parsed = parse_osi(symbol)
     raw = snapshot.raw or {}
     return OptionContract(
         symbol=symbol,
         underlying=underlying.upper(),
-        expiration=_date_or_none(raw.get("expiration_date") or raw.get("expiration") or (parsed or {}).get("expiration")),
-        strike=_float_or_none(raw.get("strike_price") or raw.get("strike") or (parsed or {}).get("strike")),
-        option_type=_option_type_or_none(raw.get("type") or raw.get("option_type") or (parsed or {}).get("option_type")),
+        expiration=_date_or_none(raw.get("expiration_date") or raw.get("expiration") or (parsed.expiration if parsed else None)),
+        strike=_float_or_none(raw.get("strike_price") or raw.get("strike") or (parsed.strike if parsed else None)),
+        option_type=_option_type_or_none(raw.get("type") or raw.get("option_type") or (parsed.option_type if parsed else None)),
         status=str(raw.get("status") or "active"),
         source=snapshot.source,
         raw=raw,
     )
-
-
-def _parse_osi(symbol: str) -> dict[str, Any] | None:
-    import re
-
-    match = re.match(r"^([A-Z./]+)(\d{6})([CP])(\d{8})$", symbol)
-    if not match:
-        return None
-    yy, mm, dd = int(match.group(2)[:2]), int(match.group(2)[2:4]), int(match.group(2)[4:6])
-    year = 2000 + yy if yy < 70 else 1900 + yy
-    return {
-        "underlying": match.group(1),
-        "expiration": date(year, mm, dd),
-        "option_type": "call" if match.group(3) == "C" else "put",
-        "strike": int(match.group(4)) / 1000.0,
-    }
 
 
 def _feature_option_price(snapshot: OptionChainSnapshot) -> float | None:
