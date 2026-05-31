@@ -30,8 +30,6 @@ import json
 import logging
 from typing import Optional
 
-import yfinance as yf
-
 from src.greeks import position_risk_score
 
 _log = logging.getLogger('optionwheel')
@@ -275,14 +273,11 @@ class PositionMonitor:
 
         try:
             exp_date = datetime.date.fromisoformat(expiry)
-            # Fetch a window ending on expiry; include a few days prior to
-            # handle weekends and market holidays.
             start = (exp_date - datetime.timedelta(days=5)).isoformat()
             end   = (exp_date + datetime.timedelta(days=1)).isoformat()
-            hist  = yf.Ticker(symbol).history(start=start, end=end)
-            if hist.empty:
+            close = self._data.get_historical_close(symbol, start, end)
+            if close is None:
                 return None
-            close = float(hist['Close'].iloc[-1])
         except Exception:
             return None
 

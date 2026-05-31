@@ -133,6 +133,128 @@ class DataAdapter:
     def _base_delay(self) -> float:
         return float(self._hft_cfg.get('retry_base_delay_seconds', 2.0))
 
+    # ── Unified spot / historical helpers ────────────────────────────────────
+
+    def get_spot_price(self, symbol: str) -> Optional[float]:
+        """
+        Return the current spot price for *symbol*.
+
+        * **HFT**: Alpaca ``get_spot_price`` (no yfinance).
+        * **Non-HFT**: Alpaca first, yfinance fallback.
+
+        Returns ``None`` when no price can be determined.
+        """
+        client = self._client()
+        if client is not None:
+            try:
+                price = client.get_spot_price(symbol)
+                if price is not None and price > 0:
+                    return price
+            except Exception:
+                pass
+            if self._get_hft():
+                return None
+
+        # Non-HFT fallback
+        try:
+            info = yf.Ticker(symbol).fast_info
+            for attr in ('last_price', 'regularMarketPrice'):
+                raw = getattr(info, attr, None)
+                if raw is None:
+                    continue
+                try:
+                    v = float(raw)
+                    if v > 0:
+                        return v
+                except (TypeError, ValueError):
+                    continue
+        except Exception:
+            pass
+        return None
+
+    def get_spot_prices(self, symbols: list[str]) -> dict[str, float]:
+        """
+        Return spot prices for multiple symbols in a single call where possible.
+
+        * **HFT**: Alpaca bulk ``get_spot_prices`` only.
+        * **Non-HFT**: Alpaca first, yfinance per-symbol fallback for misses.
+        """
+        result: dict[str, float] = {}
+        client = self._client()
+        if client is not None:
+            try:
+                result = client.get_spot_prices(symbols)
+            except Exception:
+                pass
+
+        missing = [s for s in symbols if s not in result]
+        if missing and not self._get_hft():
+            for sym in missing:
+                try:
+                    info = yf.Ticker(sym).fast_info
+                    for attr in ('last_price', 'regularMarketPrice'):
+                        raw = getattr(info, attr, None)
+                        if raw is None:
+                            continue
+                        v = float(raw)
+                        if v > 0:
+                            result[sym] = v
+                            break
+                except Exception:
+                    pass
+        return result
+
+    def get_historical_close(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+    ) -> Optional[float]:
+        """
+        Return the closing price nearest to *end_date* within the window.
+
+        * **HFT**: Alpaca historical bars only.
+        * **Non-HFT**: Alpaca first, yfinance fallback.
+
+        Returns ``None`` when no price can be determined.
+        """
+        client = self._client()
+        if client is not None:
+            try:
+                from datetime import date as _date
+                from alpaca.data.requests import StockBarsRequest
+                from alpaca.data.timeframe import TimeFrame
+                req = StockBarsRequest(
+                    symbol_or_symbols=[symbol],
+                    timeframe=TimeFrame.Day,
+                    start=_date.fromisoformat(start_date),
+                    end=_date.fromisoformat(end_date),
+                )
+                bar_set = client._stock.get_stock_bars(req)
+                data = bar_set.data if hasattr(bar_set, 'data') else bar_set
+                items = data.get(symbol, []) if hasattr(data, 'get') else []
+                if not items:
+                    items = data.items() if hasattr(data, 'items') else []
+                    for sym, bars in items:
+                        if sym == symbol and bars:
+                            return float(bars[-1].close)
+                    if self._get_hft():
+                        return None
+                else:
+                    return float(items[-1].close)
+            except Exception:
+                if self._get_hft():
+                    return None
+
+        # Non-HFT fallback
+        try:
+            hist = yf.Ticker(symbol).history(start=start_date, end=end_date)
+            if not hist.empty:
+                return float(hist['Close'].iloc[-1])
+        except Exception:
+            pass
+        return None
+
     # ── Scanner helpers ───────────────────────────────────────────────────────
 
     def get_hft_spot(self, symbol: str) -> float:

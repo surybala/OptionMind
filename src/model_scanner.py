@@ -343,7 +343,6 @@ class LivePaperInferenceProvider:
         strategy = "PCS" if option_type == "put" else "CCS"
         widths = _spread_widths(strategy_config, self.scanner_config)
         min_credit = float(strategy_config.get("min_net_credit", self.scanner_config.get("min_net_credit", 0.01)) or 0.01)
-        min_prob = float(strategy_config.get("min_prob_profit", 0.0) or 0.0)
         picks: list[dict] = []
         for short in scored:
             if short.contract.option_type != option_type or short.contract.strike is None or short.contract.expiration is None:
@@ -361,8 +360,6 @@ class LivePaperInferenceProvider:
                 if credit < min_credit:
                     continue
                 prob_win = _probability_from_delta(short.row.get("option_delta"))
-                if prob_win < min_prob:
-                    continue
                 actual_width = abs(float(short.contract.strike) - float(long.contract.strike))
                 max_loss = max(0.01, actual_width - credit)
                 dte = int(short.row.get("dte") or max(1, (short.contract.expiration - timestamp.date()).days))
