@@ -233,6 +233,46 @@ class TestFetchChainDataHft(unittest.TestCase):
                          "yfinance must NOT be imported in HFT _fetch_chain_data_hft path")
 
 
+class TestComputeExpiryPnlUsesAdapter(unittest.TestCase):
+    """_compute_expiry_pnl must route through DataAdapter, not yfinance directly."""
+
+    def test_uses_adapter_get_historical_close(self):
+        """Verify _compute_expiry_pnl calls self._data.get_historical_close."""
+        monitor = _make_monitor()
+        monitor._data = MagicMock()
+        monitor._data.get_historical_close.return_value = 180.0  # below strike
+
+        pos = _make_csp_pos(symbol='AAPL', expiry='2025-06-20', strike=185.0, premium=1.50)
+        pos['legs'] = '{"short_strike": 185.0}'
+
+        with patch('src.risk_rules.intrinsic_value.compute_cost_to_close', return_value=0.0):
+            result = monitor._compute_expiry_pnl(pos)
+
+        monitor._data.get_historical_close.assert_called_once()
+        call_args = monitor._data.get_historical_close.call_args
+        self.assertEqual(call_args[0][0], 'AAPL')
+
+    def test_returns_none_when_adapter_returns_none(self):
+        """If the adapter can't get historical data, _compute_expiry_pnl returns None."""
+        monitor = _make_monitor()
+        monitor._data = MagicMock()
+        monitor._data.get_historical_close.return_value = None
+
+        pos = _make_csp_pos(symbol='AAPL', expiry='2025-06-20', strike=185.0, premium=1.50)
+        pos['legs'] = '{"short_strike": 185.0}'
+
+        result = monitor._compute_expiry_pnl(pos)
+
+        self.assertIsNone(result)
+
+    def test_no_direct_yfinance_import_in_compute_expiry_pnl(self):
+        """_compute_expiry_pnl must not import yfinance directly."""
+        import inspect
+        source = inspect.getsource(PositionMonitor._compute_expiry_pnl)
+        self.assertNotIn('yfinance', source)
+        self.assertNotIn('yf.', source)
+
+
 class TestEnrichPnlContractScaling(unittest.TestCase):
     """_enrich_pnl must scale pnl_dollars by the contracts field."""
 

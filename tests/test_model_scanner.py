@@ -318,3 +318,63 @@ def test_no_large_loss_classifier_leaves_large_loss_prob_none(tmp_path):
 
     assert len(picks) > 0
     assert all(p.get("large_loss_prob") is None for p in picks)
+
+
+def test_min_prob_profit_does_not_filter_picks(tmp_path):
+    """min_prob_profit config should NOT filter picks — ML pipeline is the sole gate."""
+    provider = FakeLiveProvider()
+    registry_path = _champion_registry(tmp_path)
+
+    # Set min_prob_profit to 0.99 (would reject everything if it were active)
+    inference = LivePaperInferenceProvider(
+        {
+            "ml_scanner": {
+                "registry_path": str(registry_path),
+                "min_dte": 7,
+                "max_dte": 45,
+                "vix_symbol": "I:VIX",
+            },
+            "strategies": {
+                "put_credit_spread": {"enabled": True, "strike_width": 5, "min_net_credit": 0.10, "min_prob_profit": 0.99},
+                "call_credit_spread": {"enabled": True, "strike_width": 5, "min_net_credit": 0.10, "min_prob_profit": 0.99},
+            },
+        },
+        provider=provider,
+        now_fn=lambda: provider.now,
+    )
+
+    picks = inference.get_top_picks(["SPY"], n=5)
+
+    # Picks should still be returned — min_prob_profit no longer filters
+    assert len(picks) > 0, "min_prob_profit should not filter picks; ML pipeline is the sole gate"
+
+
+def test_prob_win_still_populated_in_picks(tmp_path):
+    """prob_win is still computed and stored for display purposes, just not used as a filter."""
+    provider = FakeLiveProvider()
+    registry_path = _champion_registry(tmp_path)
+
+    inference = LivePaperInferenceProvider(
+        {
+            "ml_scanner": {
+                "registry_path": str(registry_path),
+                "min_dte": 7,
+                "max_dte": 45,
+                "vix_symbol": "I:VIX",
+            },
+            "strategies": {
+                "put_credit_spread": {"enabled": True, "strike_width": 5, "min_net_credit": 0.10},
+                "call_credit_spread": {"enabled": True, "strike_width": 5, "min_net_credit": 0.10},
+            },
+        },
+        provider=provider,
+        now_fn=lambda: provider.now,
+    )
+
+    picks = inference.get_top_picks(["SPY"], n=5)
+
+    assert len(picks) > 0
+    for pick in picks:
+        assert "prob_win" in pick
+        assert isinstance(pick["prob_win"], float)
+        assert 0.0 <= pick["prob_win"] <= 1.0

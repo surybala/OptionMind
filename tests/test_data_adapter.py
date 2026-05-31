@@ -253,3 +253,201 @@ class TestNonHftPath:
 
         assert client.get_option_chains_for_range.call_count == 1
         mock_sleep.assert_not_called()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# get_spot_price — HFT vs non-HFT routing
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestGetSpotPrice:
+
+    def test_hft_returns_alpaca_price(self):
+        """HFT mode: Alpaca price returned directly."""
+        client = MagicMock()
+        client.get_spot_price.return_value = 185.50
+        adapter = _make_adapter(hft=True, client=client)
+
+        result = adapter.get_spot_price('AAPL')
+
+        assert result == 185.50
+        client.get_spot_price.assert_called_once_with('AAPL')
+
+    def test_hft_returns_none_when_alpaca_fails(self):
+        """HFT mode: no yfinance fallback — returns None on Alpaca failure."""
+        client = MagicMock()
+        client.get_spot_price.side_effect = ConnectionError("timeout")
+        adapter = _make_adapter(hft=True, client=client)
+
+        result = adapter.get_spot_price('AAPL')
+
+        assert result is None
+
+    def test_hft_returns_none_when_alpaca_returns_none(self):
+        """HFT mode: Alpaca returns None → no fallback, return None."""
+        client = MagicMock()
+        client.get_spot_price.return_value = None
+        adapter = _make_adapter(hft=True, client=client)
+
+        result = adapter.get_spot_price('SPY')
+
+        assert result is None
+
+    def test_hft_returns_none_when_alpaca_returns_zero(self):
+        """HFT mode: Alpaca returns 0 (invalid) → no fallback, return None."""
+        client = MagicMock()
+        client.get_spot_price.return_value = 0
+        adapter = _make_adapter(hft=True, client=client)
+
+        result = adapter.get_spot_price('SPY')
+
+        assert result is None
+
+    @patch('src.market_data.adapter.yf')
+    def test_non_hft_falls_back_to_yfinance_on_alpaca_failure(self, mock_yf):
+        """Non-HFT mode: Alpaca fails → yfinance fallback used."""
+        client = MagicMock()
+        client.get_spot_price.side_effect = ConnectionError("timeout")
+        adapter = _make_adapter(hft=False, client=client)
+
+        mock_info = MagicMock()
+        mock_info.last_price = 190.25
+        mock_yf.Ticker.return_value.fast_info = mock_info
+
+        result = adapter.get_spot_price('AAPL')
+
+        assert result == 190.25
+
+    @patch('src.market_data.adapter.yf')
+    def test_non_hft_uses_alpaca_first(self, mock_yf):
+        """Non-HFT mode: Alpaca succeeds → yfinance not called."""
+        client = MagicMock()
+        client.get_spot_price.return_value = 450.0
+        adapter = _make_adapter(hft=False, client=client)
+
+        result = adapter.get_spot_price('SPY')
+
+        assert result == 450.0
+        mock_yf.Ticker.assert_not_called()
+
+    @patch('src.market_data.adapter.yf')
+    def test_hft_never_calls_yfinance(self, mock_yf):
+        """HFT mode: yfinance must never be invoked regardless of Alpaca result."""
+        client = MagicMock()
+        client.get_spot_price.return_value = None
+        adapter = _make_adapter(hft=True, client=client)
+
+        adapter.get_spot_price('AAPL')
+
+        mock_yf.Ticker.assert_not_called()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# get_spot_prices — bulk fetch, HFT vs non-HFT
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestGetSpotPrices:
+
+    def test_hft_returns_alpaca_bulk_prices(self):
+        """HFT mode: bulk Alpaca call returns all prices."""
+        client = MagicMock()
+        client.get_spot_prices.return_value = {'SPY': 450.0, 'QQQ': 380.0}
+        adapter = _make_adapter(hft=True, client=client)
+
+        result = adapter.get_spot_prices(['SPY', 'QQQ'])
+
+        assert result == {'SPY': 450.0, 'QQQ': 380.0}
+
+    def test_hft_no_yfinance_fallback_for_missing(self):
+        """HFT mode: missing symbols from Alpaca → NOT filled by yfinance."""
+        client = MagicMock()
+        client.get_spot_prices.return_value = {'SPY': 450.0}  # QQQ missing
+        adapter = _make_adapter(hft=True, client=client)
+
+        result = adapter.get_spot_prices(['SPY', 'QQQ'])
+
+        assert 'QQQ' not in result
+        assert result == {'SPY': 450.0}
+
+    @patch('src.market_data.adapter.yf')
+    def test_non_hft_fills_missing_via_yfinance(self, mock_yf):
+        """Non-HFT mode: yfinance fills symbols missing from Alpaca."""
+        client = MagicMock()
+        client.get_spot_prices.return_value = {'SPY': 450.0}
+        adapter = _make_adapter(hft=False, client=client)
+
+        mock_info = MagicMock()
+        mock_info.last_price = 380.0
+        mock_yf.Ticker.return_value.fast_info = mock_info
+
+        result = adapter.get_spot_prices(['SPY', 'QQQ'])
+
+        assert result == {'SPY': 450.0, 'QQQ': 380.0}
+        mock_yf.Ticker.assert_called_once_with('QQQ')
+
+    def test_hft_returns_empty_dict_on_alpaca_exception(self):
+        """HFT mode: Alpaca exception → empty dict, no fallback."""
+        client = MagicMock()
+        client.get_spot_prices.side_effect = RuntimeError("API down")
+        adapter = _make_adapter(hft=True, client=client)
+
+        result = adapter.get_spot_prices(['SPY', 'QQQ'])
+
+        assert result == {}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# get_historical_close — HFT vs non-HFT
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestGetHistoricalClose:
+
+    def test_hft_returns_none_when_alpaca_fails(self):
+        """HFT mode: Alpaca exception → returns None, no yfinance."""
+        client = MagicMock()
+        client._stock.get_stock_bars.side_effect = RuntimeError("network error")
+        adapter = _make_adapter(hft=True, client=client)
+
+        result = adapter.get_historical_close('AAPL', '2026-05-20', '2026-05-26')
+
+        assert result is None
+
+    @patch('src.market_data.adapter.yf')
+    def test_hft_never_calls_yfinance(self, mock_yf):
+        """HFT mode: yfinance must not be called even on Alpaca failure."""
+        client = MagicMock()
+        client._stock.get_stock_bars.side_effect = RuntimeError("down")
+        adapter = _make_adapter(hft=True, client=client)
+
+        adapter.get_historical_close('AAPL', '2026-05-20', '2026-05-26')
+
+        mock_yf.Ticker.assert_not_called()
+
+    @patch('src.market_data.adapter.yf')
+    def test_non_hft_falls_back_to_yfinance(self, mock_yf):
+        """Non-HFT mode: Alpaca fails → yfinance fallback returns close."""
+        client = MagicMock()
+        client._stock.get_stock_bars.side_effect = RuntimeError("down")
+        adapter = _make_adapter(hft=False, client=client)
+
+        mock_hist = MagicMock()
+        mock_hist.empty = False
+        mock_hist.__getitem__ = lambda self, key: MagicMock(iloc=MagicMock(__getitem__=lambda s, i: 185.0))
+        mock_yf.Ticker.return_value.history.return_value = mock_hist
+
+        result = adapter.get_historical_close('AAPL', '2026-05-20', '2026-05-26')
+
+        assert result == 185.0
+
+    def test_hft_returns_close_from_alpaca_bars(self):
+        """HFT mode: Alpaca returns bar data → close price extracted."""
+        client = MagicMock()
+        bar = MagicMock()
+        bar.close = 192.50
+        bar_set = MagicMock()
+        bar_set.data = {'AAPL': [bar]}
+        client._stock.get_stock_bars.return_value = bar_set
+        adapter = _make_adapter(hft=True, client=client)
+
+        result = adapter.get_historical_close('AAPL', '2026-05-20', '2026-05-26')
+
+        assert result == 192.50
