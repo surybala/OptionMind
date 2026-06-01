@@ -1,147 +1,194 @@
+"""
+Tests for ml.models.evaluate_risk_adjusted_ranking.
+
+Covers:
+- apply_large_loss_gate: veto logic based on large-loss probability threshold
+- compute_sortino_score: downside-vol-adjusted score computation
+- RiskAdjustedConfig: dataclass defaults
+"""
+import numpy as np
 import pandas as pd
 
-import ml.models.evaluate_risk_adjusted_ranking as evaluator
 from ml.models.evaluate_risk_adjusted_ranking import (
     RiskAdjustedConfig,
-    _cap_value,
-    _evaluate_trade_pipeline,
-    _resolve_risk_penalty_basis,
     apply_large_loss_gate,
-    apply_portfolio_risk_controls,
-    apply_probability_caps,
-    risk_adjusted_score,
+    compute_sortino_score,
 )
 
 
-def test_risk_adjusted_score_penalizes_tail_probabilities_by_max_loss():
-    score = risk_adjusted_score(
-        pd.Series([100.0, 100.0]),
-        pd.Series([500.0, 500.0]),
-        pd.Series([0.10, 0.30]),
-        pd.Series([0.20, 0.20]),
-        large_loss_penalty_multiple=1.0,
-        stop_loss_penalty_multiple=0.5,
-    )
+# ══════════════════════════════════════════════════════════════════════════════
+# RiskAdjustedConfig
+# ══════════════════════════════════════════════════════════════════════════════
 
-    assert score.tolist() == [0.0, -100.0]
+class TestRiskAdjustedConfig:
 
+    def test_default_selection_fraction(self):
+        cfg = RiskAdjustedConfig()
+        assert cfg.selection_fraction == 0.10
 
-def test_risk_adjusted_score_clips_invalid_probabilities():
-    score = risk_adjusted_score(
-        pd.Series([50.0]),
-        pd.Series([100.0]),
-        pd.Series([2.0]),
-        pd.Series([-1.0]),
-    )
+    def test_default_max_large_loss_probability(self):
+        cfg = RiskAdjustedConfig()
+        assert cfg.max_large_loss_probability == 0.70
 
-    assert score.iloc[0] == -50.0
+    def test_custom_values(self):
+        cfg = RiskAdjustedConfig(selection_fraction=0.05, max_large_loss_probability=0.50)
+        assert cfg.selection_fraction == 0.05
+        assert cfg.max_large_loss_probability == 0.50
 
-
-def test_risk_adjusted_score_can_penalize_in_return_on_risk_units():
-    score = risk_adjusted_score(
-        pd.Series([0.20]),
-        pd.Series([500.0]),
-        pd.Series([0.10]),
-        pd.Series([0.20]),
-        large_loss_penalty_multiple=1.0,
-        stop_loss_penalty_multiple=0.5,
-        risk_penalty_basis="return_on_risk",
-    )
-
-    assert round(score.iloc[0], 6) == 0.0
+    def test_none_disables_gate(self):
+        cfg = RiskAdjustedConfig(max_large_loss_probability=None)
+        assert cfg.max_large_loss_probability is None
 
 
-def test_resolve_risk_penalty_basis_uses_ranker_target_for_auto():
-    assert _resolve_risk_penalty_basis("auto", "return_on_risk") == "return_on_risk"
-    assert _resolve_risk_penalty_basis("auto", "expected_pnl") == "dollars"
-    assert _resolve_risk_penalty_basis("dollars", "return_on_risk") == "dollars"
+# ══════════════════════════════════════════════════════════════════════════════
+# apply_large_loss_gate
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestApplyLargeLossGate:
+
+    def test_rows_above_threshold_set_to_neg_inf(self):
+        """Candidates with large-loss prob > threshold should be vetoed (-inf)."""
+        scores = pd.Series([10.0, 20.0, 30.0])
+        probs = pd.Series([0.20, 0.80, 0.10])
+
+        gated = apply_large_loss_gate(scores, probs, max_large_loss_probability=0.70)
+
+        assert gated.iloc[0] == 10.0
+        assert gated.iloc[1] == float("-inf")
+        assert gated.iloc[2] == 30.0
+
+    def test_rows_at_threshold_not_vetoed(self):
+        """Candidates exactly at the threshold should NOT be vetoed (> not >=)."""
+        scores = pd.Series([50.0])
+        probs = pd.Series([0.70])
+
+        gated = apply_large_loss_gate(scores, probs, max_large_loss_probability=0.70)
+
+        assert gated.iloc[0] == 50.0
+
+    def test_none_threshold_disables_gate(self):
+        """When max_large_loss_probability is None, no rows are vetoed."""
+        scores = pd.Series([10.0, 20.0, 30.0])
+        probs = pd.Series([0.90, 0.95, 0.99])
+
+        gated = apply_large_loss_gate(scores, probs, max_large_loss_probability=None)
+
+        assert gated.iloc[0] == 10.0
+        assert gated.iloc[1] == 20.0
+        assert gated.iloc[2] == 30.0
+
+    def test_all_below_threshold_passes_all(self):
+        """If all probs are below threshold, all scores remain unchanged."""
+        scores = pd.Series([100.0, 200.0, 300.0])
+        probs = pd.Series([0.10, 0.30, 0.50])
+
+        gated = apply_large_loss_gate(scores, probs, max_large_loss_probability=0.70)
+
+        pd.testing.assert_series_equal(gated, scores, check_names=False)
+
+    def test_all_above_threshold_vetoes_all(self):
+        """If all probs are above threshold, all scores set to -inf."""
+        scores = pd.Series([100.0, 200.0])
+        probs = pd.Series([0.80, 0.90])
+
+        gated = apply_large_loss_gate(scores, probs, max_large_loss_probability=0.70)
+
+        assert all(gated == float("-inf"))
+
+    def test_nan_probability_treated_as_high_risk(self):
+        """NaN in large_loss_probability should be filled with 1.0 (vetoed)."""
+        scores = pd.Series([100.0, 200.0])
+        probs = pd.Series([0.10, float("nan")])
+
+        gated = apply_large_loss_gate(scores, probs, max_large_loss_probability=0.70)
+
+        assert gated.iloc[0] == 100.0
+        assert gated.iloc[1] == float("-inf")
+
+    def test_nan_score_stays_neg_inf(self):
+        """NaN in score should become -inf (fillna(-inf) in implementation)."""
+        scores = pd.Series([float("nan"), 50.0])
+        probs = pd.Series([0.10, 0.10])
+
+        gated = apply_large_loss_gate(scores, probs, max_large_loss_probability=0.70)
+
+        assert gated.iloc[0] == float("-inf")
+        assert gated.iloc[1] == 50.0
 
 
-def test_cap_value_uses_default_unless_disabled_or_overridden():
-    assert _cap_value(None, 0.70) == 0.70
-    assert _cap_value(0.50, 0.70) == 0.50
-    assert _cap_value(0.50, 0.70, disabled=True) is None
+# ══════════════════════════════════════════════════════════════════════════════
+# compute_sortino_score
+# ══════════════════════════════════════════════════════════════════════════════
 
+class TestComputeSortinoScore:
 
-def test_apply_probability_caps_removes_rows_above_thresholds():
-    score = apply_probability_caps(
-        pd.Series([10.0, 20.0, 30.0]),
-        pd.Series([0.20, 0.80, 0.10]),
-        pd.Series([0.20, 0.20, 0.90]),
-        max_large_loss_probability=0.70,
-        max_stop_loss_probability=0.80,
-    )
+    def test_basic_sortino_computation(self):
+        """sortino_score = gated_score / (iv * sqrt(dte/252))."""
+        gated = pd.Series([1.0])
+        df = pd.DataFrame({"implied_volatility": [0.25], "dte": [30]})
 
-    assert score.iloc[0] == 10.0
-    assert score.iloc[1] == float("-inf")
-    assert score.iloc[2] == float("-inf")
+        result = compute_sortino_score(gated, df)
 
+        vol_factor = 0.25 * np.sqrt(30.0 / 252.0)
+        expected = 1.0 / vol_factor
+        assert abs(result.iloc[0] - expected) < 1e-6
 
-def test_apply_large_loss_gate_eliminates_tail_risk_rows():
-    score = apply_large_loss_gate(
-        pd.Series([10.0, 20.0, 30.0]),
-        pd.Series([0.20, 0.80, 0.70]),
-        max_large_loss_probability=0.70,
-    )
+    def test_neg_inf_score_stays_neg_inf(self):
+        """Vetoed rows (-inf score) remain -inf in sortino computation."""
+        gated = pd.Series([float("-inf"), 10.0])
+        df = pd.DataFrame({"implied_volatility": [0.30, 0.30], "dte": [30, 30]})
 
-    assert score.iloc[0] == 10.0
-    assert score.iloc[1] == float("-inf")
-    assert score.iloc[2] == 30.0
+        result = compute_sortino_score(gated, df)
 
+        assert result.iloc[0] == float("-inf")
+        assert np.isfinite(result.iloc[1])
 
-def test_trade_pipeline_applies_large_loss_gate_before_portfolio_controls(monkeypatch):
-    scored = pd.DataFrame(
-        {
-            "prediction": [100.0, 90.0, 80.0],
-            "large_loss_probability": [0.10, 0.95, 0.20],
-            "expected_pnl": [50.0, 500.0, 25.0],
-            "max_profit": [100.0, 100.0, 100.0],
-            "max_adverse_excursion": [10.0, 10.0, 10.0],
-            "return_on_risk": [0.50, 5.0, 0.25],
-            "large_loss_label": [0, 1, 0],
-            "stop_loss_hit": [0, 1, 0],
-            "strategy": ["PCS", "PCS", "PCS"],
-            "underlying": ["SPY", "SPY", "QQQ"],
-        }
-    )
-    seen = {}
+    def test_nan_iv_defaults_to_025(self):
+        """NaN implied_volatility values should be filled to 0.25."""
+        gated = pd.Series([1.0])
+        df = pd.DataFrame({"implied_volatility": [float("nan")], "dte": [30]})
 
-    def fake_portfolio_controls(df, score_column, **kwargs):
-        seen["score_column"] = score_column
-        return pd.to_numeric(df[score_column], errors="coerce")
+        result = compute_sortino_score(gated, df)
 
-    monkeypatch.setattr(evaluator, "apply_portfolio_risk_controls", fake_portfolio_controls)
+        vol_factor = 0.25 * np.sqrt(30.0 / 252.0)
+        expected = 1.0 / vol_factor
+        assert abs(result.iloc[0] - expected) < 1e-6
 
-    report = _evaluate_trade_pipeline(
-        scored,
-        RiskAdjustedConfig(max_large_loss_probability=0.70),
-        {},
-    )
+    def test_nan_dte_defaults_to_30(self):
+        """NaN dte values should be filled to 30."""
+        gated = pd.Series([1.0])
+        df = pd.DataFrame({"implied_volatility": [0.25], "dte": [float("nan")]})
 
-    assert seen["score_column"] == "large_loss_gate_score"
-    assert report["large_loss_gate_eligible_rows"] == 2
-    assert report["trade_pipeline_eligible_rows"] == 2
-    assert report["trade_pipeline_selection"]["selected_rows"] == 2
-    assert report["trade_pipeline_selection"]["large_loss_rate"] == 0.0
+        result = compute_sortino_score(gated, df)
 
+        vol_factor = 0.25 * np.sqrt(30.0 / 252.0)
+        expected = 1.0 / vol_factor
+        assert abs(result.iloc[0] - expected) < 1e-6
 
-def test_apply_portfolio_risk_controls_uses_existing_service_defaults():
-    df = pd.DataFrame(
-        {
-            "entry_timestamp": pd.to_datetime(["2026-01-05", "2026-01-05"], utc=True),
-            "strategy": ["PCS", "PCS"],
-            "underlying": ["SPY", "SPY"],
-            "underlying_close": [500.0, 500.0],
-            "dte": [30, 30],
-            "short_strike": [499.0, 450.0],
-            "long_strike": [494.0, 445.0],
-            "entry_credit": [1.0, 1.0],
-            "implied_volatility": [0.35, 0.35],
-            "prediction": [100.0, 90.0],
-        }
-    )
+    def test_higher_iv_produces_lower_sortino_score(self):
+        """Higher IV means more downside risk, so sortino_score should be lower."""
+        gated = pd.Series([10.0, 10.0])
+        df = pd.DataFrame({"implied_volatility": [0.20, 0.50], "dte": [30, 30]})
 
-    score = apply_portfolio_risk_controls(df, "prediction", account_capital=1_000.0)
+        result = compute_sortino_score(gated, df)
 
-    assert score.iloc[0] == float("-inf")
-    assert score.iloc[1] == float("-inf")
+        assert result.iloc[0] > result.iloc[1]
+
+    def test_higher_dte_produces_lower_sortino_score(self):
+        """Longer DTE means more exposure time, so sortino_score should be lower."""
+        gated = pd.Series([10.0, 10.0])
+        df = pd.DataFrame({"implied_volatility": [0.25, 0.25], "dte": [7, 45]})
+
+        result = compute_sortino_score(gated, df)
+
+        assert result.iloc[0] > result.iloc[1]
+
+    def test_zero_iv_clipped_to_minimum(self):
+        """Zero IV should be clipped to a small positive to prevent div-by-zero."""
+        gated = pd.Series([10.0])
+        df = pd.DataFrame({"implied_volatility": [0.0], "dte": [30]})
+
+        result = compute_sortino_score(gated, df)
+
+        assert np.isfinite(result.iloc[0])
+        assert result.iloc[0] > 0
