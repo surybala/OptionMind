@@ -57,6 +57,7 @@ class PortfolioRiskService:
         picks: list[dict],
         positions: list[dict],
         account_capital: Optional[float],
+        rejection_sink: Optional[list[dict]] = None,
     ) -> list[dict]:
         """
         Return picks resized/rejected by account-level gamma stress limits.
@@ -105,6 +106,13 @@ class PortfolioRiskService:
                     break
             if best_qty <= 0:
                 rejected += 1
+                if rejection_sink is not None:
+                    payload = dict(pick)
+                    payload["risk_gate"] = "Portfolio gamma risk"
+                    payload["reject_reason"] = self._violation_text(last_summary or best_summary)
+                    payload["portfolio_violations"] = list((last_summary or best_summary or {}).get("violations", []))
+                    payload["portfolio_violation_codes"] = list((last_summary or best_summary or {}).get("violation_codes", []))
+                    rejection_sink.append(payload)
                 _log.info(
                     "Portfolio gamma gate: rejected %s %s; %s",
                     pick.get('strategy'), pick.get('symbol'),
@@ -381,19 +389,24 @@ class PortfolioRiskService:
 
         limits = self._limits(account_capital)
         violations = []
+        violation_codes: list[str] = []
         if worst_loss > limits['max_stress_loss']:
+            violation_codes.append("worst_stress")
             violations.append(
                 f"worst stress ${worst_loss:,.0f} > ${limits['max_stress_loss']:,.0f}"
             )
         if near_loss > limits['near_expiry_stress']:
+            violation_codes.append("near_expiry_stress")
             violations.append(
                 f"near-expiry stress ${near_loss:,.0f} > ${limits['near_expiry_stress']:,.0f}"
             )
         if limits['expiry_bucket_enabled'] and max_bucket_loss > limits['expiry_bucket']:
+            violation_codes.append("expiry_bucket_stress")
             violations.append(
                 f"expiry bucket stress ${max_bucket_loss:,.0f} > ${limits['expiry_bucket']:,.0f}"
             )
         if limits['symbol_stress_enabled'] and max_symbol_loss > limits['symbol_stress']:
+            violation_codes.append("symbol_stress")
             violations.append(
                 f"symbol stress ${max_symbol_loss:,.0f} > ${limits['symbol_stress']:,.0f}"
             )
@@ -401,6 +414,7 @@ class PortfolioRiskService:
             not limits['gamma_loss_to_theta_warning_only']
             and ratio > limits['gamma_loss_to_theta']
         ):
+            violation_codes.append("gamma_loss_to_theta")
             violations.append(
                 f"1% gamma loss/theta {ratio:.2f}x > {limits['gamma_loss_to_theta']:.2f}x"
             )
@@ -422,6 +436,7 @@ class PortfolioRiskService:
             ),
             'limits': limits,
             'violations': violations,
+            'violation_codes': violation_codes,
         }
 
     def _worst_loss(

@@ -19,6 +19,7 @@ def _cfg(
     ic_allocation_pct: float = 1.0,
     max_per_ticker: int | None = None,
     strategy_caps: dict | None = None,
+    regime_allocation: dict | None = None,
 ) -> dict:
     cfg: dict = {
         "pick_selection": {"mode": mode},
@@ -30,6 +31,8 @@ def _cfg(
         cfg["max_picks_per_ticker"] = max_per_ticker
     if strategy_caps is not None:
         cfg["pick_selection"]["strategy_caps"] = strategy_caps
+    if regime_allocation is not None:
+        cfg["pick_selection"]["regime_allocation"] = regime_allocation
     return cfg
 
 
@@ -203,6 +206,63 @@ class TestModelRankedStrategyCaps:
         result = select_top_picks_with_scanner_controls(picks, n=5, config=cfg)
         assert len(result) == 5
         assert all(p["strategy"] == "STRANGLE" for p in result)
+
+
+class TestModelRankedRegimeAllocation:
+    def test_orange_regime_caps_pcs_and_reserves_ccs_capacity(self):
+        picks = (
+            [_p("PCS", f"P{i}", 10.0 - i * 0.1) for i in range(10)]
+            + [_p("CCS", f"C{i}", 4.0 - i * 0.1) for i in range(10)]
+        )
+        cfg = _cfg(
+            regime_allocation={
+                "enabled": True,
+                "regimes": {
+                    "ORANGE": {
+                        "PCS": {"max_fraction": 0.4},
+                        "CCS": {"min_fraction": 0.4},
+                    }
+                },
+            }
+        )
+
+        result = select_top_picks_with_scanner_controls(
+            picks,
+            n=10,
+            config=cfg,
+            regime_label="ORANGE",
+        )
+
+        pcs_count = sum(1 for p in result if p["strategy"] == "PCS")
+        ccs_count = sum(1 for p in result if p["strategy"] == "CCS")
+        assert pcs_count <= 4
+        assert ccs_count >= 4
+
+    def test_green_regime_cap_can_zero_out_ccs_even_if_scores_dominate(self):
+        picks = (
+            [_p("CCS", f"C{i}", 10.0 - i * 0.1) for i in range(10)]
+            + [_p("PCS", f"P{i}", 4.0 - i * 0.1) for i in range(10)]
+        )
+        cfg = _cfg(
+            regime_allocation={
+                "enabled": True,
+                "regimes": {
+                    "GREEN": {
+                        "CCS": {"max_fraction": 0.0},
+                        "PCS": {"min_fraction": 0.4},
+                    }
+                },
+            }
+        )
+
+        result = select_top_picks_with_scanner_controls(
+            picks,
+            n=5,
+            config=cfg,
+            regime_label="GREEN",
+        )
+
+        assert all(p["strategy"] == "PCS" for p in result)
 
 
 # ── Mode fallback behavior ────────────────────────────────────────────────────

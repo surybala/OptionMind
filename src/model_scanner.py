@@ -27,13 +27,17 @@ from ml.datasets.candidate_dataset import (
     _underlying_features,
     _vix_features,
 )
-from ml.models.registry import ModelRegistryEntry, load_champion_artifact
+from ml.models.registry import ModelRegistryEntry, load_champion_artifact, load_registry
 from ml.providers.calendar import fomc_events
 from ml.providers.models import DividendEvent, EarningsEvent, EconomicEvent, OptionChainSnapshot, OptionContract, PriceBar
 from src.osi import parse_osi
 from src.pick_selection import select_top_picks_with_scanner_controls
 
 _log = logging.getLogger("optionwheel")
+_ALPACA_PROVIDER_PATHS = {
+    "ml.providers:AlpacaProvider",
+    "ml.providers.alpaca:AlpacaProvider",
+}
 
 
 class ModelScanner:
@@ -43,6 +47,7 @@ class ModelScanner:
         self.config = config
         self.scanner_config = config.get("ml_scanner", {})
         self.model_provider = self._load_provider() if self.scanner_config.get("enabled", False) else None
+        self._runtime_regime_label: str | None = None
 
     def get_top_picks(self, ticker_list: list[str], n: int = 10) -> list[dict]:
         """Return model-ranked candidates, or no picks until a model exists."""
@@ -63,7 +68,15 @@ class ModelScanner:
         candidates = self._call_provider(ticker_list, n)
         normalized = [self._normalize_candidate(candidate) for candidate in candidates]
         normalized = [candidate for candidate in normalized if candidate is not None]
-        return select_top_picks_with_scanner_controls(normalized, n=n, config=self.config)
+        return select_top_picks_with_scanner_controls(
+            normalized,
+            n=n,
+            config=self.config,
+            regime_label=self._runtime_regime_label,
+        )
+
+    def set_runtime_regime(self, regime: Any | None) -> None:
+        self._runtime_regime_label = _regime_label(regime)
 
     def _load_provider(self) -> Any | None:
         provider_path = self.scanner_config.get("provider")
@@ -122,6 +135,15 @@ class _ScoredOption:
     option_price: float
     bid: float | None
     ask: float | None
+    model_binding: "_LoadedModelBinding"
+
+
+@dataclass(frozen=True)
+class _LoadedModelBinding:
+    strategy_key: str
+    model: "_ChampionModel"
+    registry_entry: ModelRegistryEntry | None
+    artifact_path: str | None
 
 
 class LivePaperInferenceProvider:
@@ -139,16 +161,20 @@ class LivePaperInferenceProvider:
         self.now_fn = now_fn or (lambda: datetime.now(UTC))
         self.registry_entry: ModelRegistryEntry | None = None
         self.model: _ChampionModel | None = None
+        self.default_model_binding: _LoadedModelBinding | None = None
+        self.strategy_model_bindings: dict[str, _LoadedModelBinding] = {}
         self.large_loss_model: _ChampionModel | None = None
         self.large_loss_veto_threshold: float = float(
             self.scanner_config.get("large_loss_veto_threshold", 0.70)
         )
+        self._runtime_regime_label: str | None = None
         self._load_champion()
+        self._load_strategy_rankers()
         self._load_large_loss_classifier()
 
     def get_top_picks(self, ticker_list: list[str], n: int = 10) -> list[dict]:
-        if self.model is None:
-            _log.warning("ML scanner inference provider has no champion model loaded.")
+        if not self._has_ranker_models():
+            _log.warning("ML scanner inference provider has no ranker model loaded.")
             return []
         if self.provider is None:
             _log.warning("ML scanner inference provider has no market-data provider.")
@@ -212,7 +238,15 @@ class LivePaperInferenceProvider:
             )
             picks.extend(self._spread_picks(underlying, scored, now))
 
-        return select_top_picks_with_scanner_controls(picks, n=n, config=self.config)
+        return select_top_picks_with_scanner_controls(
+            picks,
+            n=n,
+            config=self.config,
+            regime_label=self._runtime_regime_label,
+        )
+
+    def set_runtime_regime(self, regime: Any | None) -> None:
+        self._runtime_regime_label = _regime_label(regime)
 
     def _load_champion(self) -> None:
         registry_path = self.scanner_config.get("registry_path", "artifacts/model_registry.json")
@@ -230,6 +264,36 @@ class LivePaperInferenceProvider:
             artifact = dict(artifact)
             artifact["model_path"] = entry.artifact_manifest.model_path
         self.model = _ChampionModel(artifact)
+        self.default_model_binding = _LoadedModelBinding(
+            strategy_key="DEFAULT",
+            model=self.model,
+            registry_entry=entry,
+            artifact_path=(
+                entry.artifact_manifest.artifact_path
+                if entry is not None
+                else str(self.scanner_config.get("artifact_path"))
+            ),
+        )
+
+    def _load_strategy_rankers(self) -> None:
+        raw = self.scanner_config.get("strategy_rankers")
+        if not isinstance(raw, dict):
+            return
+        for key, source in raw.items():
+            strategy_key = _strategy_key(key)
+            if strategy_key is None:
+                continue
+            try:
+                binding = self._load_model_binding(source, strategy_key=strategy_key)
+            except Exception as exc:
+                _log.warning("[scanner] Failed to load %s ranker: %s", strategy_key, exc)
+                continue
+            self.strategy_model_bindings[strategy_key] = binding
+            _log.info(
+                "[scanner] Strategy ranker loaded: %s -> %s",
+                strategy_key,
+                binding.artifact_path or binding.model.model_type,
+            )
 
     def _load_large_loss_classifier(self) -> None:
         path = self.scanner_config.get("large_loss_classifier_path")
@@ -246,14 +310,65 @@ class LivePaperInferenceProvider:
         except Exception as exc:
             _log.warning("[scanner] Failed to load large-loss classifier %s: %s", path, exc)
 
+    def _load_model_binding(self, source: Any, *, strategy_key: str) -> _LoadedModelBinding:
+        artifact_path: str | None = None
+        entry: ModelRegistryEntry | None = None
+        artifact: dict[str, Any]
+        if isinstance(source, str):
+            artifact = json.loads(Path(source).read_text(encoding="utf-8"))
+            artifact_path = str(source)
+        elif isinstance(source, dict):
+            registry_path = source.get("registry_path")
+            model_id = source.get("model_id")
+            artifact_path = source.get("artifact_path")
+            if artifact_path:
+                artifact = json.loads(Path(str(artifact_path)).read_text(encoding="utf-8"))
+            elif registry_path:
+                registry = load_registry(str(registry_path))
+                entry = registry.get(str(model_id)) if model_id else registry.champion
+                if entry is None:
+                    raise ValueError(f"No model found in registry {registry_path!r} for {model_id!r}")
+                artifact = json.loads(
+                    Path(entry.artifact_manifest.artifact_path).read_text(encoding="utf-8")
+                )
+                artifact_path = entry.artifact_manifest.artifact_path
+            else:
+                raise ValueError("strategy_rankers entries need artifact_path or registry_path")
+        else:
+            raise TypeError("strategy_rankers entries must be a path string or config dict")
+
+        if entry is not None and entry.artifact_manifest.model_path:
+            artifact = dict(artifact)
+            artifact["model_path"] = entry.artifact_manifest.model_path
+        return _LoadedModelBinding(
+            strategy_key=strategy_key,
+            model=_ChampionModel(artifact),
+            registry_entry=entry,
+            artifact_path=str(artifact_path) if artifact_path is not None else None,
+        )
+
+    def _has_ranker_models(self) -> bool:
+        return self.default_model_binding is not None or bool(self.strategy_model_bindings)
+
     def _load_data_provider(self) -> Any:
         provider_path = self.scanner_config.get("data_provider")
+        hft_mode = bool(self.config.get("hft_mode", False))
         if provider_path:
             if ":" not in provider_path:
                 raise ValueError("ml_scanner.data_provider must use 'module:callable' format")
+            if hft_mode and provider_path not in _ALPACA_PROVIDER_PATHS:
+                raise ValueError(
+                    "HFT mode requires ml_scanner.data_provider to be Alpaca-backed "
+                    "(leave it empty or point it at AlpacaProvider)."
+                )
             module_name, attr_name = provider_path.split(":", 1)
             module = importlib.import_module(module_name)
             provider = getattr(module, attr_name)
+            if provider_path in _ALPACA_PROVIDER_PATHS:
+                from ml.providers import AlpacaProvider
+
+                paper = bool(self.config.get("alpaca", {}).get("paper", True))
+                return AlpacaProvider.from_env(paper=paper)
             return provider(self.config) if isinstance(provider, type) else provider
 
         from ml.providers import AlpacaProvider
@@ -303,13 +418,34 @@ class LivePaperInferenceProvider:
                 risk_free_rate=float(self.scanner_config.get("risk_free_rate", 0.045)),
             )
             rows.append((row, snapshot, contract, option_price, snapshot.bid, snapshot.ask))
-        if not rows or self.model is None:
+        if not rows or not self._has_ranker_models():
             return []
-        scores = self.model.score_rows([row for row, *_ in rows])
-        return [
-            _ScoredOption(row=row, snapshot=snapshot, contract=contract, score=score, option_price=price, bid=bid, ask=ask)
-            for (row, snapshot, contract, price, bid, ask), score in zip(rows, scores)
-        ]
+        grouped: dict[str, tuple[_LoadedModelBinding, list[tuple[dict[str, Any], OptionChainSnapshot, OptionContract, float, float | None, float | None]]]] = {}
+        for item in rows:
+            row, snapshot, contract, price, bid, ask = item
+            binding = self._binding_for_option_type(contract.option_type)
+            if binding is None:
+                continue
+            group = grouped.setdefault(binding.strategy_key, (binding, []))
+            group[1].append((row, snapshot, contract, price, bid, ask))
+
+        scored_rows: list[_ScoredOption] = []
+        for binding, binding_rows in grouped.values():
+            scores = binding.model.score_rows([row for row, *_ in binding_rows])
+            scored_rows.extend(
+                _ScoredOption(
+                    row=row,
+                    snapshot=snapshot,
+                    contract=contract,
+                    score=score,
+                    option_price=price,
+                    bid=bid,
+                    ask=ask,
+                    model_binding=binding,
+                )
+                for (row, snapshot, contract, price, bid, ask), score in zip(binding_rows, scores)
+            )
+        return scored_rows
 
     def _spread_picks(self, underlying: str, scored: list[_ScoredOption], timestamp: datetime) -> list[dict]:
         by_key = {
@@ -393,17 +529,24 @@ class LivePaperInferenceProvider:
                     "quantity": 1,
                     "short_option_symbol": short.contract.symbol,
                     "long_option_symbol": long.contract.symbol,
-                    "feature_version": self.model.feature_version if self.model else None,
-                    "label_version": self.model.label_version if self.model else None,
-                    "model_type": self.model.model_type if self.model else None,
-                    "model_version": self.registry_entry.model_id if self.registry_entry else self.model.model_type if self.model else None,
-                    "model_artifact_path": (
-                        self.registry_entry.artifact_manifest.artifact_path if self.registry_entry else self.scanner_config.get("artifact_path")
+                    "feature_version": short.model_binding.model.feature_version,
+                    "label_version": short.model_binding.model.label_version,
+                    "model_type": short.model_binding.model.model_type,
+                    "model_version": (
+                        short.model_binding.registry_entry.model_id
+                        if short.model_binding.registry_entry
+                        else short.model_binding.model.model_type
                     ),
-                    "model_id": self.registry_entry.model_id if self.registry_entry else None,
+                    "model_artifact_path": short.model_binding.artifact_path,
+                    "model_id": (
+                        short.model_binding.registry_entry.model_id
+                        if short.model_binding.registry_entry
+                        else None
+                    ),
+                    "ranker_strategy": short.model_binding.strategy_key,
                     "large_loss_prob": round(large_loss_prob, 4) if large_loss_prob is not None else None,
-                    "features_hash": _features_hash(short.row, self.model.feature_columns if self.model else []),
-                    "features": _feature_subset(short.row, self.model.feature_columns if self.model else []),
+                    "features_hash": _features_hash(short.row, short.model_binding.model.feature_columns),
+                    "features": _feature_subset(short.row, short.model_binding.model.feature_columns),
                     "score_components": {
                         "short_leg_score": round(float(short.score), 6),
                         "short_option_price": short.option_price,
@@ -421,6 +564,12 @@ class LivePaperInferenceProvider:
                     pick["long_call"] = pick["long_strike"]
                 picks.append(pick)
         return picks
+
+    def _binding_for_option_type(self, option_type: str | None) -> _LoadedModelBinding | None:
+        strategy_key = _strategy_key_from_option_type(option_type)
+        if strategy_key and strategy_key in self.strategy_model_bindings:
+            return self.strategy_model_bindings[strategy_key]
+        return self.default_model_binding
 
     def _earnings_events(self, underlying: str, start: date, end: date) -> list[EarningsEvent]:
         if hasattr(self.provider, "get_earnings_calendar"):
@@ -718,3 +867,29 @@ def _feature_subset(row: dict[str, Any], feature_columns: list[str]) -> dict[str
 def _features_hash(row: dict[str, Any], feature_columns: list[str]) -> str:
     payload = json.dumps(_feature_subset(row, feature_columns), sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _strategy_key(value: Any) -> str | None:
+    raw = str(value or "").strip().upper()
+    if raw in {"PCS", "PUT", "PUT_CREDIT_SPREAD"}:
+        return "PCS"
+    if raw in {"CCS", "CALL", "CALL_CREDIT_SPREAD"}:
+        return "CCS"
+    return None
+
+
+def _strategy_key_from_option_type(option_type: str | None) -> str | None:
+    raw = str(option_type or "").strip().lower()
+    if raw == "put":
+        return "PCS"
+    if raw == "call":
+        return "CCS"
+    return None
+
+
+def _regime_label(regime: Any | None) -> str | None:
+    if regime is None:
+        return None
+    label = getattr(regime, "label", regime)
+    raw = str(label or "").strip().upper()
+    return raw or None

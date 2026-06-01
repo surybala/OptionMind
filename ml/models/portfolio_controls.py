@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections import Counter
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from src.agent_risk import apply_directional_exposure_caps
 from src.pick_selection import select_top_picks_with_scanner_controls
 from src.portfolio_risk import PortfolioRiskService
 
@@ -39,11 +41,14 @@ def apply_portfolio_risk_controls(
     scanner_controls: bool = True,
     scanner_config: dict[str, Any] | None = None,
     scanner_top_n_per_entry_date: int | None = None,
-) -> pd.Series:
-    """Return a score Series filtered by the live portfolio risk service.
+    regime_label_column: str | None = None,
+    return_diagnostics: bool = False,
+) -> pd.Series | tuple[pd.Series, dict[str, Any]]:
+    """Return scores filtered by live scanner controls plus rejection diagnostics.
 
-    Rows that pass PortfolioRiskService.filter_picks() keep their original
-    score; rejected rows are set to -inf so downstream selectors ignore them.
+    Rows that survive pick selection, directional exposure caps, and portfolio
+    gamma risk keep their original score; rejected rows are set to ``-inf`` so
+    downstream selectors ignore them.
 
     Historical rows are evaluated one entry date at a time.  Expiry is
     normalised to today + row.dte because PortfolioRiskService computes DTE
@@ -69,12 +74,27 @@ def apply_portfolio_risk_controls(
         Parsed config.json dict.  Pass None to use risk-service defaults.
     scanner_top_n_per_entry_date:
         Hard override for the per-date candidate cap (ignores config).
+    regime_label_column:
+        Optional column name carrying a per-row regime label (GREEN/YELLOW/ORANGE).
+        When provided, the first non-null label within each entry-date group is
+        forwarded to pick selection so regime-aware allocator caps/floors apply.
+    return_diagnostics:
+        When True, also return per-row gate stages/reasons plus aggregate counts
+        describing which risk gate rejected each candidate.
     """
     out = pd.Series(-np.inf, index=df.index, dtype=float)
+    diagnostics = {
+        "gate_stage": pd.Series(pd.NA, index=df.index, dtype="string"),
+        "gate_reason": pd.Series(pd.NA, index=df.index, dtype="string"),
+        "gate_violation_codes": pd.Series(pd.NA, index=df.index, dtype="string"),
+        "directional_reduced": pd.Series(False, index=df.index, dtype=bool),
+        "portfolio_gamma_reduced": pd.Series(False, index=df.index, dtype=bool),
+    }
     if df.empty:
-        return out
+        return _controls_result(out, diagnostics, return_diagnostics)
 
-    svc = PortfolioRiskService({"risk_parameters": {"portfolio_gamma_risk": {}}})
+    config = scanner_config or {"risk_parameters": {"portfolio_gamma_risk": {}}}
+    svc = PortfolioRiskService(config)
     working = df.copy()
     working["_portfolio_entry_date"] = _entry_dates(working)
     scores = pd.to_numeric(working[score_column], errors="coerce")
@@ -88,25 +108,89 @@ def apply_portfolio_risk_controls(
             or _scanner_top_n(scanner_config)
             or max_candidates_per_entry_date
         )
+        diagnostics["gate_stage"].loc[ranked.index] = "candidate_build"
+
+        built_picks: list[dict[str, Any]] = []
+        built_index: set[Any] = set()
+        for idx, row in ranked.iterrows():
+            pick = _pick_from_scored_row(idx, row)
+            if pick is None:
+                diagnostics["gate_reason"].loc[idx] = "missing_required_trade_fields"
+                continue
+            built_picks.append(pick)
+            built_index.add(idx)
+
         if scanner_controls:
-            picks = [_pick_from_scored_row(idx, row) for idx, row in ranked.iterrows()]
-            picks = [p for p in picks if p is not None]
+            regime_label = _group_regime_label(ranked, regime_label_column)
             picks = select_top_picks_with_scanner_controls(
-                picks,
-                n=int(candidate_limit or len(picks)),
+                built_picks,
+                n=int(candidate_limit or len(built_picks)),
                 config=scanner_config or {},
+                regime_label=regime_label,
             )
         else:
             if max_candidates_per_entry_date is not None and max_candidates_per_entry_date > 0:
                 ranked = ranked.head(max_candidates_per_entry_date)
-            picks = [_pick_from_scored_row(idx, row) for idx, row in ranked.iterrows()]
-            picks = [p for p in picks if p is not None]
+                built_picks = [pick for pick in built_picks if pick["_row_index"] in set(ranked.index)]
+                built_index = {pick["_row_index"] for pick in built_picks}
+            picks = built_picks
 
-        accepted = svc.filter_picks(picks, [], account_capital=account_capital)
+        selected_index = {pick["_row_index"] for pick in picks}
+        rejected_by_selection = built_index - selected_index
+        if rejected_by_selection:
+            diagnostics["gate_stage"].loc[list(rejected_by_selection)] = "pick_selection"
+            diagnostics["gate_reason"].loc[list(rejected_by_selection)] = "scanner_controls"
+
+        directional_requested_qty = {
+            pick["_row_index"]: int(pick.get("quantity") or 1)
+            for pick in picks
+        }
+        directional_picks = apply_directional_exposure_caps(
+            picks,
+            [],
+            scanner_config or {},
+            account_capital,
+        )
+        directional_index = {pick["_row_index"] for pick in directional_picks}
+        rejected_by_directional = selected_index - directional_index
+        if rejected_by_directional:
+            diagnostics["gate_stage"].loc[list(rejected_by_directional)] = "directional_exposure"
+            diagnostics["gate_reason"].loc[list(rejected_by_directional)] = "side_exposure_cap"
+        for pick in directional_picks:
+            row_index = pick["_row_index"]
+            diagnostics["directional_reduced"].loc[row_index] = (
+                int(pick.get("quantity") or 1) < directional_requested_qty.get(row_index, 1)
+            )
+
+        gamma_requested_qty = {
+            pick["_row_index"]: int(pick.get("quantity") or 1)
+            for pick in directional_picks
+        }
+        gamma_rejections: list[dict[str, Any]] = []
+        accepted = svc.filter_picks(
+            directional_picks,
+            [],
+            account_capital=account_capital,
+            rejection_sink=gamma_rejections,
+        )
+        for rejected in gamma_rejections:
+            row_index = rejected.get("_row_index")
+            if row_index is None:
+                continue
+            diagnostics["gate_stage"].loc[row_index] = "portfolio_gamma"
+            diagnostics["gate_reason"].loc[row_index] = str(rejected.get("reject_reason") or "portfolio_gamma")
+            diagnostics["gate_violation_codes"].loc[row_index] = ",".join(
+                str(code) for code in rejected.get("portfolio_violation_codes", []) if code
+            ) or pd.NA
         for pick in accepted:
-            out.loc[pick["_row_index"]] = float(pick["_portfolio_score"])
+            row_index = pick["_row_index"]
+            out.loc[row_index] = float(pick["_portfolio_score"])
+            diagnostics["gate_stage"].loc[row_index] = "selected"
+            diagnostics["portfolio_gamma_reduced"].loc[row_index] = (
+                int(pick.get("quantity") or 1) < gamma_requested_qty.get(row_index, 1)
+            )
 
-    return out
+    return _controls_result(out, diagnostics, return_diagnostics)
 
 
 def load_scanner_config(path: str | None = "config.json") -> dict[str, Any]:
@@ -171,6 +255,16 @@ def _pick_from_scored_row(index: Any, row: pd.Series) -> dict[str, Any] | None:
     return pick
 
 
+def _group_regime_label(group: pd.DataFrame, column: str | None) -> str | None:
+    if not column or column not in group.columns:
+        return None
+    series = group[column].dropna()
+    if series.empty:
+        return None
+    label = str(series.iloc[0]).strip().upper()
+    return label or None
+
+
 def _scanner_top_n(config: dict[str, Any] | None) -> int | None:
     cfg = config or {}
     value = (
@@ -184,6 +278,33 @@ def _scanner_top_n(config: dict[str, Any] | None) -> int | None:
         return int(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _controls_result(
+    scores: pd.Series,
+    diagnostics: dict[str, pd.Series],
+    return_diagnostics: bool,
+) -> pd.Series | tuple[pd.Series, dict[str, Any]]:
+    if not return_diagnostics:
+        return scores
+    gate_stage = diagnostics["gate_stage"].dropna()
+    gate_codes = diagnostics["gate_violation_codes"].dropna()
+    payload: dict[str, Any] = dict(diagnostics)
+    payload["gate_stage_counts"] = dict(Counter(str(value) for value in gate_stage.tolist()))
+    payload["portfolio_gamma_violation_counts"] = dict(
+        Counter(
+            code
+            for codes in gate_codes.tolist()
+            for code in str(codes).split(",")
+            if code
+        )
+    )
+    payload["quantity_reduction_counts"] = {
+        "directional_exposure": int(diagnostics["directional_reduced"].sum()),
+        "portfolio_gamma": int(diagnostics["portfolio_gamma_reduced"].sum()),
+        "any": int((diagnostics["directional_reduced"] | diagnostics["portfolio_gamma_reduced"]).sum()),
+    }
+    return scores, payload
 
 
 def _float_value(value: Any) -> float | None:

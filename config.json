@@ -10,6 +10,15 @@
     "provider": "",
     "_provider_note": "Leave empty to use LivePaperInferenceProvider directly (recommended). Set to 'module:Class' only for a custom inference provider.",
     "registry_path": "artifacts/model_registry.json",
+    "strategy_rankers": {
+      "PCS": {
+        "artifact_path": "artifacts/models/xgboost_v006c_500r_dp28.json"
+      },
+      "CCS": {
+        "artifact_path": "artifacts/models/xgboost_v006c_500r_dp28.json"
+      }
+    },
+    "_strategy_rankers_note": "Optional side-specific rankers for strategy-aware inference. Each entry may supply artifact_path, or registry_path (+ optional model_id). The current bootstrap points both sides at the champion artifact until dedicated PCS/CCS models are trained.",
     "data_provider": "",
     "_data_provider_note": "Leave empty to use AlpacaProvider.from_env() (paper=alpaca.paper). Set to 'module:Class' for a custom market-data provider.",
     "top_n": 10,
@@ -36,7 +45,25 @@
 
   "_pick_selection_note": "model_ranked = pure top-N by model score, no per-strategy floors (right choice for ML scanner). equal_diversity = guaranteed floor per strategy (legacy default).",
   "pick_selection": {
-    "mode": "model_ranked"
+    "mode": "model_ranked",
+    "regime_allocation": {
+      "enabled": true,
+      "_note": "Optional regime-aware PCS/CCS allocation layered on top of model_ranked scoring. Caps prevent one side from crowding out the other; floors guarantee some representation for the favored side when the regime turns hostile.",
+      "regimes": {
+        "GREEN": {
+          "PCS": {"min_fraction": 0.50, "max_fraction": 1.00},
+          "CCS": {"max_fraction": 0.35}
+        },
+        "YELLOW": {
+          "PCS": {"min_fraction": 0.35, "max_fraction": 0.75},
+          "CCS": {"min_fraction": 0.10, "max_fraction": 0.55}
+        },
+        "ORANGE": {
+          "PCS": {"max_fraction": 0.35},
+          "CCS": {"min_fraction": 0.35, "max_fraction": 0.85}
+        }
+      }
+    }
   },
 
   "_legacy_scanner_note": "The following scanner/strategy settings are retained for legacy tests/reference and old risk/execution compatibility. They are not the north-star candidate-generation path.",
@@ -61,14 +88,17 @@
     "api_secret": "",
     "paper": true,
     "approve_mode": true,
-    "_approve_mode_note": "true=interactive approve gate | false/'auto'=auto-execute high-confidence picks | 'scan-only'=never execute",
-    "high_confidence_mode": false,
-    "auto_execute_prob": 0.80
+    "_approve_mode_note": "true=interactive approve gate | false/'auto'=auto-execute every pick that survives the ML pipeline | 'scan-only'=never execute",
+    "high_confidence_mode": true,
+    "_high_confidence_mode_note": "Informational runtime flag: live trade selection is enforced by the ML pipeline plus HFT Alpaca-only market data.",
+    "auto_execute_prob": 0.80,
+    "_auto_execute_prob_note": "Legacy no-op retained for compatibility. Auto mode no longer filters by prob_win; the ML pipeline is the gate."
   },
   "risk_parameters": {
     "max_delta": 0.1,
     "min_probability_of_expiry": 0.9,
     "auto_execute_prob": 0.80,
+    "_auto_execute_prob_note": "Legacy compatibility field only; live auto-mode does not use a probability threshold.",
     "stop_loss_multiplier": 2.0,
     "_stop_loss_note": "Legacy guard: close when current_mark > multiplier × entry_premium. Still active but the width-relative guard below is the primary trigger for spreads.",
     "stop_loss_max_loss_pct": 0.80,

@@ -25,6 +25,21 @@ def test_enabled_model_scanner_without_provider_returns_no_picks():
     assert scanner.get_top_picks(["SPY"], n=5) == []
 
 
+def test_live_paper_inference_provider_rejects_non_alpaca_data_provider_in_hft_mode():
+    try:
+        LivePaperInferenceProvider(
+            {
+                "hft_mode": True,
+                "ml_scanner": {
+                    "data_provider": "custom.module:Provider",
+                },
+            }
+        )
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "HFT mode requires ml_scanner.data_provider to be Alpaca-backed" in str(exc)
+
+
 def test_model_scanner_normalizes_provider_candidates():
     def provider(ticker_list, n, config):
         return [
@@ -114,7 +129,14 @@ class WiderSpreadLiveProvider(FakeLiveProvider):
 
 
 def _champion_registry(tmp_path):
-    artifact_path = tmp_path / "linear.json"
+    artifact_path = _linear_ranker_artifact(tmp_path, "linear.json", option_entry_price_coef=10.0)
+    registry = register_model_artifact(load_registry(tmp_path / "registry.json"), artifact_path, model_id="champion")
+    registry = promote_model(registry, "champion")
+    return save_registry(registry, tmp_path / "registry.json")
+
+
+def _linear_ranker_artifact(tmp_path, filename: str, *, option_entry_price_coef: float, intercept: float = 0.0):
+    artifact_path = tmp_path / filename
     artifact_path.write_text(
         json.dumps(
             {
@@ -131,9 +153,9 @@ def _champion_registry(tmp_path):
                     "underlying_close": 100.0,
                     "strike_distance_pct": 0.0,
                 },
-                "intercept": 0.0,
+                "intercept": intercept,
                 "coefficients": {
-                    "option_entry_price": 10.0,
+                    "option_entry_price": option_entry_price_coef,
                     "dte": 0.0,
                     "underlying_close": 0.0,
                     "strike_distance_pct": 0.0,
@@ -144,9 +166,7 @@ def _champion_registry(tmp_path):
         + "\n",
         encoding="utf-8",
     )
-    registry = register_model_artifact(load_registry(tmp_path / "registry.json"), artifact_path, model_id="champion")
-    registry = promote_model(registry, "champion")
-    return save_registry(registry, tmp_path / "registry.json")
+    return artifact_path
 
 
 def test_live_paper_inference_provider_scores_current_spreads_from_champion(tmp_path):
@@ -203,6 +223,80 @@ def test_live_paper_inference_provider_can_emit_multiple_spread_widths(tmp_path)
     picks = inference.get_top_picks(["SPY"], n=10)
 
     assert {pick["width"] for pick in picks if pick["strategy"] == "PCS"} == {5.0, 10.0}
+
+
+def test_live_paper_inference_provider_supports_strategy_specific_rankers(tmp_path):
+    provider = FakeLiveProvider()
+    pcs_artifact = _linear_ranker_artifact(tmp_path, "pcs.json", option_entry_price_coef=10.0)
+    ccs_artifact = _linear_ranker_artifact(tmp_path, "ccs.json", option_entry_price_coef=20.0)
+
+    inference = LivePaperInferenceProvider(
+        {
+            "ml_scanner": {
+                "registry_path": str(tmp_path / "missing-registry.json"),
+                "strategy_rankers": {
+                    "PCS": {"artifact_path": str(pcs_artifact)},
+                    "CCS": {"artifact_path": str(ccs_artifact)},
+                },
+                "min_dte": 7,
+                "max_dte": 45,
+                "vix_symbol": "I:VIX",
+            },
+            "strategies": {
+                "put_credit_spread": {"enabled": True, "strike_width": 5, "min_net_credit": 0.10},
+                "call_credit_spread": {"enabled": True, "strike_width": 5, "min_net_credit": 0.10},
+            },
+        },
+        provider=provider,
+        now_fn=lambda: provider.now,
+    )
+
+    picks = inference.get_top_picks(["SPY"], n=5)
+
+    assert [pick["strategy"] for pick in picks] == ["CCS", "PCS"]
+    assert picks[0]["ranker_strategy"] == "CCS"
+    assert picks[1]["ranker_strategy"] == "PCS"
+    assert picks[0]["model_artifact_path"] == str(ccs_artifact)
+    assert picks[1]["model_artifact_path"] == str(pcs_artifact)
+
+
+def test_live_paper_inference_provider_applies_regime_allocation_to_ranked_picks(tmp_path):
+    provider = WiderSpreadLiveProvider()
+    registry_path = _champion_registry(tmp_path)
+    inference = LivePaperInferenceProvider(
+        {
+            "ml_scanner": {
+                "registry_path": str(registry_path),
+                "min_dte": 7,
+                "max_dte": 45,
+                "vix_symbol": "I:VIX",
+            },
+            "pick_selection": {
+                "mode": "model_ranked",
+                "regime_allocation": {
+                    "enabled": True,
+                    "regimes": {
+                        "ORANGE": {
+                            "PCS": {"max_fraction": 0.5},
+                            "CCS": {"min_fraction": 0.5},
+                        }
+                    },
+                },
+            },
+            "strategies": {
+                "put_credit_spread": {"enabled": True, "spread_widths": [5, 10], "min_net_credit": 0.10},
+                "call_credit_spread": {"enabled": True, "spread_widths": [5, 10], "min_net_credit": 0.10},
+            },
+        },
+        provider=provider,
+        now_fn=lambda: provider.now,
+    )
+    inference.set_runtime_regime("ORANGE")
+
+    picks = inference.get_top_picks(["SPY"], n=2)
+
+    assert len(picks) == 2
+    assert {pick["strategy"] for pick in picks} == {"PCS", "CCS"}
 
 
 def _large_loss_classifier_artifact(tmp_path, always_veto: bool = False):

@@ -52,6 +52,7 @@ import os
 import sys
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 from src.database import TradeDatabase
@@ -169,7 +170,7 @@ def _parse_args() -> argparse.Namespace:
         help=(
             'Execution mode: '
             '"approve" (default) — show plan, ask for approval, execute approved picks; '
-            '"auto" — execute picks above auto_execute_prob without prompting; '
+            '"auto" — execute all picks that survive the ML pipeline without prompting; '
             '"scan-only" — print model-ranked plan and save to data/pending_picks.json, never execute.'
         ),
     )
@@ -332,7 +333,8 @@ def _build_scanner(config: dict):
     """Return the ML scanner instance (LivePaperInferenceProvider or ModelScanner fallback).
 
     Loads the champion model from the registry and scores short-option candidates.
-    Falls back to a configured ml_scanner.provider if one is set in config.
+    Honors a configured ml_scanner.provider only for legacy/backward-compatible
+    call sites; the live agent runtime validator rejects that override.
     Automatically injects pick_selection.mode=model_ranked unless already set.
     """
     # Default pick_selection to model_ranked unless overridden
@@ -366,6 +368,94 @@ def _build_scanner(config: dict):
         )
         from src.model_scanner import ModelScanner
         return ModelScanner({'ml_scanner': {'enabled': False}})
+
+
+def _validate_ml_hft_runtime(config: dict) -> None:
+    """
+    Refuse to run the live candidate pipeline if it drifts away from the
+    intended ML-only + Alpaca-backed HFT configuration.
+    """
+    ml_cfg = config.get('ml_scanner', {}) if isinstance(config.get('ml_scanner'), dict) else {}
+    pick_cfg = config.get('pick_selection', {}) if isinstance(config.get('pick_selection'), dict) else {}
+
+    errors: list[str] = []
+
+    if not ml_cfg.get('enabled', False):
+        errors.append("`ml_scanner.enabled` must be true.")
+
+    if str(pick_cfg.get('mode', 'model_ranked')) != 'model_ranked':
+        errors.append("`pick_selection.mode` must be `model_ranked` so trade selection stays model-ranked.")
+
+    explicit_provider = str(ml_cfg.get('provider') or '').strip()
+    if explicit_provider:
+        errors.append(
+            "`ml_scanner.provider` must be empty at runtime; live picks must come from "
+            "`LivePaperInferenceProvider`, not a custom provider override."
+        )
+
+    explicit_data_provider = str(ml_cfg.get('data_provider') or '').strip()
+    allowed_hft_data_providers = {
+        '',
+        'ml.providers:AlpacaProvider',
+        'ml.providers.alpaca:AlpacaProvider',
+    }
+    if explicit_data_provider not in allowed_hft_data_providers:
+        errors.append(
+            "`ml_scanner.data_provider` must be empty or point to `AlpacaProvider` in HFT mode."
+        )
+
+    if not bool(config.get('hft_mode', False)):
+        errors.append("`hft_mode` must be true.")
+
+    registry_path = Path(str(ml_cfg.get('registry_path') or 'artifacts/model_registry.json'))
+    explicit_artifact_path = str(ml_cfg.get('artifact_path') or '').strip()
+    strategy_rankers = ml_cfg.get('strategy_rankers') if isinstance(ml_cfg.get('strategy_rankers'), dict) else {}
+    has_strategy_rankers = bool(strategy_rankers)
+    if not registry_path.exists() and not explicit_artifact_path and not has_strategy_rankers:
+        errors.append(
+            f"Champion model registry not found: `{registry_path}` and no explicit artifact/strategy rankers were configured."
+        )
+    if explicit_artifact_path and not Path(explicit_artifact_path).exists():
+        errors.append(f"Champion model artifact not found: `{explicit_artifact_path}`.")
+    for strategy_name, source in strategy_rankers.items():
+        label = f"ml_scanner.strategy_rankers.{strategy_name}"
+        if isinstance(source, str):
+            if not Path(source).exists():
+                errors.append(f"{label} artifact not found: `{source}`.")
+            continue
+        if not isinstance(source, dict):
+            errors.append(f"{label} must be a path string or config object.")
+            continue
+        artifact_path = str(source.get('artifact_path') or '').strip()
+        strategy_registry = str(source.get('registry_path') or '').strip()
+        if artifact_path:
+            if not Path(artifact_path).exists():
+                errors.append(f"{label}.artifact_path not found: `{artifact_path}`.")
+            continue
+        if strategy_registry:
+            if not Path(strategy_registry).exists():
+                errors.append(f"{label}.registry_path not found: `{strategy_registry}`.")
+            continue
+        errors.append(f"{label} must set artifact_path or registry_path.")
+
+    large_loss_path = str(ml_cfg.get('large_loss_classifier_path') or '').strip()
+    if not large_loss_path:
+        errors.append("`ml_scanner.large_loss_classifier_path` must be set.")
+    elif not Path(large_loss_path).exists():
+        errors.append(f"Large-loss classifier artifact not found: `{large_loss_path}`.")
+
+    from src.alpaca_data import make_alpaca_data_client
+    if make_alpaca_data_client(config) is None:
+        errors.append(
+            "Alpaca credentials are required for HFT mode; set `ALPACA_API_KEY` / "
+            "`ALPACA_API_SECRET` or populate `config.json`."
+        )
+
+    if errors:
+        detail = "\n - ".join(errors)
+        raise ValueError(
+            "Runtime configuration is not ML-only / HFT-strict:\n - " + detail
+        )
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -414,19 +504,7 @@ def _run_once(args, headless: bool = False) -> None:
         log.warning("[agent] Corrected %d open position(s) with negative entry "
                     "premium (Alpaca MLEG sign convention).", _fixed)
 
-    scanner  = _build_scanner(config)
     executor = AlpacaExecutor(args.config)
-
-    # ── Fetch current VIX for account-level regime controls ───────────────────
-    current_vix: Optional[float] = None
-    vix_cfg = config.get('risk_parameters', {}).get('vix_filter', {})
-    if vix_cfg.get('enabled', False):
-        _vix = fetch_vix(config)
-        if _vix is not None:
-            current_vix = _vix
-            log.info("VIX=%0.1f captured for regime/risk controls.", current_vix)
-        else:
-            log.warning("Could not fetch VIX level from any source — VIX-based regime controls will not apply.")
 
     # ── Settle expired positions first (pure bookkeeping, no orders) ─────────
     monitor  = PositionMonitor(db, executor, config)
@@ -438,6 +516,20 @@ def _run_once(args, headless: bool = False) -> None:
         run_close_command(args, db, executor, monitor, dry_run)
         # run_close_command always calls sys.exit(); this line is not reached.
         return
+
+    _validate_ml_hft_runtime(config)
+    scanner = _build_scanner(config)
+
+    # ── Fetch current VIX for account-level regime controls ───────────────────
+    current_vix: Optional[float] = None
+    vix_cfg = config.get('risk_parameters', {}).get('vix_filter', {})
+    if vix_cfg.get('enabled', False):
+        _vix = fetch_vix(config)
+        if _vix is not None:
+            current_vix = _vix
+            log.info("VIX=%0.1f captured for regime/risk controls.", current_vix)
+        else:
+            log.warning("Could not fetch VIX level from any source — VIX-based regime controls will not apply.")
 
     monitor.settle_expired()
 
@@ -471,6 +563,8 @@ def _run_once(args, headless: bool = False) -> None:
         )
 
     regime = evaluate_regime_filter(config, current_vix=current_vix)
+    if hasattr(scanner, 'set_runtime_regime'):
+        scanner.set_runtime_regime(regime)
     if regime.pause_new_trades:
         log.warning(
             "Regime filter is RED — skipping new trades this run. Existing "

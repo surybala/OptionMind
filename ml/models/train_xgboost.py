@@ -238,6 +238,7 @@ def train_xgboost(
     train_df_sub = clean.iloc[:val_split_index]
     if high_vol_oversample_factor > 1:
         train_df_sub = _oversample_high_vol(train_df_sub, high_vol_oversample_factor)
+    if high_vol_oversample_factor > 1:
         y_sub_oversampled = train_df_sub[target_column].to_numpy(dtype=float)
         y_train_sub = _transform_target(y_sub_oversampled, loss)
     else:
@@ -600,7 +601,6 @@ def _oversample_high_vol(df: pd.DataFrame, factor: int) -> pd.DataFrame:
         flush=True,
     )
     return replicated
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

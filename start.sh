@@ -40,8 +40,8 @@ echo "  agent.py     PID $! → logs/agent.log (rotated at 10 MB, 5 backups)"
 nohup python monitor.py --daemon $LIVE_FLAG --log-file logs/monitor.log > /dev/null 2>&1 &
 echo "  monitor.py   PID $! → logs/monitor.log (rotated at 10 MB, 5 backups)"
 
-# Dashboard — browse trades at http://localhost:5000
-nohup python dashboard.py --daemon --log-file logs/dashboard.log > /dev/null 2>&1 &
+# Dashboard — browse trades at http://localhost:5050
+nohup python dashboard.py --daemon --port 5050 --log-file logs/dashboard.log > /dev/null 2>&1 &
 echo "  dashboard.py PID $! → logs/dashboard.log (rotated at 10 MB, 5 backups)"
 
 echo ""

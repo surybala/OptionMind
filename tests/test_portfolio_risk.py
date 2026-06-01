@@ -102,10 +102,14 @@ def test_portfolio_gamma_gate_reduces_quantity_to_stress_budget():
 
 def test_portfolio_gamma_gate_rejects_when_one_contract_breaks_limit():
     svc = _svc(_cfg(max_stress_loss_pct=0.00001, max_gamma_loss_to_daily_theta=100.0))
+    rejected = []
 
-    filtered = svc.filter_picks([_pcs_pick(quantity=1)], [], account_capital=50_000)
+    filtered = svc.filter_picks([_pcs_pick(quantity=1)], [], account_capital=50_000, rejection_sink=rejected)
 
     assert filtered == []
+    assert len(rejected) == 1
+    assert rejected[0]['risk_gate'] == 'Portfolio gamma risk'
+    assert 'worst_stress' in rejected[0]['portfolio_violation_codes']
 
 
 def test_near_expiry_cap_blocks_short_gamma_concentration():

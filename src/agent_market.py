@@ -40,9 +40,11 @@ def fetch_vix(config: dict) -> Optional[float]:
       1. File cache  (data/vix_cache.json, TTL=4 h) — zero network calls
       2. Alpaca data API  — 'VIX' symbol (no API key for free tier, but works
                             when Alpaca credentials are configured)
-      3. yfinance strategy A — Ticker.fast_info  (lighter request path)
-      4. yfinance strategy B — Ticker.history(period='5d')
-      5. yfinance strategy C — yf.download()  (different HTTP path, less throttled)
+      3. yfinance strategy A — Ticker.fast_info  (lighter request path,
+                            non-HFT only)
+      4. yfinance strategy B — Ticker.history(period='5d') (non-HFT only)
+      5. yfinance strategy C — yf.download()  (different HTTP path, less
+                            throttled, non-HFT only)
       6. Stale cache  (up to 24 h old) — better than skipping the VIX filter
          entirely when all live sources are temporarily rate-limited
 
@@ -69,6 +71,8 @@ def fetch_vix(config: dict) -> Optional[float]:
         except Exception:
             pass
 
+    hft_mode = bool(config.get('hft_mode', False))
+
     # ── 2–5. Live sources ──────────────────────────────────────────────────────
     vix: Optional[float] = None
 
@@ -90,8 +94,10 @@ def fetch_vix(config: dict) -> Optional[float]:
     except Exception:
         pass
 
+    # In HFT mode the regime stack stays Alpaca-only. Reuse stale cache as the
+    # last resort rather than degrading to yfinance.
     # Source 3: yfinance fast_info (lighter endpoint, separate rate-limit bucket)
-    if vix is None:
+    if vix is None and not hft_mode:
         try:
             import yfinance as _yf
             _fi = _yf.Ticker('^VIX').fast_info
@@ -103,7 +109,7 @@ def fetch_vix(config: dict) -> Optional[float]:
             pass
 
     # Source 4: yfinance history with extended period
-    if vix is None:
+    if vix is None and not hft_mode:
         try:
             import yfinance as _yf
             _h = _yf.Ticker('^VIX').history(period='5d')
@@ -114,7 +120,7 @@ def fetch_vix(config: dict) -> Optional[float]:
             pass
 
     # Source 5: yf.download — hits a different HTTP endpoint, less throttled
-    if vix is None:
+    if vix is None and not hft_mode:
         try:
             import yfinance as _yf
             _dl = _yf.download('^VIX', period='5d', progress=False, auto_adjust=True)
@@ -154,8 +160,30 @@ def fetch_vix(config: dict) -> Optional[float]:
 
 # ── Regime evaluation ────────────────────────────────────────────────────────
 
-def _fetch_regime_history(symbol: str, period: str = '90d') -> list[float]:
-    """Fetch adjusted closes for regime classification; empty list on failure."""
+def _fetch_regime_history(
+    symbol: str,
+    period: str = '90d',
+    config: dict | None = None,
+) -> list[float]:
+    """Fetch closes for regime classification; Alpaca-only when HFT is enabled."""
+    cfg = config or {}
+    if bool(cfg.get('hft_mode', False)):
+        try:
+            from src.alpaca_data import make_alpaca_data_client
+
+            client = make_alpaca_data_client(cfg)
+            if client is None:
+                return []
+            hist_symbol = 'VIX' if symbol == '^VIX' else symbol
+            days = _history_days_from_period(period)
+            series_map = client.get_bulk_history([hist_symbol], days=days)
+            series = series_map.get(hist_symbol)
+            if series is None:
+                return []
+            return [float(x) for x in series.dropna().tolist()]
+        except Exception:
+            return []
+
     try:
         import yfinance as yf
         hist = yf.Ticker(symbol).history(period=period, auto_adjust=True)
@@ -169,6 +197,16 @@ def _fetch_regime_history(symbol: str, period: str = '90d') -> list[float]:
         return []
 
 
+def _history_days_from_period(period: str) -> int:
+    raw = str(period).strip().lower()
+    if raw.endswith('d'):
+        try:
+            return max(5, int(raw[:-1]) + 7)
+        except ValueError:
+            return 97
+    return 97
+
+
 def evaluate_regime_filter(
     config: dict,
     current_vix: Optional[float] = None,
@@ -180,8 +218,8 @@ def evaluate_regime_filter(
 
     trend_cfg = cfg.get('trend', {})
     trend_symbol = str(trend_cfg.get('symbol', 'SPY') or 'SPY')
-    vix_history = _fetch_regime_history('^VIX')
-    spy_history = _fetch_regime_history(trend_symbol)
+    vix_history = _fetch_regime_history('^VIX', config=config)
+    spy_history = _fetch_regime_history(trend_symbol, config=config)
     result = svc.evaluate(
         vix_current=current_vix,
         vix_history=vix_history,

@@ -509,8 +509,8 @@ nohup python agent.py --daemon --mode auto --live >> logs/agent.log 2>&1 &
 # Position monitor — stop-loss checks every 15 min during market hours
 nohup python monitor.py --daemon --live >> logs/monitor.log 2>&1 &
 
-# Dashboard — browse trades at http://localhost:5000
-nohup python dashboard.py --daemon >> logs/dashboard.log 2>&1 &
+# Dashboard — browse trades at http://localhost:5050
+nohup python dashboard.py --daemon --port 5050 >> logs/dashboard.log 2>&1 &
 
 echo "All three processes started. Logs in logs/"
 ```
@@ -523,7 +523,7 @@ source .venv/bin/activate
 # Start each in its own named screen session
 screen -dmS agent   bash -c "source .venv/bin/activate && python agent.py --daemon --mode auto --live"
 screen -dmS monitor bash -c "source .venv/bin/activate && python monitor.py --daemon --live"
-screen -dmS dash    bash -c "source .venv/bin/activate && python dashboard.py --daemon"
+screen -dmS dash    bash -c "source .venv/bin/activate && python dashboard.py --daemon --port 5050"
 
 # Attach to a session to check output
 screen -r agent
@@ -538,7 +538,7 @@ screen -ls
 # Start all three as background jobs
 $agent   = Start-Job { cd $using:PWD; .\.venv\Scripts\python.exe agent.py --daemon --mode auto --live 2>&1 | Tee-Object logs\agent.log }
 $monitor = Start-Job { cd $using:PWD; .\.venv\Scripts\python.exe monitor.py --daemon --live 2>&1 | Tee-Object logs\monitor.log }
-$dash    = Start-Job { cd $using:PWD; .\.venv\Scripts\python.exe dashboard.py --daemon 2>&1 | Tee-Object logs\dashboard.log }
+$dash    = Start-Job { cd $using:PWD; .\.venv\Scripts\python.exe dashboard.py --daemon --port 5050 2>&1 | Tee-Object logs\dashboard.log }
 
 # Check status
 Get-Job
@@ -959,7 +959,7 @@ A local web dashboard lets you browse, filter, and analyse every trade stored in
 python dashboard.py
 ```
 
-Then open **http://localhost:5000** in your browser.
+Then open **http://localhost:5050** in your browser.
 
 ### Dashboard Options
 

@@ -6,7 +6,7 @@ stored in data/trades.db.
 
 Usage
 -----
-    python dashboard.py                   # opens on http://localhost:5000
+    python dashboard.py                   # opens on http://localhost:5050
     python dashboard.py --port 8080       # custom port
     python dashboard.py --db data/trades.db
 
@@ -1081,7 +1081,7 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="OptionMind Dashboard — view and analyse your trade history"
     )
-    p.add_argument("--port",   type=int, default=5000,           help="Port to listen on (default: 5000)")
+    p.add_argument("--port",   type=int, default=5050,           help="Port to listen on (default: 5050)")
     p.add_argument("--host",   default="127.0.0.1",              help="Host to bind to (default: 127.0.0.1)")
     p.add_argument("--db",     default="data/trades.db",         help="Path to the SQLite trades database")
     p.add_argument("--config", default="config.json",            help="Path to config.json (for close orders)")
