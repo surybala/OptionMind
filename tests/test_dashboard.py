@@ -157,8 +157,19 @@ def test_scanner_picks_endpoint_returns_latest_audit(dashboard_client):
         json.dump(
             {
                 "generated_at": "2026-05-05T09:30:00",
-                "selected": [{"symbol": "SPY", "mispricing_score": 0.1234}],
-                "rejected": [{"symbol": "QQQ", "reject_reason": "Portfolio gamma risk"}],
+                "selected": [{
+                    "symbol": "SPY",
+                    "mispricing_score": 0.1234,
+                    "ranking_reason": "score=0.123400, dte=12, otm=4.20%",
+                    "large_loss_prob": 0.08,
+                    "stop_loss_prob": 0.11,
+                }],
+                "rejected": [{
+                    "symbol": "QQQ",
+                    "reject_reason": "Portfolio gamma risk",
+                    "ranking_reason": "score=0.100000, dte=18, otm=2.10%",
+                    "stop_loss_prob": 0.19,
+                }],
             },
             fh,
         )
@@ -169,6 +180,8 @@ def test_scanner_picks_endpoint_returns_latest_audit(dashboard_client):
     data = res.get_json()
     assert data["selected"][0]["symbol"] == "SPY"
     assert data["selected"][0]["mispricing_score"] == pytest.approx(0.1234)
+    assert "otm=4.20%" in data["selected"][0]["ranking_reason"]
+    assert data["selected"][0]["stop_loss_prob"] == pytest.approx(0.11)
     assert data["rejected"][0]["reject_reason"] == "Portfolio gamma risk"
 
 

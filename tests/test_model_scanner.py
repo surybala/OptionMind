@@ -81,6 +81,26 @@ def test_model_scanner_filters_by_min_score():
     assert [pick["symbol"] for pick in picks] == ["QQQ"]
 
 
+def test_model_scanner_prefers_full_ranked_candidates_before_top_n_selection():
+    class Provider:
+        def get_ranked_candidates(self, ticker_list):
+            return [
+                {"symbol": "SPY", "strategy": "PCS", "model_score": 0.90},
+                {"symbol": "QQQ", "strategy": "PCS", "model_score": 0.80},
+                {"symbol": "IWM", "strategy": "PCS", "model_score": 0.70},
+            ]
+
+        def get_top_picks(self, ticker_list, n=10):
+            raise AssertionError("ModelScanner should prefer get_ranked_candidates() when available")
+
+    scanner = ModelScanner({"ml_scanner": {"enabled": True}, "pick_selection": {"mode": "model_ranked"}})
+    scanner.model_provider = Provider()
+
+    picks = scanner.get_top_picks(["SPY", "QQQ", "IWM"], n=2)
+
+    assert [pick["symbol"] for pick in picks] == ["SPY", "QQQ"]
+
+
 class FakeLiveProvider:
     def __init__(self):
         self.now = datetime(2026, 5, 24, 16, 0, tzinfo=UTC)
@@ -170,6 +190,16 @@ class SlowConcurrentLiveProvider(FakeLiveProvider):
         finally:
             with self._lock:
                 self._active -= 1
+
+
+class CountingClassifier:
+    def __init__(self, score: float = 0.10):
+        self.score = score
+        self.rows_scored = 0
+
+    def score_rows(self, rows):
+        self.rows_scored += len(rows)
+        return [self.score for _ in rows]
 
 
 def _champion_registry(tmp_path):
@@ -272,6 +302,37 @@ def test_live_paper_inference_provider_can_emit_multiple_spread_widths(tmp_path)
     picks = inference.get_top_picks(["SPY"], n=10)
 
     assert {pick["width"] for pick in picks if pick["strategy"] == "PCS"} == {5.0, 10.0}
+
+
+def test_live_paper_inference_provider_applies_ml_vetoes_before_top_n(tmp_path):
+    provider = WiderSpreadLiveProvider()
+    registry_path = _champion_registry(tmp_path)
+    inference = LivePaperInferenceProvider(
+        {
+            "ml_scanner": {
+                "registry_path": str(registry_path),
+                "min_dte": 7,
+                "max_dte": 45,
+                "vix_symbol": "I:VIX",
+            },
+            "pick_selection": {"mode": "model_ranked"},
+            "strategies": {
+                "put_credit_spread": {"enabled": True, "spread_widths": [5, 10], "min_net_credit": 0.10},
+                "call_credit_spread": {"enabled": True, "spread_widths": [5, 10], "min_net_credit": 0.10},
+            },
+        },
+        provider=provider,
+        now_fn=lambda: provider.now,
+    )
+    spy = CountingClassifier()
+    inference.large_loss_model = spy
+    inference.stop_loss_model = spy
+
+    picks = inference.get_top_picks(["SPY"], n=1)
+
+    assert len(picks) == 1
+    assert inference._last_scan_stats["spread_candidates_built"] > 1
+    assert spy.rows_scored == inference._last_scan_stats["spread_candidates_built"] * 2
 
 
 def test_live_paper_inference_provider_respects_max_dte_cap(tmp_path):

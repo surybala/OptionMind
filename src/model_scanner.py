@@ -95,6 +95,8 @@ class ModelScanner:
 
     def _call_provider(self, ticker_list: list[str], n: int) -> list[dict]:
         provider = self.model_provider
+        if hasattr(provider, "get_ranked_candidates"):
+            return list(provider.get_ranked_candidates(ticker_list))
         if hasattr(provider, "get_top_picks"):
             return list(provider.get_top_picks(ticker_list, n=n))
         if callable(provider):
@@ -172,11 +174,24 @@ class LivePaperInferenceProvider:
             self.scanner_config.get("stop_loss_veto_threshold", 0.70)
         )
         self._runtime_regime_label: str | None = None
+        self._last_scan_stats: dict[str, int] = {}
         self._load_champion()
         self._load_large_loss_classifier()
         self._load_stop_loss_classifier()
 
     def get_top_picks(self, ticker_list: list[str], n: int = 10) -> list[dict]:
+        picks = self.get_ranked_candidates(ticker_list)
+        selected = select_top_picks_with_scanner_controls(
+            picks,
+            n=n,
+            config=self.config,
+            regime_label=self._runtime_regime_label,
+        )
+        self._log_scan_summary(self._last_scan_stats, generated=len(picks), selected=selected)
+        self._log_selected_pick_details(selected)
+        return selected
+
+    def get_ranked_candidates(self, ticker_list: list[str]) -> list[dict]:
         if not self._has_ranker_models():
             _log.warning("ML scanner inference provider has no ranker model loaded.")
             return []
@@ -205,6 +220,7 @@ class LivePaperInferenceProvider:
             "large_loss_vetoes": 0,
             "stop_loss_vetoes": 0,
         }
+        self._last_scan_stats = scan_stats
         stock_symbols = _unique([*underlyings, market_symbol, vix_symbol])
         stock_bars = self.provider.get_stock_bars(
             stock_symbols,
@@ -254,15 +270,7 @@ class LivePaperInferenceProvider:
             scan_stats["short_contracts_scored"] += len(scored)
             picks.extend(self._spread_picks(underlying, scored, now, scan_stats))
 
-        selected = select_top_picks_with_scanner_controls(
-            picks,
-            n=n,
-            config=self.config,
-            regime_label=self._runtime_regime_label,
-        )
-        self._log_scan_summary(scan_stats, generated=len(picks), selected=selected)
-        self._log_selected_pick_details(selected)
-        return selected
+        return picks
 
     def _fetch_option_chains(
         self,

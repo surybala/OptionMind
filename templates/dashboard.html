@@ -751,10 +751,11 @@ td { padding: 10px 12px; vertical-align: middle; white-space: nowrap; }
               <th>Prob</th>
               <th>ROI</th>
               <th title="Premium-richness score from scanner data; not a filter">Mispricing</th>
+              <th>Why Ranked</th>
             </tr>
           </thead>
           <tbody id="scannerSelectedTbody">
-            <tr><td colspan="9" class="loading">Refresh scanner picks to load latest scan.</td></tr>
+            <tr><td colspan="10" class="loading">Refresh scanner picks to load latest scan.</td></tr>
           </tbody>
         </table>
       </div>
@@ -778,10 +779,11 @@ td { padding: 10px 12px; vertical-align: middle; white-space: nowrap; }
               <th>Mispricing</th>
               <th>Filtered By</th>
               <th>Reason</th>
+              <th>Why Ranked</th>
             </tr>
           </thead>
           <tbody id="scannerRejectedTbody">
-            <tr><td colspan="9" class="loading">Refresh scanner picks to load latest risk rejections.</td></tr>
+            <tr><td colspan="10" class="loading">Refresh scanner picks to load latest risk rejections.</td></tr>
           </tbody>
         </table>
       </div>
@@ -1521,6 +1523,22 @@ function fmtRoi(v) {
   return (n * 100).toFixed(1) + '%';
 }
 
+function fmtScannerWhy(row) {
+  const parts = [];
+  if (row.ranking_reason) parts.push(`<div>${row.ranking_reason}</div>`);
+  const riskParts = [];
+  if (row.large_loss_prob !== null && row.large_loss_prob !== undefined && row.large_loss_prob !== '') {
+    riskParts.push(`LL ${fmtProb(row.large_loss_prob)}`);
+  }
+  if (row.stop_loss_prob !== null && row.stop_loss_prob !== undefined && row.stop_loss_prob !== '') {
+    riskParts.push(`SL ${fmtProb(row.stop_loss_prob)}`);
+  }
+  if (riskParts.length) {
+    parts.push(`<div style="color:var(--text-muted);font-size:0.76rem">${riskParts.join(' • ')}</div>`);
+  }
+  return parts.length ? parts.join('') : '—';
+}
+
 function renderScannerPicks(data) {
   const selected = data.selected || [];
   const rejected = data.rejected || [];
@@ -1550,8 +1568,9 @@ function renderScannerPicks(data) {
             <td>${fmtProb(row.prob_win)}</td>
             <td>${fmtRoi(row.roi)}</td>
             <td class="acc" style="font-weight:700">${fmt(row.mispricing_score, '', '', 4)}</td>
+            <td style="min-width:260px;white-space:normal">${fmtScannerWhy(row)}</td>
           </tr>`).join('')
-      : '<tr><td colspan="9"><div class="empty-state"><p>No picked candidates in the latest scanner audit.</p></div></td></tr>';
+      : '<tr><td colspan="10"><div class="empty-state"><p>No picked candidates in the latest scanner audit.</p></div></td></tr>';
   }
 
   const rejectedBody = $('scannerRejectedTbody');
@@ -1568,8 +1587,9 @@ function renderScannerPicks(data) {
             <td class="acc" style="font-weight:700">${fmt(row.mispricing_score, '', '', 4)}</td>
             <td>${row.filtered_stage || '—'}</td>
             <td style="color:var(--text-muted);white-space:normal;min-width:220px">${row.reject_reason || '—'}</td>
+            <td style="min-width:260px;white-space:normal">${fmtScannerWhy(row)}</td>
           </tr>`).join('')
-      : '<tr><td colspan="9"><div class="empty-state"><p>No high-scoring risk rejections in the latest scanner audit.</p></div></td></tr>';
+      : '<tr><td colspan="10"><div class="empty-state"><p>No high-scoring risk rejections in the latest scanner audit.</p></div></td></tr>';
   }
 }
 
