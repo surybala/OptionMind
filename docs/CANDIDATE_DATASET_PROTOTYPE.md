@@ -86,6 +86,8 @@ The CLI writes partitioned Parquet rows and a manifest to `artifacts/`:
   --dividend-provider massive \
   --economic-calendar fred \
   --volatility-provider fred \
+  --stock-timeframe 1Day \
+  --option-timeframe 1Day \
   --min-output-rows 100000 \
   --dataset-version candidate_rows_massive_v001 \
   --output-dir artifacts/datasets
@@ -121,6 +123,8 @@ Useful controls:
 - `--max-rows-per-underlying`: cap output rows for bounded experiments.
 - `--max-abs-strike-distance-pct`: keep strikes near the reference underlying price.
 - `--sample-every-n-bars`: downsample dense intraday/minute entry bars.
+- `--stock-timeframe`: underlying bar timeframe for feature history. Keep `1Day` for the current feature set unless you are deliberately running an intraday experiment.
+- `--option-timeframe`: option bar timeframe used for entry-path sampling and labels. Use `1Min` for minute-seeded candidate corpora.
 - `--stock-lookback-days`: stock-bar lookback used for returns, volatility, and SMA features, default `60`.
 - `--market-regime-symbol`: benchmark symbol used for broad-market regime features, default `SPY`.
 - `--min-forward-bars`: skip entries without enough future path to label.

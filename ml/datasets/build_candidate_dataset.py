@@ -56,6 +56,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-option-entry-volume", type=int, default=1, help="Skip entry bars with volume below this threshold (zero-volume stale quote filter).")
     parser.add_argument("--sample-every-n-bars", type=int, default=1)
     parser.add_argument("--stock-lookback-days", type=int, default=60)
+    parser.add_argument(
+        "--stock-timeframe",
+        default="1Day",
+        help=(
+            "Underlying bar timeframe used for stock/ETF history features. "
+            "Keep this at 1Day for the current feature set unless you are deliberately "
+            "building an intraday experiment."
+        ),
+    )
+    parser.add_argument(
+        "--option-timeframe",
+        default="1Day",
+        help=(
+            "Option bar timeframe used for entry-path sampling and forward labels. "
+            "Use 1Min for minute-seeded candidate corpora."
+        ),
+    )
     parser.add_argument("--market-regime-symbol", default="SPY", help="Benchmark symbol used for market regime features.")
     parser.add_argument(
         "--vix-symbol",
@@ -176,6 +193,8 @@ def main() -> int:
         min_option_entry_volume=args.min_option_entry_volume,
         max_workers=args.max_workers,
         build_window_days=args.build_window_days,
+        stock_timeframe=args.stock_timeframe,
+        option_timeframe=args.option_timeframe,
     )
     rows = HistoricalCandidateDatasetBuilder(
         stock_provider,
@@ -210,6 +229,8 @@ def main() -> int:
             "profit_take_pct": config.profit_take_pct,
             "sample_every_n_bars": config.sample_every_n_bars,
             "stock_lookback_days": config.stock_lookback_days,
+            "stock_timeframe": config.stock_timeframe,
+            "option_timeframe": config.option_timeframe,
             "market_regime_symbol": config.market_regime_symbol,
             "build_window_days": config.build_window_days,
             "feature_set_version": "features_v005",

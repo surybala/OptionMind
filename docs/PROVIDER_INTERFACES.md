@@ -10,6 +10,8 @@ The ML pipeline should not depend directly on Alpaca SDK objects or any single v
 - `ml.providers.protocols`: protocols used by dataset builders and feature generators.
 - `ml.providers.alpaca`: Alpaca adapter that maps Alpaca SDK responses into normalized shapes.
 - `ml.providers.massive`: Massive/Polygon adapter for historical stock bars, options contracts, option bars, and option trades.
+- `ml.providers.massive_flatfiles`: Massive/Polygon flat-file client for bulk S3 historical ingestion.
+- `ml.providers.parquet_minute`: local parquet-backed minute-bar provider for training after flat-file ingestion.
 
 ## Current Protocols
 
@@ -61,6 +63,18 @@ Massive responses are cached under `artifacts/cache/massive` by default when
 using `MassiveProvider.from_env()`. Set `MASSIVE_CACHE_DIR` to override the
 cache location. Cached files never include the API key in their cache key or
 contents.
+
+Massive flat files use separate S3 credentials from the dashboard:
+
+```text
+MASSIVE_S3_ACCESS_KEY
+MASSIVE_S3_SECRET_KEY
+```
+
+The flat-file quickstart specifies:
+
+- Endpoint: `https://files.massive.com`
+- Bucket: `flatfiles`
 
 ## Next Integration Point
 

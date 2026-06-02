@@ -3,7 +3,7 @@ from datetime import UTC, date, datetime
 import pytest
 import requests
 
-from ml.providers.massive import MassiveProvider
+from ml.providers.massive import MassiveProvider, _aggregate_ranges
 
 
 class FakeResponse:
@@ -326,3 +326,44 @@ def test_massive_provider_caches_successful_responses(tmp_path):
     assert second["SPY"][0].close == 504
     assert len(p.session.calls) == 1
     assert len(list(tmp_path.glob("*.json"))) == 1
+
+
+def test_minute_aggregate_ranges_chunk_multi_month_windows():
+    ranges = _aggregate_ranges(
+        datetime(2026, 1, 1, tzinfo=UTC),
+        datetime(2026, 3, 15, tzinfo=UTC),
+        1,
+        "minute",
+    )
+
+    assert len(ranges) == 3
+    assert ranges[0][0] == datetime(2026, 1, 1, tzinfo=UTC)
+    assert ranges[-1][1] == datetime(2026, 3, 15, tzinfo=UTC)
+    assert ranges[0][1] < ranges[1][0]
+
+
+def test_get_option_bars_chunks_long_minute_requests():
+    p = provider(
+        [
+            {
+                "results": [
+                    {"t": 1_735_732_800_000, "o": 4.2, "h": 4.2, "l": 4.1, "c": 4.15, "v": 120}
+                ]
+            },
+            {
+                "results": [
+                    {"t": 1_738_411_200_000, "o": 3.8, "h": 3.9, "l": 3.7, "c": 3.85, "v": 140}
+                ]
+            },
+        ]
+    )
+
+    bars = p.get_option_bars(
+        ["SPY260626P00500000"],
+        datetime(2025, 1, 1, tzinfo=UTC),
+        datetime(2025, 2, 15, tzinfo=UTC),
+        "1Min",
+    )
+
+    assert len(p.session.calls) == 2
+    assert len(bars["SPY260626P00500000"]) == 2

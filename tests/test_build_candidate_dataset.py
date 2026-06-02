@@ -36,6 +36,10 @@ def test_parse_args_accepts_option_limit(monkeypatch):
             "2",
             "--stock-lookback-days",
             "75",
+            "--stock-timeframe",
+            "1Day",
+            "--option-timeframe",
+            "1Min",
             "--market-regime-symbol",
             "qqq",
         ],
@@ -46,6 +50,8 @@ def test_parse_args_accepts_option_limit(monkeypatch):
     assert args.max_rows_per_underlying == 5000
     assert args.sample_every_n_bars == 2
     assert args.stock_lookback_days == 75
+    assert args.stock_timeframe == "1Day"
+    assert args.option_timeframe == "1Min"
     assert args.market_regime_symbol == "qqq"
 
 

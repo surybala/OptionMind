@@ -255,7 +255,68 @@ def _parse_args() -> argparse.Namespace:
 
 # ── Daemon scheduler ─────────────────────────────────────────────────────────
 
-def _next_run_dt(run_time: str, tz_name: str, weekdays_only: bool) -> datetime:
+def _timezone(tz_name: str):
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(tz_name)
+    except Exception:
+        try:
+            import pytz
+            return pytz.timezone(tz_name)
+        except Exception:
+            return None
+
+
+def _now_in_tz(tz, now: datetime | None = None) -> datetime:
+    if now is None:
+        return datetime.now(tz)
+    if tz is None:
+        return now.replace(tzinfo=None) if now.tzinfo else now
+    if now.tzinfo is None:
+        return now.replace(tzinfo=tz)
+    return now.astimezone(tz)
+
+
+def _parse_hhmm(value: str) -> tuple[int, int]:
+    hh, mm = (int(p) for p in value.split(':'))
+    return hh, mm
+
+
+def _within_trading_window(
+    open_t: str,
+    close_t: str,
+    tz_name: str,
+    weekdays_only: bool,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Return True when *now* is inside the configured trading window."""
+    tz = _timezone(tz_name)
+    current = _now_in_tz(tz, now)
+    if weekdays_only and current.weekday() >= 5:
+        return False
+
+    hh_o, mm_o = _parse_hhmm(open_t)
+    hh_c, mm_c = _parse_hhmm(close_t)
+    window_open = current.replace(hour=hh_o, minute=mm_o, second=0, microsecond=0)
+    window_close = current.replace(hour=hh_c, minute=mm_c, second=0, microsecond=0)
+
+    if window_close <= window_open:
+        if current < window_close:
+            window_open -= timedelta(days=1)
+        else:
+            window_close += timedelta(days=1)
+
+    return window_open <= current < window_close
+
+
+def _next_run_dt(
+    run_time: str,
+    tz_name: str,
+    weekdays_only: bool,
+    *,
+    now: datetime | None = None,
+) -> datetime:
     """
     Return the next wall-clock datetime at which the agent should fire.
 
@@ -263,19 +324,9 @@ def _next_run_dt(run_time: str, tz_name: str, weekdays_only: bool) -> datetime:
     future (at least 1 second from now).  Tries zoneinfo (stdlib, Python 3.9+)
     then pytz, then falls back to local system time.
     """
-    tz = None
-    try:
-        from zoneinfo import ZoneInfo
-        tz = ZoneInfo(tz_name)
-    except Exception:
-        try:
-            import pytz
-            tz = pytz.timezone(tz_name)
-        except Exception:
-            pass  # last resort: system local time
-
-    hh, mm = (int(p) for p in run_time.split(':'))
-    now = datetime.now(tz)
+    tz = _timezone(tz_name)
+    hh, mm = _parse_hhmm(run_time)
+    now = _now_in_tz(tz, now)
 
     candidate = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
     if candidate <= now:
@@ -289,6 +340,33 @@ def _next_run_dt(run_time: str, tz_name: str, weekdays_only: bool) -> datetime:
     return candidate
 
 
+def _next_daemon_run_dt(
+    run_time: str,
+    tz_name: str,
+    weekdays_only: bool,
+    market_open: str,
+    market_close: str,
+    market_tz_name: str,
+    market_weekdays_only: bool,
+    *,
+    immediate_if_in_trading_window: bool,
+    now: datetime | None = None,
+) -> datetime:
+    """Return the next daemon wake time, with optional startup catch-up."""
+    schedule_tz = _timezone(tz_name)
+    schedule_now = _now_in_tz(schedule_tz, now)
+    if immediate_if_in_trading_window and _within_trading_window(
+        market_open,
+        market_close,
+        market_tz_name,
+        market_weekdays_only,
+        now=schedule_now,
+    ):
+        return schedule_now
+
+    return _next_run_dt(run_time, tz_name, weekdays_only, now=schedule_now)
+
+
 def run_daemon(args) -> None:
     """
     Loop forever, waking at the configured schedule time each day to call
@@ -300,6 +378,11 @@ def run_daemon(args) -> None:
     run_time   = sched_cfg.get('run_time', '09:35')
     tz_name    = sched_cfg.get('timezone', 'US/Eastern')
     weekdays   = bool(sched_cfg.get('weekdays_only', True))
+    market_cfg = config.get('monitor_schedule', {})
+    market_open = market_cfg.get('market_open', '09:30')
+    market_close = market_cfg.get('market_close', '16:00')
+    market_tz_name = market_cfg.get('timezone', tz_name)
+    market_weekdays = bool(market_cfg.get('weekdays_only', weekdays))
 
     log = get_logger('optionwheel')
     log.info(
@@ -308,8 +391,19 @@ def run_daemon(args) -> None:
         " (weekdays only)" if weekdays else "",
     )
 
+    startup = True
     while True:
-        next_dt = _next_run_dt(run_time, tz_name, weekdays)
+        next_dt = _next_daemon_run_dt(
+            run_time,
+            tz_name,
+            weekdays,
+            market_open,
+            market_close,
+            market_tz_name,
+            market_weekdays,
+            immediate_if_in_trading_window=startup,
+        )
+        startup = False
         sleep_s = (next_dt - datetime.now(next_dt.tzinfo)).total_seconds()
         log.info("[daemon] Next run scheduled for %s (in %.0f s / %.1f h)",
                  next_dt.strftime('%Y-%m-%d %H:%M %Z'), sleep_s, sleep_s / 3600)

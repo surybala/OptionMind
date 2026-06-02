@@ -4,6 +4,8 @@ from ml.providers.alpaca import AlpacaProvider
 from ml.providers.fmp import FMPProvider
 from ml.providers.fred import FREDProvider
 from ml.providers.massive import MassiveProvider
+from ml.providers.massive_flatfiles import MassiveFlatFilesClient
+from ml.providers.parquet_minute import ParquetMinuteBarProvider
 from ml.providers.yfinance_provider import YFinanceProvider
 from ml.providers.models import (
     DividendEvent,
@@ -38,7 +40,9 @@ __all__ = [
     "FREDProvider",
     "Greeks",
     "MarketDataProvider",
+    "MassiveFlatFilesClient",
     "MassiveProvider",
+    "ParquetMinuteBarProvider",
     "YFinanceProvider",
     "OptionChainProvider",
     "OptionContract",

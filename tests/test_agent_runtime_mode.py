@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 
 _external_mock = MagicMock()
@@ -20,7 +22,10 @@ for _mod in [
 ]:
     sys.modules.setdefault(_mod, _external_mock)
 
-from agent import _validate_ml_hft_runtime  # noqa: E402
+from agent import _next_daemon_run_dt, _validate_ml_hft_runtime  # noqa: E402
+
+
+_EASTERN = ZoneInfo("US/Eastern")
 
 
 def _write_artifact(path: Path) -> None:
@@ -43,6 +48,60 @@ def _base_config(tmp_path: Path) -> dict:
         "pick_selection": {"mode": "model_ranked"},
         "hft_mode": True,
     }
+
+
+def test_next_daemon_run_dt_runs_immediately_when_starting_inside_trading_window():
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=_EASTERN)
+
+    next_dt = _next_daemon_run_dt(
+        "09:35",
+        "US/Eastern",
+        True,
+        "09:30",
+        "16:00",
+        "US/Eastern",
+        True,
+        immediate_if_in_trading_window=True,
+        now=now,
+    )
+
+    assert next_dt == now
+
+
+def test_next_daemon_run_dt_uses_next_scan_time_after_trading_window():
+    now = datetime(2026, 6, 1, 16, 1, tzinfo=_EASTERN)
+
+    next_dt = _next_daemon_run_dt(
+        "09:35",
+        "US/Eastern",
+        True,
+        "09:30",
+        "16:00",
+        "US/Eastern",
+        True,
+        immediate_if_in_trading_window=True,
+        now=now,
+    )
+
+    assert next_dt == datetime(2026, 6, 2, 9, 35, tzinfo=_EASTERN)
+
+
+def test_next_daemon_run_dt_can_disable_startup_immediate_scan():
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=_EASTERN)
+
+    next_dt = _next_daemon_run_dt(
+        "09:35",
+        "US/Eastern",
+        True,
+        "09:30",
+        "16:00",
+        "US/Eastern",
+        True,
+        immediate_if_in_trading_window=False,
+        now=now,
+    )
+
+    assert next_dt == datetime(2026, 6, 2, 9, 35, tzinfo=_EASTERN)
 
 
 def test_validate_ml_hft_runtime_accepts_strict_ml_hft_config(tmp_path):

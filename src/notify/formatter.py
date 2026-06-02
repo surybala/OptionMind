@@ -266,11 +266,15 @@ def _render_position_closed_text(pos: dict, reason_tag: str) -> str:
             f"Captured: {captured:.1f}%" if captured is not None else "Captured: n/a",
             f"Target:   {target * 100:.0f}%" if target is not None else "Target:   n/a",
         ]
-    elif reason_tag in ('STOP_LOSS', 'GAMMA_RISK'):
+    elif reason_tag in ('STOP_LOSS', 'GAMMA_RISK', 'ML_RISK_EXIT'):
         ratio      = pos.get('ratio')
         short_delta= pos.get('short_delta')
         risk_score = pos.get('risk_score')
         dte        = pos.get('dte')
+        ml_score   = pos.get('ml_exit_risk_score')
+        ml_thresh  = pos.get('ml_exit_risk_threshold')
+        ml_conf    = pos.get('ml_exit_risk_confirmation_count')
+        ml_req     = pos.get('ml_exit_risk_confirmations_required')
         lines += [
             '',
             'Risk Metrics at Close',
@@ -280,6 +284,16 @@ def _render_position_closed_text(pos: dict, reason_tag: str) -> str:
             f"Risk score:        {risk_score:.4f}" if risk_score  is not None else "Risk score:        n/a",
             f"DTE at close:      {dte}d"           if dte         is not None else "DTE at close:      n/a",
         ]
+        if reason_tag == 'ML_RISK_EXIT':
+            lines += [
+                f"ML exit score:     {ml_score:.4f}" if ml_score is not None else "ML exit score:     n/a",
+                f"ML threshold:      {ml_thresh:.4f}" if ml_thresh is not None else "ML threshold:      n/a",
+                (
+                    f"Confirmations:    {ml_conf}/{ml_req}"
+                    if ml_conf is not None and ml_req is not None
+                    else "Confirmations:    n/a"
+                ),
+            ]
 
     return '\n'.join(lines) + '\n'
 
@@ -438,7 +452,12 @@ def _render_position_closed_html(pos: dict, reason_tag: str) -> str:
     pnl_source = _pnl_source_label(pos)
     ts       = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
-    hdr_color   = {'STOP_LOSS': '#c0392b', 'GAMMA_RISK': '#d35400', 'PROFIT_TAKE': '#27ae60'}.get(reason_tag, '#2980b9')
+    hdr_color   = {
+        'STOP_LOSS': '#c0392b',
+        'GAMMA_RISK': '#d35400',
+        'ML_RISK_EXIT': '#8e44ad',
+        'PROFIT_TAKE': '#27ae60',
+    }.get(reason_tag, '#2980b9')
     pnl_bg      = '#eaf7ee' if pnl >= 0 else '#fdf2f2'
     pnl_border  = '#27ae60' if pnl >= 0 else '#e74c3c'
     pnl_color   = '#27ae60' if pnl >= 0 else '#e74c3c'
@@ -468,11 +487,15 @@ def _render_position_closed_html(pos: dict, reason_tag: str) -> str:
       <tr><th>Metric</th><th>Value</th></tr>
       {''.join(f"<tr><td>{k}</td><td>{v}</td></tr>" for k, v in pt_rows)}
     </table>"""
-    elif reason_tag in ('STOP_LOSS', 'GAMMA_RISK'):
+    elif reason_tag in ('STOP_LOSS', 'GAMMA_RISK', 'ML_RISK_EXIT'):
         ratio      = pos.get('ratio')
         short_delta= pos.get('short_delta')
         risk_score = pos.get('risk_score')
         dte        = pos.get('dte')
+        ml_score   = pos.get('ml_exit_risk_score')
+        ml_thresh  = pos.get('ml_exit_risk_threshold')
+        ml_conf    = pos.get('ml_exit_risk_confirmation_count')
+        ml_req     = pos.get('ml_exit_risk_confirmations_required')
 
         def _fmt(v, fmt='.4f'):
             return f'{v:{fmt}}' if v is not None else '<span style="color:#aaa">n/a</span>'
@@ -483,6 +506,17 @@ def _render_position_closed_html(pos: dict, reason_tag: str) -> str:
             ('Risk score',          _fmt(risk_score)),
             ('DTE at close',        f'{dte}d' if dte is not None else '<span style="color:#aaa">n/a</span>'),
         ]
+        if reason_tag == 'ML_RISK_EXIT':
+            risk_rows.extend([
+                ('ML exit score', _fmt(ml_score)),
+                ('ML threshold', _fmt(ml_thresh)),
+                (
+                    'Confirmations',
+                    f'{ml_conf}/{ml_req}'
+                    if ml_conf is not None and ml_req is not None
+                    else '<span style="color:#aaa">n/a</span>',
+                ),
+            ])
         risk_table = f"""
     <h3 style="color:#2c3e50;margin:24px 0 8px">Risk Metrics at Close</h3>
     <table>

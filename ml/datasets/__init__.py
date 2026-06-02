@@ -6,6 +6,11 @@ from ml.datasets.candidate_dataset import (
     HistoricalCandidateDatasetBuilder,
     market_open_utc,
 )
+from ml.datasets.intraday_risk_dataset import (
+    IntradayRiskDatasetBuilder,
+    IntradayRiskDatasetConfig,
+    IntradayRiskRow,
+)
 from ml.datasets.etf_universe import BROAD_ETF_UNDERLYINGS, broad_etf_underlyings
 
 __all__ = [
@@ -13,6 +18,9 @@ __all__ = [
     "CandidateDatasetConfig",
     "CandidateDatasetRow",
     "HistoricalCandidateDatasetBuilder",
+    "IntradayRiskDatasetBuilder",
+    "IntradayRiskDatasetConfig",
+    "IntradayRiskRow",
     "broad_etf_underlyings",
     "market_open_utc",
 ]

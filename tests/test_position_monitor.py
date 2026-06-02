@@ -19,6 +19,7 @@ _alpaca_stub = MagicMock()
 for _mod in [
     'alpaca', 'alpaca.data', 'alpaca.data.historical',
     'alpaca.data.requests', 'alpaca.data.timeframe',
+    'alpaca.trading', 'alpaca.trading.client', 'alpaca.trading.enums',
 ]:
     _sys.modules.setdefault(_mod, _alpaca_stub)
 

@@ -6,7 +6,7 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
@@ -242,24 +242,39 @@ class MassiveProvider:
         normalized_symbol: str,
         limit: int | None = None,
     ) -> list[PriceBar]:
-        path = (
-            f"/v2/aggs/ticker/{quote(ticker, safe='')}/range/"
-            f"{multiplier}/{timespan}/{_date_or_ms(start)}/{_date_or_ms(end)}"
-        )
-        params = {
-            "adjusted": str(self.adjusted).lower(),
-            "sort": "asc",
-            "limit": min(limit or 50_000, 50_000),
-        }
-        try:
-            payload = self._get_json(path, params)
-        except MassiveApiError as exc:
-            if exc.status_code == 404:
-                return []
-            raise
-        rows = payload.get("results") or []
-        if limit is not None:
-            rows = rows[:limit]
+        ranges = _aggregate_ranges(start, end, multiplier, timespan)
+        rows: list[dict[str, Any]] = []
+        seen_timestamps: set[int] = set()
+        request_limit = min(limit or 50_000, 50_000)
+
+        for chunk_start, chunk_end in ranges:
+            path = (
+                f"/v2/aggs/ticker/{quote(ticker, safe='')}/range/"
+                f"{multiplier}/{timespan}/{_date_or_ms(chunk_start)}/{_date_or_ms(chunk_end)}"
+            )
+            params = {
+                "adjusted": str(self.adjusted).lower(),
+                "sort": "asc",
+                "limit": request_limit,
+            }
+            try:
+                payload = self._get_json(path, params)
+            except MassiveApiError as exc:
+                if exc.status_code == 404:
+                    continue
+                raise
+            for item in payload.get("results") or []:
+                timestamp = int(item.get("t") or 0)
+                if timestamp <= 0 or timestamp in seen_timestamps:
+                    continue
+                rows.append(item)
+                seen_timestamps.add(timestamp)
+                if limit is not None and len(rows) >= limit:
+                    break
+            if limit is not None and len(rows) >= limit:
+                break
+
+        rows.sort(key=lambda item: int(item.get("t") or 0))
         return [_normalize_bar(normalized_symbol, item, source=self.source) for item in rows]
 
     def _get_paginated(
@@ -355,6 +370,53 @@ def _parse_timeframe(value: str) -> tuple[int, str]:
             if raw.isdigit():
                 return int(raw), timespan
     raise ValueError(f"Unsupported Massive timeframe: {value}")
+
+
+def _aggregate_ranges(
+    start: datetime,
+    end: datetime,
+    multiplier: int,
+    timespan: str,
+) -> list[tuple[datetime, datetime]]:
+    if end < start:
+        return []
+
+    max_chunk = _aggregate_chunk_span(multiplier, timespan)
+    step = _aggregate_step(multiplier, timespan)
+    if max_chunk is None:
+        return [(start, end)]
+
+    ranges: list[tuple[datetime, datetime]] = []
+    current = start
+    while current <= end:
+        chunk_end = min(current + max_chunk - step, end)
+        if chunk_end < current:
+            chunk_end = current
+        ranges.append((current, chunk_end))
+        if chunk_end >= end:
+            break
+        current = chunk_end + step
+    return ranges
+
+
+def _aggregate_chunk_span(multiplier: int, timespan: str) -> timedelta | None:
+    if timespan == "minute":
+        # Polygon/Massive recommends <= 1 month per minute/hour aggregate query
+        # because the endpoint caps base aggregates at 50k rows.
+        return timedelta(days=31)
+    if timespan == "hour":
+        return timedelta(days=365)
+    return None
+
+
+def _aggregate_step(multiplier: int, timespan: str) -> timedelta:
+    if timespan == "minute":
+        return timedelta(minutes=max(multiplier, 1))
+    if timespan == "hour":
+        return timedelta(hours=max(multiplier, 1))
+    if timespan == "day":
+        return timedelta(days=max(multiplier, 1))
+    raise ValueError(f"Unsupported Massive timespan: {timespan}")
 
 
 def _normalize_contract(item: dict[str, Any], source: str) -> OptionContract:

@@ -166,3 +166,8 @@ Prerequisites:
 
 Complete the paper/shadow gate (Phase 6) by accumulating ≥ 30 days or 200 paper trades and
 verifying profit factor ≥ 1.25 and large-loss rate ≤ 15% before considering Phase 7 rollout.
+
+Parallel build now underway: an `intraday_risk_rows` training corpus seeded
+from `candidate_rows` and backfilled with Massive minute bars so the future
+live risk monitor can train a dedicated exit-hazard model instead of reusing
+the entry ranker.

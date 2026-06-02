@@ -166,6 +166,16 @@
       "urgent_delta_threshold": 0.30,
       "_urgent_note": "If |short_delta| >= this value, bypass min_profit_captured_pct and close regardless — position has moved deeply ITM and is in urgent danger. Also serves as the near-expiry (DTE<=1) threshold when ratio-based check is bypassed."
     },
+    "ml_exit_risk": {
+      "enabled": false,
+      "artifact_path": "artifacts/models/ml_exit_risk.json",
+      "threshold": 0.70,
+      "confirmations_required": 2,
+      "min_age_minutes": 5,
+      "min_dte": 0,
+      "max_dte": 21,
+      "_note": "Optional ML early-exit trigger for open positions. The monitor scores each position with the configured artifact and closes when score >= threshold for the required number of consecutive risk checks. Deterministic stop-loss, profit-take, and gamma-risk rules remain active as backstops."
+    },
     "vix_filter": {
       "enabled": true,
       "ic_pause_threshold": 18,

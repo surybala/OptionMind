@@ -84,6 +84,9 @@ class PositionMonitor:
         # ── Shared risk enrichment service ────────────────────────────────────
         from src.risk_service import PositionRiskService
         self._risk_service = PositionRiskService(self._data, config)
+        from src.risk_ml import MlExitRiskService
+        self._ml_exit_risk = MlExitRiskService(config)
+        self._ml_exit_confirmations: dict[int, int] = {}
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -353,6 +356,7 @@ class PositionMonitor:
             pos, dry_run, entry_premium, current_mark, chain.spot,
             lambda ep, pnl: self._check_gamma_risk_unified(pos, chain, chain.spot, ep, pnl),
             metrics_fn=lambda: self._risk_service._get_greek_risk_data_unified(pos, chain, chain.spot),
+            chain=chain,
             label_prefix=label,
         )
 
@@ -389,6 +393,7 @@ class PositionMonitor:
             pos['close_pnl']      = pnl_dollars
             pos['close_order_id'] = 'DRY_RUN_CLOSE'
             pos['reason_tag']     = reason_tag
+            self._ml_exit_confirmations.pop(trade_id, None)
             return pos
 
         from src.position_lifecycle import PositionLifecycleService
@@ -409,6 +414,7 @@ class PositionMonitor:
         pos['close_pnl']      = pnl_dollars
         pos['close_order_id'] = result.order_id
         pos['reason_tag']     = reason_tag
+        self._ml_exit_confirmations.pop(trade_id, None)
         return pos
 
     # ── Shared trigger evaluation helper ─────────────────────────────────────
@@ -418,11 +424,21 @@ class PositionMonitor:
         entry_premium: float, current_mark: float, spot: Optional[float],
         gamma_risk_fn,
         metrics_fn=None,
+        chain=None,
         label_prefix: str = '',
     ) -> Optional[dict]:
         pnl_per_share = entry_premium - current_mark
         loss          = -pnl_per_share
         trig          = self.stop_loss_multiplier * entry_premium
+        cached_metrics = None
+        metrics_loaded = False
+
+        def _load_metrics():
+            nonlocal cached_metrics, metrics_loaded
+            if not metrics_loaded:
+                cached_metrics = metrics_fn() if metrics_fn is not None else None
+                metrics_loaded = True
+            return cached_metrics
 
         symbol = pos['symbol']; strat = pos['type']; expiry = pos['expiry']
         status_str = (
@@ -444,7 +460,7 @@ class PositionMonitor:
             # Enrich with risk metrics so the position-closed email always
             # shows the "Risk Metrics at Close" section with real values.
             if metrics_fn is not None:
-                raw = metrics_fn()
+                raw = _load_metrics()
                 if raw is not None:
                     dte, risk = raw
                     pos['dte']         = dte
@@ -467,7 +483,52 @@ class PositionMonitor:
             pos['profit_take_pct']    = self._pt_pct
             return self._execute_close(pos, current_mark, pnl_dollars, 'PROFIT_TAKE', dry_run)
 
-        # Trigger 3: gamma risk
+        # Trigger 3: ML exit-risk model
+        if self._ml_exit_risk.is_active():
+            metrics = _load_metrics()
+            risk = metrics[1] if metrics is not None else None
+            score_payload = self._ml_exit_risk.score_position(
+                pos,
+                current_mark=current_mark,
+                spot=spot,
+                risk=risk,
+                chain=chain,
+            )
+            if score_payload is not None:
+                pos.update(score_payload)
+                confirmation_count = self._track_ml_confirmation(pos, score_payload)
+                pos['ml_exit_risk_confirmation_count'] = confirmation_count
+                pos['ml_exit_risk_confirmations_required'] = (
+                    self._ml_exit_risk.confirmations_required
+                )
+                if score_payload.get('ml_exit_risk_should_trigger'):
+                    required = self._ml_exit_risk.confirmations_required
+                    if confirmation_count >= required:
+                        pnl_dollars = round(pnl_per_share * 100 * contracts, 2)
+                        tag = "[DRY RUN]" if dry_run else "[LIVE]"
+                        print(
+                            f"{status_str}  ml_score={score_payload['ml_exit_risk_score']:.3f}"
+                            f"  confirmations={confirmation_count}/{required}"
+                            f"  → ML-RISK TRIGGERED {tag}"
+                        )
+                        pos['entry_premium'] = entry_premium
+                        pos['current_mark'] = current_mark
+                        pos['pnl_per_share'] = pnl_per_share
+                        if metrics is not None:
+                            dte, risk = metrics
+                            pos['dte'] = dte
+                            pos['ratio'] = risk['gamma_theta_ratio']
+                            pos['short_delta'] = abs(risk['net_short_delta'])
+                            pos['risk_score'] = risk['risk_score']
+                        return self._execute_close(
+                            pos,
+                            current_mark,
+                            pnl_dollars,
+                            self._ml_exit_risk.reason_tag,
+                            dry_run,
+                        )
+
+        # Trigger 4: gamma risk
         if self._gamma_risk_enabled and spot is not None:
             gr_result = gamma_risk_fn(entry_premium, pnl_per_share)
             if gr_result is not None:
@@ -486,6 +547,17 @@ class PositionMonitor:
 
         print(f"{status_str}  → OK")
         return None
+
+    def _track_ml_confirmation(self, pos: dict, score_payload: dict) -> int:
+        trade_id = int(pos.get('id') or 0)
+        if trade_id <= 0:
+            return 0
+        if score_payload.get('ml_exit_risk_should_trigger'):
+            count = self._ml_exit_confirmations.get(trade_id, 0) + 1
+            self._ml_exit_confirmations[trade_id] = count
+            return count
+        self._ml_exit_confirmations.pop(trade_id, None)
+        return 0
 
     # ── Gamma risk check ──────────────────────────────────────────────────────
 
@@ -762,7 +834,9 @@ class PositionMonitor:
 
         for pos in open_positions:
             try:
-                results.append(self._risk_service.enrich_position(dict(pos)))
+                enriched = self._risk_service.enrich_position(dict(pos))
+                self._ml_exit_risk.annotate_position(enriched)
+                results.append(enriched)
             except RuntimeError as exc:
                 _log.warning(
                     "[HFT] risk_snapshot: skipping pos %s (%s/%s) — %s",
