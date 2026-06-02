@@ -25,6 +25,8 @@ artifacts/models/*
 !artifacts/models/xgboost_v006c_500r_dp28.xgboost.json
 !artifacts/models/large_loss_classifier_v006e.json
 !artifacts/models/large_loss_classifier_v006e.xgboost.json
+!artifacts/models/stop_loss_classifier_v006c.json
+!artifacts/models/stop_loss_classifier_v006c.xgboost.json
 
 # Runtime data (generated, not source)
 data/

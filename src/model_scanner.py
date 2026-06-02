@@ -167,9 +167,14 @@ class LivePaperInferenceProvider:
         self.large_loss_veto_threshold: float = float(
             self.scanner_config.get("large_loss_veto_threshold", 0.70)
         )
+        self.stop_loss_model: _ChampionModel | None = None
+        self.stop_loss_veto_threshold: float = float(
+            self.scanner_config.get("stop_loss_veto_threshold", 0.70)
+        )
         self._runtime_regime_label: str | None = None
         self._load_champion()
         self._load_large_loss_classifier()
+        self._load_stop_loss_classifier()
 
     def get_top_picks(self, ticker_list: list[str], n: int = 10) -> list[dict]:
         if not self._has_ranker_models():
@@ -191,6 +196,15 @@ class LivePaperInferenceProvider:
         if not underlyings:
             return []
 
+        scan_stats = {
+            "underlyings": len(underlyings),
+            "chains_with_data": 0,
+            "short_contracts_scored": 0,
+            "spread_candidates_considered": 0,
+            "spread_candidates_built": 0,
+            "large_loss_vetoes": 0,
+            "stop_loss_vetoes": 0,
+        }
         stock_symbols = _unique([*underlyings, market_symbol, vix_symbol])
         stock_bars = self.provider.get_stock_bars(
             stock_symbols,
@@ -219,6 +233,7 @@ class LivePaperInferenceProvider:
             chain = chain_map.get(underlying) or {}
             if not chain:
                 continue
+            scan_stats["chains_with_data"] += 1
             earnings = self._earnings_events(underlying, now.date(), now.date() + timedelta(days=forward_days))
             dividends = self._dividend_events(underlying, now.date(), now.date() + timedelta(days=forward_days))
             scored = self._score_chain(
@@ -236,14 +251,18 @@ class LivePaperInferenceProvider:
                 max_dte=max_dte,
                 forward_days=forward_days,
             )
-            picks.extend(self._spread_picks(underlying, scored, now))
+            scan_stats["short_contracts_scored"] += len(scored)
+            picks.extend(self._spread_picks(underlying, scored, now, scan_stats))
 
-        return select_top_picks_with_scanner_controls(
+        selected = select_top_picks_with_scanner_controls(
             picks,
             n=n,
             config=self.config,
             regime_label=self._runtime_regime_label,
         )
+        self._log_scan_summary(scan_stats, generated=len(picks), selected=selected)
+        self._log_selected_pick_details(selected)
+        return selected
 
     def _fetch_option_chains(
         self,
@@ -332,6 +351,21 @@ class LivePaperInferenceProvider:
             )
         except Exception as exc:
             _log.warning("[scanner] Failed to load large-loss classifier %s: %s", path, exc)
+
+    def _load_stop_loss_classifier(self) -> None:
+        path = self.scanner_config.get("stop_loss_classifier_path")
+        if not path:
+            return
+        try:
+            artifact = json.loads(Path(path).read_text(encoding="utf-8"))
+            self.stop_loss_model = _ChampionModel(artifact)
+            _log.info(
+                "[scanner] Stop-loss classifier loaded: %s (veto threshold=%.2f)",
+                path,
+                self.stop_loss_veto_threshold,
+            )
+        except Exception as exc:
+            _log.warning("[scanner] Failed to load stop-loss classifier %s: %s", path, exc)
 
     def _has_ranker_models(self) -> bool:
         return self.default_model_binding is not None
@@ -433,7 +467,13 @@ class LivePaperInferenceProvider:
             )
         return scored_rows
 
-    def _spread_picks(self, underlying: str, scored: list[_ScoredOption], timestamp: datetime) -> list[dict]:
+    def _spread_picks(
+        self,
+        underlying: str,
+        scored: list[_ScoredOption],
+        timestamp: datetime,
+        scan_stats: dict[str, int] | None = None,
+    ) -> list[dict]:
         by_key = {
             (item.contract.expiration, item.contract.option_type, _money(item.contract.strike)): item
             for item in scored
@@ -447,9 +487,9 @@ class LivePaperInferenceProvider:
         pcs_cfg = self.config.get("strategies", {}).get("put_credit_spread", {})
         ccs_cfg = self.config.get("strategies", {}).get("call_credit_spread", {})
         if pcs_cfg.get("enabled", True):
-            picks.extend(self._spread_side_picks(underlying, scored, by_key, spot, timestamp, "put", pcs_cfg))
+            picks.extend(self._spread_side_picks(underlying, scored, by_key, spot, timestamp, "put", pcs_cfg, scan_stats))
         if ccs_cfg.get("enabled", True):
-            picks.extend(self._spread_side_picks(underlying, scored, by_key, spot, timestamp, "call", ccs_cfg))
+            picks.extend(self._spread_side_picks(underlying, scored, by_key, spot, timestamp, "call", ccs_cfg, scan_stats))
         return picks
 
     def _spread_side_picks(
@@ -461,6 +501,7 @@ class LivePaperInferenceProvider:
         timestamp: datetime,
         option_type: str,
         strategy_config: dict[str, Any],
+        scan_stats: dict[str, int] | None = None,
     ) -> list[dict]:
         strategy = "PCS" if option_type == "put" else "CCS"
         widths = _spread_widths(strategy_config, self.scanner_config)
@@ -474,6 +515,8 @@ class LivePaperInferenceProvider:
             if option_type == "call" and short.contract.strike <= spot:
                 continue
             for width in widths:
+                if scan_stats is not None:
+                    scan_stats["spread_candidates_considered"] += 1
                 long_strike = short.contract.strike - width if option_type == "put" else short.contract.strike + width
                 long = by_key.get((short.contract.expiration, option_type, _money(long_strike)))
                 if long is None or short.bid is None or long.ask is None:
@@ -487,13 +530,45 @@ class LivePaperInferenceProvider:
                 dte = int(short.row.get("dte") or max(1, (short.contract.expiration - timestamp.date()).days))
                 roi = credit / max_loss
                 large_loss_prob: float | None = None
+                stop_loss_prob: float | None = None
+                clf_row: dict[str, Any] | None = None
                 if self.large_loss_model is not None:
                     clf_row = _classifier_feature_row(
                         short.row, long, option_type, credit, actual_width
                     )
                     large_loss_prob = float(self.large_loss_model.score_rows([clf_row])[0])
                     if large_loss_prob > self.large_loss_veto_threshold:
+                        if scan_stats is not None:
+                            scan_stats["large_loss_vetoes"] += 1
                         continue
+                if self.stop_loss_model is not None:
+                    if clf_row is None:
+                        clf_row = _classifier_feature_row(
+                            short.row, long, option_type, credit, actual_width
+                        )
+                    stop_loss_prob = float(self.stop_loss_model.score_rows([clf_row])[0])
+                    if stop_loss_prob > self.stop_loss_veto_threshold:
+                        if scan_stats is not None:
+                            scan_stats["stop_loss_vetoes"] += 1
+                        continue
+                otm_pct = _short_leg_otm_pct(option_type, spot, short.contract.strike)
+                ranking_context = {
+                    "dte": dte,
+                    "short_leg_otm_pct": round(otm_pct, 6) if otm_pct is not None else None,
+                    "short_leg_delta": _float_or_none(short.row.get("option_delta")),
+                    "strike_distance_pct": _float_or_none(short.row.get("strike_distance_pct")),
+                    "moneyness": _float_or_none(short.row.get("moneyness")),
+                    "credit_to_width": round(credit / actual_width, 8) if actual_width > 0 else None,
+                    "premium": credit,
+                    "width": round(actual_width, 4),
+                    "roi": round(roi, 4),
+                    "annualized_roi": round(roi * (365 / max(1, dte)), 4),
+                    "large_loss_prob": round(large_loss_prob, 4) if large_loss_prob is not None else None,
+                    "stop_loss_prob": round(stop_loss_prob, 4) if stop_loss_prob is not None else None,
+                    "vix_regime": short.row.get("vix_regime"),
+                    "days_to_fomc": short.row.get("days_to_fomc"),
+                    "days_to_macro_event": short.row.get("days_to_macro_event"),
+                }
                 pick = {
                     "strategy": strategy,
                     "symbol": underlying,
@@ -531,6 +606,9 @@ class LivePaperInferenceProvider:
                     ),
                     "ranker_strategy": short.model_binding.strategy_key,
                     "large_loss_prob": round(large_loss_prob, 4) if large_loss_prob is not None else None,
+                    "stop_loss_prob": round(stop_loss_prob, 4) if stop_loss_prob is not None else None,
+                    "ranking_context": ranking_context,
+                    "ranking_reason": _ranking_reason_text(ranking_context, float(short.score)),
                     "features_hash": _features_hash(short.row, short.model_binding.model.feature_columns),
                     "features": _feature_subset(short.row, short.model_binding.model.feature_columns),
                     "score_components": {
@@ -549,7 +627,37 @@ class LivePaperInferenceProvider:
                     pick["short_call"] = pick["short_strike"]
                     pick["long_call"] = pick["long_strike"]
                 picks.append(pick)
+                if scan_stats is not None:
+                    scan_stats["spread_candidates_built"] += 1
         return picks
+
+    def _log_scan_summary(self, scan_stats: dict[str, int], *, generated: int, selected: list[dict]) -> None:
+        _log.info(
+            "[scanner] Scan summary: chains=%d/%d, scored_short_legs=%d, spreads_considered=%d, "
+            "large_loss_vetoes=%d, stop_loss_vetoes=%d, survivors=%d, selected=%d",
+            scan_stats.get("chains_with_data", 0),
+            scan_stats.get("underlyings", 0),
+            scan_stats.get("short_contracts_scored", 0),
+            scan_stats.get("spread_candidates_considered", 0),
+            scan_stats.get("large_loss_vetoes", 0),
+            scan_stats.get("stop_loss_vetoes", 0),
+            generated,
+            len(selected),
+        )
+
+    def _log_selected_pick_details(self, picks: list[dict]) -> None:
+        for rank, pick in enumerate(picks, start=1):
+            _log.info(
+                "[scanner] Rank %d %s %s %s %s/%s score=%.6f :: %s",
+                rank,
+                pick.get("strategy"),
+                pick.get("symbol"),
+                pick.get("expiry"),
+                pick.get("short_strike"),
+                pick.get("long_strike"),
+                float(pick.get("model_score") or pick.get("score") or 0.0),
+                pick.get("ranking_reason") or "no ranking detail",
+            )
 
     def _binding_for_option_type(self, option_type: str | None) -> _LoadedModelBinding | None:
         return self.default_model_binding
@@ -751,6 +859,42 @@ def _money(value: Any) -> float | None:
     if value is None:
         return None
     return round(float(value), 4)
+
+
+def _short_leg_otm_pct(option_type: str, spot: float | None, short_strike: float | None) -> float | None:
+    if spot is None or short_strike is None or spot <= 0:
+        return None
+    if option_type == "put":
+        return (spot - short_strike) / spot
+    if option_type == "call":
+        return (short_strike - spot) / spot
+    return None
+
+
+def _ranking_reason_text(ranking_context: dict[str, Any], score: float) -> str:
+    parts = [f"score={score:.6f}"]
+    dte = ranking_context.get("dte")
+    if dte is not None:
+        parts.append(f"dte={dte}")
+    otm_pct = ranking_context.get("short_leg_otm_pct")
+    if otm_pct is not None:
+        parts.append(f"otm={otm_pct * 100:.2f}%")
+    delta = ranking_context.get("short_leg_delta")
+    if delta is not None:
+        parts.append(f"delta={delta:.3f}")
+    credit_to_width = ranking_context.get("credit_to_width")
+    if credit_to_width is not None:
+        parts.append(f"credit/width={credit_to_width:.3f}")
+    roi = ranking_context.get("roi")
+    if roi is not None:
+        parts.append(f"roi={roi:.3f}")
+    large_loss_prob = ranking_context.get("large_loss_prob")
+    if large_loss_prob is not None:
+        parts.append(f"ll_prob={large_loss_prob:.3f}")
+    stop_loss_prob = ranking_context.get("stop_loss_prob")
+    if stop_loss_prob is not None:
+        parts.append(f"sl_prob={stop_loss_prob:.3f}")
+    return ", ".join(parts)
 
 
 def _spread_widths(strategy_config: dict[str, Any], scanner_config: dict[str, Any]) -> list[float]:
