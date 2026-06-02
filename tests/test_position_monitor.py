@@ -6,6 +6,7 @@ Unit tests for HFT-specific code paths in src/position_monitor.py.
 All external dependencies (yfinance, Alpaca SDK, database, executor) are
 mocked so no network calls or real credentials are needed.
 """
+import datetime
 import os
 import sys
 import unittest
@@ -161,6 +162,53 @@ class TestRunHft(unittest.TestCase):
         monitor._check_position = MagicMock(return_value=None)
         result = monitor.run_hft(dry_run=True)
         self.assertEqual(result, [])
+
+
+class TestNewPositionGrace(unittest.TestCase):
+
+    def test_fresh_position_skips_risk_evaluation(self):
+        monitor = _make_monitor({
+            'risk_parameters': {
+                'stop_loss_multiplier': 2.0,
+                'gamma_risk': {'enabled': False},
+                'new_position_grace_minutes': 5,
+            }
+        })
+        monitor._data = MagicMock()
+        pos = _make_csp_pos()
+        pos['status_updated_at'] = datetime.datetime.now().isoformat()
+
+        result = monitor._check_position(pos, dry_run=True)
+
+        self.assertIsNone(result)
+        monitor._data.get_position_chain.assert_not_called()
+
+    def test_stale_position_still_runs_risk_evaluation(self):
+        monitor = _make_monitor({
+            'risk_parameters': {
+                'stop_loss_multiplier': 2.0,
+                'gamma_risk': {'enabled': False},
+                'new_position_grace_minutes': 5,
+            }
+        })
+        chain = MagicMock()
+        chain.put_map = {}
+        chain.has_broker_greeks = False
+        chain.spot = 180.0
+        monitor._data = MagicMock()
+        monitor._data.get_position_chain.return_value = chain
+        monitor._risk_service = MagicMock()
+        monitor._risk_service.compute_mark.return_value = 1.40
+
+        pos = _make_csp_pos()
+        pos['status_updated_at'] = (
+            datetime.datetime.now() - datetime.timedelta(minutes=6)
+        ).isoformat()
+
+        result = monitor._check_position(pos, dry_run=True)
+
+        self.assertIsNone(result)
+        monitor._data.get_position_chain.assert_called_once()
 
 
 # ══════════════════════════════════════════════════════════════════════════════

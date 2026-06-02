@@ -99,6 +99,8 @@
     "_stop_loss_max_loss_note": "Primary spread guard: close when unrealised loss exceeds this fraction of max possible loss (spread_width - entry_premium). 0.80 = exit when 80% of width is lost. Set to null to disable (legacy multiplier only).",
     "stop_loss_check_interval_minutes": 1,
     "_interval_note": "How often the position monitor polls for stop-loss triggers during market hours (default 15). Lower values give tighter intraday protection at the cost of more API calls.",
+    "new_position_grace_minutes": 5,
+    "_new_position_grace_note": "Do not fire stop-loss, profit-take, or gamma-risk exits on freshly opened positions until this many minutes have passed. Prevents noisy immediate closeouts while fills, quotes, and broker greeks settle.",
     "max_loss_multiple": {
       "enabled": true,
       "default": 30.0,

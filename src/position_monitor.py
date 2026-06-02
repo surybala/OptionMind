@@ -44,6 +44,7 @@ class PositionMonitor:
         self.config   = config          # stored for Alpaca data client access
         risk = config.get('risk_parameters', {})
         self.stop_loss_multiplier = float(risk.get('stop_loss_multiplier', 2.0))
+        self._new_position_grace_minutes = float(risk.get('new_position_grace_minutes', 0.0))
 
         # Gamma/theta dynamic risk config
         gr = risk.get('gamma_risk', {})
@@ -325,6 +326,8 @@ class PositionMonitor:
         entry_premium = pos.get('premium', 0) or 0
         if entry_premium <= 0:
             return None
+        if self._within_new_position_grace(pos):
+            return None
 
         # Adapter dispatches HFT vs non-HFT internally.
         # HFT failure raises RuntimeError (propagates to _run_loop).
@@ -372,6 +375,40 @@ class PositionMonitor:
         catches and logs it.
         """
         return self._check_position(pos, dry_run)
+
+    def _within_new_position_grace(self, pos: dict) -> bool:
+        """Skip close triggers for freshly opened positions while quotes settle."""
+        grace_minutes = self._new_position_grace_minutes
+        if grace_minutes <= 0:
+            return False
+
+        ts_raw = (
+            pos.get('status_updated_at')
+            or pos.get('filled_at')
+            or pos.get('timestamp')
+            or pos.get('created_at')
+        )
+        if not ts_raw:
+            return False
+
+        try:
+            opened_at = datetime.datetime.fromisoformat(str(ts_raw))
+        except ValueError:
+            return False
+
+        age = datetime.datetime.now(opened_at.tzinfo) - opened_at
+        if age < datetime.timedelta(minutes=grace_minutes):
+            _log.debug(
+                "[PositionMonitor] Skipping fresh %s %s (id=%s) during %.1f minute grace window "
+                "(age %.1f seconds).",
+                pos.get('type', '?'),
+                pos.get('symbol', '?'),
+                pos.get('id', '?'),
+                grace_minutes,
+                age.total_seconds(),
+            )
+            return True
+        return False
 
     def _execute_close(
         self, pos: dict, current_mark: float, pnl_dollars: float,
