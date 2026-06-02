@@ -24,6 +24,8 @@
     "_lookback_note": "Days of historical stock bars fetched per ticker for feature computation (realized-vol, momentum, regime).",
     "forward_days": 30,
     "_forward_days_note": "Lookahead window (days) for event features: earnings, dividends, FOMC.",
+    "chain_fetch_workers": 8,
+    "_chain_fetch_workers_note": "Concurrent option-chain fetches during live scanning. Higher is faster for large universes, but increases Alpaca request concurrency.",
     "market_regime_symbol": "SPY",
     "vix_symbol": "VIX",
     "stock_timeframe": "1Day",

@@ -5,6 +5,7 @@ the XGBoost ranker and filtered by the large-loss classifier.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import importlib
 import hashlib
 import json
@@ -205,16 +206,17 @@ class LivePaperInferenceProvider:
         expiration_gte = now.date() + timedelta(days=min_dte)
         expiration_lte = now.date() + timedelta(days=max_dte)
         chain_limit = self.scanner_config.get("chain_limit")
+        chain_map = self._fetch_option_chains(
+            underlyings,
+            expiration_gte=expiration_gte,
+            expiration_lte=expiration_lte,
+            chain_limit=int(chain_limit) if chain_limit else None,
+        )
         for underlying in underlyings:
             underlying_history = stock_bars.get(underlying, [])
             if not underlying_history:
                 continue
-            chain = self.provider.get_current_option_chain(
-                underlying,
-                expiration_gte=expiration_gte,
-                expiration_lte=expiration_lte,
-                limit=int(chain_limit) if chain_limit else None,
-            )
+            chain = chain_map.get(underlying) or {}
             if not chain:
                 continue
             earnings = self._earnings_events(underlying, now.date(), now.date() + timedelta(days=forward_days))
@@ -242,6 +244,49 @@ class LivePaperInferenceProvider:
             config=self.config,
             regime_label=self._runtime_regime_label,
         )
+
+    def _fetch_option_chains(
+        self,
+        underlyings: list[str],
+        *,
+        expiration_gte: date,
+        expiration_lte: date,
+        chain_limit: int | None,
+    ) -> dict[str, dict[str, OptionChainSnapshot]]:
+        if not underlyings:
+            return {}
+
+        workers = self._chain_fetch_workers(len(underlyings))
+        if workers <= 1:
+            return {
+                underlying: self.provider.get_current_option_chain(
+                    underlying,
+                    expiration_gte=expiration_gte,
+                    expiration_lte=expiration_lte,
+                    limit=chain_limit,
+                )
+                for underlying in underlyings
+            }
+
+        chains: dict[str, dict[str, OptionChainSnapshot]] = {}
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            future_to_underlying = {
+                pool.submit(
+                    self.provider.get_current_option_chain,
+                    underlying,
+                    expiration_gte=expiration_gte,
+                    expiration_lte=expiration_lte,
+                    limit=chain_limit,
+                ): underlying
+                for underlying in underlyings
+            }
+            for future in as_completed(future_to_underlying):
+                chains[future_to_underlying[future]] = future.result()
+        return chains
+
+    def _chain_fetch_workers(self, universe_size: int) -> int:
+        configured = int(self.scanner_config.get("chain_fetch_workers", 8) or 8)
+        return max(1, min(configured, universe_size))
 
     def set_runtime_regime(self, regime: Any | None) -> None:
         self._runtime_regime_label = _regime_label(regime)

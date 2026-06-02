@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 
 from ml.models.registry import load_registry, promote_model, register_model_artifact, save_registry
@@ -128,6 +130,30 @@ class WiderSpreadLiveProvider(FakeLiveProvider):
         return chain
 
 
+class SlowConcurrentLiveProvider(FakeLiveProvider):
+    def __init__(self):
+        super().__init__()
+        self._lock = threading.Lock()
+        self._active = 0
+        self.max_active = 0
+
+    def get_current_option_chain(self, underlying, expiration_gte=None, expiration_lte=None, limit=None):
+        with self._lock:
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+        try:
+            time.sleep(0.02)
+            return super().get_current_option_chain(
+                underlying,
+                expiration_gte=expiration_gte,
+                expiration_lte=expiration_lte,
+                limit=limit,
+            )
+        finally:
+            with self._lock:
+                self._active -= 1
+
+
 def _champion_registry(tmp_path):
     artifact_path = _linear_ranker_artifact(tmp_path, "linear.json", option_entry_price_coef=10.0)
     registry = register_model_artifact(load_registry(tmp_path / "registry.json"), artifact_path, model_id="champion")
@@ -224,6 +250,33 @@ def test_live_paper_inference_provider_can_emit_multiple_spread_widths(tmp_path)
     picks = inference.get_top_picks(["SPY"], n=10)
 
     assert {pick["width"] for pick in picks if pick["strategy"] == "PCS"} == {5.0, 10.0}
+
+
+def test_live_paper_inference_provider_fetches_option_chains_in_parallel(tmp_path):
+    provider = SlowConcurrentLiveProvider()
+    registry_path = _champion_registry(tmp_path)
+    inference = LivePaperInferenceProvider(
+        {
+            "ml_scanner": {
+                "registry_path": str(registry_path),
+                "chain_fetch_workers": 4,
+                "min_dte": 7,
+                "max_dte": 45,
+                "vix_symbol": "I:VIX",
+            },
+            "strategies": {
+                "put_credit_spread": {"enabled": True, "strike_width": 5, "min_net_credit": 0.10},
+                "call_credit_spread": {"enabled": True, "strike_width": 5, "min_net_credit": 0.10},
+            },
+        },
+        provider=provider,
+        now_fn=lambda: provider.now,
+    )
+
+    picks = inference.get_top_picks(["SPY", "QQQ", "IWM"], n=6)
+
+    assert len(picks) > 0
+    assert provider.max_active >= 2
 
 
 def test_live_paper_inference_provider_ignores_strategy_specific_ranker_config(tmp_path):
