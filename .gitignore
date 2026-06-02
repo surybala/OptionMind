@@ -17,7 +17,14 @@ tests/test_trades*.db
 # Backtest results
 results_*.json
 backtest-output/
-artifacts/
+artifacts/*
+!artifacts/model_registry.json
+!artifacts/models/
+artifacts/models/*
+!artifacts/models/xgboost_v006c_500r_dp28.json
+!artifacts/models/xgboost_v006c_500r_dp28.xgboost.json
+!artifacts/models/large_loss_classifier_v006e.json
+!artifacts/models/large_loss_classifier_v006e.xgboost.json
 
 # Runtime data (generated, not source)
 data/

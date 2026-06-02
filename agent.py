@@ -464,6 +464,23 @@ def _build_scanner(config: dict):
         return ModelScanner({'ml_scanner': {'enabled': False}})
 
 
+def _model_artifact_errors(label: str, artifact_path: Path, artifact: dict | None = None) -> list[str]:
+    errors: list[str] = []
+    if artifact is None:
+        try:
+            artifact = json.loads(artifact_path.read_text(encoding='utf-8'))
+        except Exception as exc:
+            return [f"{label} artifact could not be read: `{artifact_path}` ({exc})."]
+
+    model_path = str(artifact.get('model_path') or '').strip()
+    model_type = str(artifact.get('model_type') or '').strip().lower()
+    if model_type.startswith('xgboost') and not model_path:
+        errors.append(f"{label} XGBoost artifact is missing `model_path`: `{artifact_path}`.")
+    if model_path and not Path(model_path).exists():
+        errors.append(f"{label} model file not found: `{model_path}`.")
+    return errors
+
+
 def _validate_ml_hft_runtime(config: dict) -> None:
     """
     Refuse to run the live candidate pipeline if it drifts away from the
@@ -512,14 +529,35 @@ def _validate_ml_hft_runtime(config: dict) -> None:
         errors.append(
             f"Champion model registry not found: `{registry_path}` and no explicit champion artifact was configured."
         )
+    elif registry_path.exists() and not explicit_artifact_path:
+        try:
+            from ml.models.registry import load_champion_artifact
+
+            entry, artifact = load_champion_artifact(registry_path)
+            errors.extend(
+                _model_artifact_errors(
+                    "Champion model",
+                    Path(entry.artifact_manifest.artifact_path),
+                    artifact,
+                )
+            )
+            model_path = entry.artifact_manifest.model_path
+            if model_path and not Path(model_path).exists():
+                errors.append(f"Champion model file not found: `{model_path}`.")
+        except Exception as exc:
+            errors.append(f"Champion model registry could not load a champion: `{registry_path}` ({exc}).")
     if explicit_artifact_path and not Path(explicit_artifact_path).exists():
         errors.append(f"Champion model artifact not found: `{explicit_artifact_path}`.")
+    elif explicit_artifact_path:
+        errors.extend(_model_artifact_errors("Champion model", Path(explicit_artifact_path)))
 
     large_loss_path = str(ml_cfg.get('large_loss_classifier_path') or '').strip()
     if not large_loss_path:
         errors.append("`ml_scanner.large_loss_classifier_path` must be set.")
     elif not Path(large_loss_path).exists():
         errors.append(f"Large-loss classifier artifact not found: `{large_loss_path}`.")
+    else:
+        errors.extend(_model_artifact_errors("Large-loss classifier", Path(large_loss_path)))
 
     from src.alpaca_data import make_alpaca_data_client
     if make_alpaca_data_client(config) is None:

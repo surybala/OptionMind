@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -32,10 +33,54 @@ def _write_artifact(path: Path) -> None:
     path.write_text("{}", encoding="utf-8")
 
 
+def _write_registry(path: Path) -> None:
+    artifact = path.parent / "champion.json"
+    model = path.parent / "champion.xgboost.json"
+    model.write_text("{}", encoding="utf-8")
+    artifact.write_text(
+        json.dumps(
+            {
+                "model_type": "xgboost_asymmetric_pseudohuber_v002",
+                "model_path": str(model),
+                "target_column": "return_on_risk",
+            }
+        ),
+        encoding="utf-8",
+    )
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "model_registry_v001",
+                "champion_model_id": "champion",
+                "models": [
+                    {
+                        "model_id": "champion",
+                        "artifact_manifest": {
+                            "artifact_path": str(artifact),
+                            "artifact_sha256": "unused",
+                            "artifact_created_at": None,
+                            "model_type": "xgboost_asymmetric_pseudohuber_v002",
+                            "target_column": "return_on_risk",
+                            "model_path": str(model),
+                            "model_sha256": "unused",
+                        },
+                        "feature_version": "features_test",
+                        "label_version": "labels_test",
+                        "data_range": {"start": None, "end": None},
+                        "metrics": {},
+                        "promotion_status": "champion",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _base_config(tmp_path: Path) -> dict:
     registry = tmp_path / "model_registry.json"
     classifier = tmp_path / "large_loss_classifier.json"
-    _write_artifact(registry)
+    _write_registry(registry)
     _write_artifact(classifier)
     return {
         "ml_scanner": {
@@ -160,6 +205,20 @@ def test_validate_ml_hft_runtime_rejects_strategy_specific_rankers(tmp_path):
             assert False, "expected ValueError"
         except ValueError as exc:
             assert "`ml_scanner.strategy_rankers` must not be configured" in str(exc)
+
+
+def test_validate_ml_hft_runtime_requires_champion_model_file(tmp_path):
+    config = _base_config(tmp_path)
+    registry = json.loads(Path(config["ml_scanner"]["registry_path"]).read_text(encoding="utf-8"))
+    model_path = Path(registry["models"][0]["artifact_manifest"]["model_path"])
+    model_path.unlink()
+
+    with patch("src.alpaca_data.make_alpaca_data_client", return_value=object()):
+        try:
+            _validate_ml_hft_runtime(config)
+            assert False, "expected ValueError"
+        except ValueError as exc:
+            assert "Champion model file not found" in str(exc)
 
 
 def test_validate_ml_hft_runtime_requires_large_loss_classifier(tmp_path):
