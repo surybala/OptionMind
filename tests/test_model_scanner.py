@@ -130,6 +130,24 @@ class WiderSpreadLiveProvider(FakeLiveProvider):
         return chain
 
 
+class MixedDteLiveProvider(FakeLiveProvider):
+    def get_current_option_chain(self, underlying, expiration_gte=None, expiration_lte=None, limit=None):
+        return {
+            "SPY260610P00095000": OptionChainSnapshot(
+                "SPY260610P00095000", underlying, self.now, bid=1.40, ask=1.50, last=1.45, source="fake"
+            ),
+            "SPY260610P00090000": OptionChainSnapshot(
+                "SPY260610P00090000", underlying, self.now, bid=0.40, ask=0.50, last=0.45, source="fake"
+            ),
+            "SPY260630P00095000": OptionChainSnapshot(
+                "SPY260630P00095000", underlying, self.now, bid=1.60, ask=1.70, last=1.65, source="fake"
+            ),
+            "SPY260630P00090000": OptionChainSnapshot(
+                "SPY260630P00090000", underlying, self.now, bid=0.50, ask=0.60, last=0.55, source="fake"
+            ),
+        }
+
+
 class SlowConcurrentLiveProvider(FakeLiveProvider):
     def __init__(self):
         super().__init__()
@@ -250,6 +268,32 @@ def test_live_paper_inference_provider_can_emit_multiple_spread_widths(tmp_path)
     picks = inference.get_top_picks(["SPY"], n=10)
 
     assert {pick["width"] for pick in picks if pick["strategy"] == "PCS"} == {5.0, 10.0}
+
+
+def test_live_paper_inference_provider_respects_max_dte_cap(tmp_path):
+    provider = MixedDteLiveProvider()
+    registry_path = _champion_registry(tmp_path)
+    inference = LivePaperInferenceProvider(
+        {
+            "ml_scanner": {
+                "registry_path": str(registry_path),
+                "min_dte": 7,
+                "max_dte": 21,
+                "vix_symbol": "I:VIX",
+            },
+            "strategies": {
+                "put_credit_spread": {"enabled": True, "strike_width": 5, "min_net_credit": 0.10},
+                "call_credit_spread": {"enabled": False},
+            },
+        },
+        provider=provider,
+        now_fn=lambda: provider.now,
+    )
+
+    picks = inference.get_top_picks(["SPY"], n=5)
+
+    assert len(picks) == 1
+    assert picks[0]["expiry"] == "2026-06-10"
 
 
 def test_live_paper_inference_provider_fetches_option_chains_in_parallel(tmp_path):
