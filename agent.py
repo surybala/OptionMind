@@ -503,34 +503,17 @@ def _validate_ml_hft_runtime(config: dict) -> None:
 
     registry_path = Path(str(ml_cfg.get('registry_path') or 'artifacts/model_registry.json'))
     explicit_artifact_path = str(ml_cfg.get('artifact_path') or '').strip()
-    strategy_rankers = ml_cfg.get('strategy_rankers') if isinstance(ml_cfg.get('strategy_rankers'), dict) else {}
-    has_strategy_rankers = bool(strategy_rankers)
-    if not registry_path.exists() and not explicit_artifact_path and not has_strategy_rankers:
+    if ml_cfg.get('strategy_rankers'):
         errors.append(
-            f"Champion model registry not found: `{registry_path}` and no explicit artifact/strategy rankers were configured."
+            "`ml_scanner.strategy_rankers` must not be configured; PCS and CCS "
+            "must both use the generic champion ranker."
+        )
+    if not registry_path.exists() and not explicit_artifact_path:
+        errors.append(
+            f"Champion model registry not found: `{registry_path}` and no explicit champion artifact was configured."
         )
     if explicit_artifact_path and not Path(explicit_artifact_path).exists():
         errors.append(f"Champion model artifact not found: `{explicit_artifact_path}`.")
-    for strategy_name, source in strategy_rankers.items():
-        label = f"ml_scanner.strategy_rankers.{strategy_name}"
-        if isinstance(source, str):
-            if not Path(source).exists():
-                errors.append(f"{label} artifact not found: `{source}`.")
-            continue
-        if not isinstance(source, dict):
-            errors.append(f"{label} must be a path string or config object.")
-            continue
-        artifact_path = str(source.get('artifact_path') or '').strip()
-        strategy_registry = str(source.get('registry_path') or '').strip()
-        if artifact_path:
-            if not Path(artifact_path).exists():
-                errors.append(f"{label}.artifact_path not found: `{artifact_path}`.")
-            continue
-        if strategy_registry:
-            if not Path(strategy_registry).exists():
-                errors.append(f"{label}.registry_path not found: `{strategy_registry}`.")
-            continue
-        errors.append(f"{label} must set artifact_path or registry_path.")
 
     large_loss_path = str(ml_cfg.get('large_loss_classifier_path') or '').strip()
     if not large_loss_path:

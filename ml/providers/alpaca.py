@@ -41,6 +41,7 @@ class AlpacaProvider:
         end: datetime,
         timeframe: str,
     ) -> dict[str, list[PriceBar]]:
+        request_symbols = _dedupe_symbols(_alpaca_stock_symbol(symbol) for symbol in symbols)
         try:
             from alpaca.data.enums import DataFeed
             from alpaca.data.requests import StockBarsRequest
@@ -50,13 +51,14 @@ class AlpacaProvider:
             feed = self.stock_feed
 
         req = StockBarsRequest(
-            symbol_or_symbols=symbols,
+            symbol_or_symbols=request_symbols,
             timeframe=_alpaca_timeframe(timeframe),
             start=start,
             end=end,
             feed=feed,
         )
-        return _normalize_bars(self._stock().get_stock_bars(req), source=self.source)
+        bars = _normalize_bars(self._stock().get_stock_bars(req), source=self.source)
+        return _alias_requested_stock_bars(bars, symbols)
 
     def get_option_contracts(
         self,
@@ -195,6 +197,38 @@ def _normalize_bars(result: Any, source: str) -> dict[str, list[PriceBar]]:
             for row in rows
         ]
     return normalized
+
+
+def _alpaca_stock_symbol(symbol: Any) -> str:
+    raw = str(symbol or "").strip().upper()
+    if raw in {"I:VIX", "^VIX", "VIXCLS"}:
+        return "VIX"
+    return raw
+
+
+def _dedupe_symbols(symbols: Any) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for symbol in symbols:
+        if not symbol or symbol in seen:
+            continue
+        deduped.append(symbol)
+        seen.add(symbol)
+    return deduped
+
+
+def _alias_requested_stock_bars(
+    bars: dict[str, list[PriceBar]],
+    requested_symbols: list[str],
+) -> dict[str, list[PriceBar]]:
+    result = dict(bars)
+    upper_keyed = {symbol.upper(): rows for symbol, rows in bars.items()}
+    for requested in requested_symbols:
+        requested_key = str(requested).strip().upper()
+        alpaca_key = _alpaca_stock_symbol(requested)
+        if requested_key and requested_key not in result and alpaca_key in upper_keyed:
+            result[requested_key] = upper_keyed[alpaca_key]
+    return result
 
 
 def _normalize_trades(result: Any, source: str) -> dict[str, list[OptionTrade]]:

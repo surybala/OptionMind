@@ -27,23 +27,42 @@ class ContractsResult:
 
 
 class FakeStockClient:
+    def __init__(self):
+        self.last_request = None
+
     def get_stock_bars(self, request):
+        self.last_request = request
+        data = {
+            "SPY": [
+                obj(
+                    symbol="SPY",
+                    timestamp=datetime(2026, 5, 14, 13, 30, tzinfo=UTC),
+                    open=500,
+                    high=505,
+                    low=499,
+                    close=504,
+                    volume=1000,
+                    trade_count=10,
+                    vwap=502,
+                )
+            ]
+        }
+        if "VIX" in getattr(request, "symbol_or_symbols", []):
+            data["VIX"] = [
+                obj(
+                    symbol="VIX",
+                    timestamp=datetime(2026, 5, 14, 13, 30, tzinfo=UTC),
+                    open=18,
+                    high=19,
+                    low=17,
+                    close=18.5,
+                    volume=1000,
+                    trade_count=10,
+                    vwap=18.2,
+                )
+            ]
         return Result(
-            {
-                "SPY": [
-                    obj(
-                        symbol="SPY",
-                        timestamp=datetime(2026, 5, 14, 13, 30, tzinfo=UTC),
-                        open=500,
-                        high=505,
-                        low=499,
-                        close=504,
-                        volume=1000,
-                        trade_count=10,
-                        vwap=502,
-                    )
-                ]
-            }
+            data
         )
 
 
@@ -138,6 +157,22 @@ def test_get_stock_bars_normalizes_alpaca_bars():
 
     assert bars["SPY"][0].close == 504
     assert bars["SPY"][0].source == "alpaca"
+
+
+def test_get_stock_bars_maps_vix_aliases_to_alpaca_symbol():
+    p = provider()
+
+    bars = p.get_stock_bars(
+        ["SPY", "I:VIX", "^VIX"],
+        datetime(2026, 5, 14, tzinfo=UTC),
+        datetime(2026, 5, 15, tzinfo=UTC),
+        "1Day",
+    )
+
+    assert p.stock_client.last_request.symbol_or_symbols == ["SPY", "VIX"]
+    assert bars["VIX"][0].close == 18.5
+    assert bars["I:VIX"][0].close == 18.5
+    assert bars["^VIX"][0].close == 18.5
 
 
 def test_get_option_contracts_normalizes_metadata():

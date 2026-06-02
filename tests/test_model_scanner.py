@@ -197,6 +197,7 @@ def test_live_paper_inference_provider_scores_current_spreads_from_champion(tmp_
     assert picks[0]["short_strike"] == 95.0
     assert picks[0]["long_strike"] == 90.0
     assert picks[0]["model_id"] == "champion"
+    assert {pick["ranker_strategy"] for pick in picks} == {"DEFAULT"}
     assert picks[0]["feature_version"] == "features_v002"
 
 
@@ -225,15 +226,16 @@ def test_live_paper_inference_provider_can_emit_multiple_spread_widths(tmp_path)
     assert {pick["width"] for pick in picks if pick["strategy"] == "PCS"} == {5.0, 10.0}
 
 
-def test_live_paper_inference_provider_supports_strategy_specific_rankers(tmp_path):
+def test_live_paper_inference_provider_ignores_strategy_specific_ranker_config(tmp_path):
     provider = FakeLiveProvider()
+    registry_path = _champion_registry(tmp_path)
     pcs_artifact = _linear_ranker_artifact(tmp_path, "pcs.json", option_entry_price_coef=10.0)
-    ccs_artifact = _linear_ranker_artifact(tmp_path, "ccs.json", option_entry_price_coef=20.0)
+    ccs_artifact = _linear_ranker_artifact(tmp_path, "ccs.json", option_entry_price_coef=100.0)
 
     inference = LivePaperInferenceProvider(
         {
             "ml_scanner": {
-                "registry_path": str(tmp_path / "missing-registry.json"),
+                "registry_path": str(registry_path),
                 "strategy_rankers": {
                     "PCS": {"artifact_path": str(pcs_artifact)},
                     "CCS": {"artifact_path": str(ccs_artifact)},
@@ -253,11 +255,11 @@ def test_live_paper_inference_provider_supports_strategy_specific_rankers(tmp_pa
 
     picks = inference.get_top_picks(["SPY"], n=5)
 
-    assert [pick["strategy"] for pick in picks] == ["CCS", "PCS"]
-    assert picks[0]["ranker_strategy"] == "CCS"
-    assert picks[1]["ranker_strategy"] == "PCS"
-    assert picks[0]["model_artifact_path"] == str(ccs_artifact)
-    assert picks[1]["model_artifact_path"] == str(pcs_artifact)
+    assert [pick["strategy"] for pick in picks] == ["PCS", "CCS"]
+    assert {pick["ranker_strategy"] for pick in picks} == {"DEFAULT"}
+    assert {pick["model_id"] for pick in picks} == {"champion"}
+    assert str(pcs_artifact) not in {pick["model_artifact_path"] for pick in picks}
+    assert str(ccs_artifact) not in {pick["model_artifact_path"] for pick in picks}
 
 
 def test_live_paper_inference_provider_applies_regime_allocation_to_ranked_picks(tmp_path):

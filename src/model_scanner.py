@@ -27,7 +27,7 @@ from ml.datasets.candidate_dataset import (
     _underlying_features,
     _vix_features,
 )
-from ml.models.registry import ModelRegistryEntry, load_champion_artifact, load_registry
+from ml.models.registry import ModelRegistryEntry, load_champion_artifact
 from ml.providers.calendar import fomc_events
 from ml.providers.models import DividendEvent, EarningsEvent, EconomicEvent, OptionChainSnapshot, OptionContract, PriceBar
 from src.osi import parse_osi
@@ -162,14 +162,12 @@ class LivePaperInferenceProvider:
         self.registry_entry: ModelRegistryEntry | None = None
         self.model: _ChampionModel | None = None
         self.default_model_binding: _LoadedModelBinding | None = None
-        self.strategy_model_bindings: dict[str, _LoadedModelBinding] = {}
         self.large_loss_model: _ChampionModel | None = None
         self.large_loss_veto_threshold: float = float(
             self.scanner_config.get("large_loss_veto_threshold", 0.70)
         )
         self._runtime_regime_label: str | None = None
         self._load_champion()
-        self._load_strategy_rankers()
         self._load_large_loss_classifier()
 
     def get_top_picks(self, ticker_list: list[str], n: int = 10) -> list[dict]:
@@ -275,26 +273,6 @@ class LivePaperInferenceProvider:
             ),
         )
 
-    def _load_strategy_rankers(self) -> None:
-        raw = self.scanner_config.get("strategy_rankers")
-        if not isinstance(raw, dict):
-            return
-        for key, source in raw.items():
-            strategy_key = _strategy_key(key)
-            if strategy_key is None:
-                continue
-            try:
-                binding = self._load_model_binding(source, strategy_key=strategy_key)
-            except Exception as exc:
-                _log.warning("[scanner] Failed to load %s ranker: %s", strategy_key, exc)
-                continue
-            self.strategy_model_bindings[strategy_key] = binding
-            _log.info(
-                "[scanner] Strategy ranker loaded: %s -> %s",
-                strategy_key,
-                binding.artifact_path or binding.model.model_type,
-            )
-
     def _load_large_loss_classifier(self) -> None:
         path = self.scanner_config.get("large_loss_classifier_path")
         if not path:
@@ -310,45 +288,8 @@ class LivePaperInferenceProvider:
         except Exception as exc:
             _log.warning("[scanner] Failed to load large-loss classifier %s: %s", path, exc)
 
-    def _load_model_binding(self, source: Any, *, strategy_key: str) -> _LoadedModelBinding:
-        artifact_path: str | None = None
-        entry: ModelRegistryEntry | None = None
-        artifact: dict[str, Any]
-        if isinstance(source, str):
-            artifact = json.loads(Path(source).read_text(encoding="utf-8"))
-            artifact_path = str(source)
-        elif isinstance(source, dict):
-            registry_path = source.get("registry_path")
-            model_id = source.get("model_id")
-            artifact_path = source.get("artifact_path")
-            if artifact_path:
-                artifact = json.loads(Path(str(artifact_path)).read_text(encoding="utf-8"))
-            elif registry_path:
-                registry = load_registry(str(registry_path))
-                entry = registry.get(str(model_id)) if model_id else registry.champion
-                if entry is None:
-                    raise ValueError(f"No model found in registry {registry_path!r} for {model_id!r}")
-                artifact = json.loads(
-                    Path(entry.artifact_manifest.artifact_path).read_text(encoding="utf-8")
-                )
-                artifact_path = entry.artifact_manifest.artifact_path
-            else:
-                raise ValueError("strategy_rankers entries need artifact_path or registry_path")
-        else:
-            raise TypeError("strategy_rankers entries must be a path string or config dict")
-
-        if entry is not None and entry.artifact_manifest.model_path:
-            artifact = dict(artifact)
-            artifact["model_path"] = entry.artifact_manifest.model_path
-        return _LoadedModelBinding(
-            strategy_key=strategy_key,
-            model=_ChampionModel(artifact),
-            registry_entry=entry,
-            artifact_path=str(artifact_path) if artifact_path is not None else None,
-        )
-
     def _has_ranker_models(self) -> bool:
-        return self.default_model_binding is not None or bool(self.strategy_model_bindings)
+        return self.default_model_binding is not None
 
     def _load_data_provider(self) -> Any:
         provider_path = self.scanner_config.get("data_provider")
@@ -566,9 +507,6 @@ class LivePaperInferenceProvider:
         return picks
 
     def _binding_for_option_type(self, option_type: str | None) -> _LoadedModelBinding | None:
-        strategy_key = _strategy_key_from_option_type(option_type)
-        if strategy_key and strategy_key in self.strategy_model_bindings:
-            return self.strategy_model_bindings[strategy_key]
         return self.default_model_binding
 
     def _earnings_events(self, underlying: str, start: date, end: date) -> list[EarningsEvent]:
@@ -867,24 +805,6 @@ def _feature_subset(row: dict[str, Any], feature_columns: list[str]) -> dict[str
 def _features_hash(row: dict[str, Any], feature_columns: list[str]) -> str:
     payload = json.dumps(_feature_subset(row, feature_columns), sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _strategy_key(value: Any) -> str | None:
-    raw = str(value or "").strip().upper()
-    if raw in {"PCS", "PUT", "PUT_CREDIT_SPREAD"}:
-        return "PCS"
-    if raw in {"CCS", "CALL", "CALL_CREDIT_SPREAD"}:
-        return "CCS"
-    return None
-
-
-def _strategy_key_from_option_type(option_type: str | None) -> str | None:
-    raw = str(option_type or "").strip().lower()
-    if raw == "put":
-        return "PCS"
-    if raw == "call":
-        return "CCS"
-    return None
 
 
 def _regime_label(regime: Any | None) -> str | None:

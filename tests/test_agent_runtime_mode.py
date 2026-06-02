@@ -147,6 +147,21 @@ def test_validate_ml_hft_runtime_rejects_non_alpaca_data_provider(tmp_path):
             assert "`ml_scanner.data_provider` must be empty or point to `AlpacaProvider`" in str(exc)
 
 
+def test_validate_ml_hft_runtime_rejects_strategy_specific_rankers(tmp_path):
+    config = _base_config(tmp_path)
+    config["ml_scanner"]["strategy_rankers"] = {
+        "PCS": {"artifact_path": "artifacts/models/pcs.json"},
+        "CCS": {"artifact_path": "artifacts/models/ccs.json"},
+    }
+
+    with patch("src.alpaca_data.make_alpaca_data_client", return_value=object()):
+        try:
+            _validate_ml_hft_runtime(config)
+            assert False, "expected ValueError"
+        except ValueError as exc:
+            assert "`ml_scanner.strategy_rankers` must not be configured" in str(exc)
+
+
 def test_validate_ml_hft_runtime_requires_large_loss_classifier(tmp_path):
     config = _base_config(tmp_path)
     config["ml_scanner"]["large_loss_classifier_path"] = ""

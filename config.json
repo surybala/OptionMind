@@ -10,15 +10,7 @@
     "provider": "",
     "_provider_note": "Leave empty to use LivePaperInferenceProvider directly (recommended). Set to 'module:Class' only for a custom inference provider.",
     "registry_path": "artifacts/model_registry.json",
-    "strategy_rankers": {
-      "PCS": {
-        "artifact_path": "artifacts/models/xgboost_v006c_500r_dp28.json"
-      },
-      "CCS": {
-        "artifact_path": "artifacts/models/xgboost_v006c_500r_dp28.json"
-      }
-    },
-    "_strategy_rankers_note": "Optional side-specific rankers for strategy-aware inference. Each entry may supply artifact_path, or registry_path (+ optional model_id). The current bootstrap points both sides at the champion artifact until dedicated PCS/CCS models are trained.",
+    "_registry_path_note": "Single source of truth for the generic champion ranker. PCS and CCS candidates are both scored by this registry champion.",
     "data_provider": "",
     "_data_provider_note": "Leave empty to use AlpacaProvider.from_env() (paper=alpaca.paper). Set to 'module:Class' for a custom market-data provider.",
     "top_n": 10,
@@ -33,7 +25,7 @@
     "forward_days": 30,
     "_forward_days_note": "Lookahead window (days) for event features: earnings, dividends, FOMC.",
     "market_regime_symbol": "SPY",
-    "vix_symbol": "I:VIX",
+    "vix_symbol": "VIX",
     "stock_timeframe": "1Day",
     "risk_free_rate": 0.045,
     "spread_widths": [5, 10, 15, 20],
