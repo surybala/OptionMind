@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 _external_mock = MagicMock()
@@ -19,7 +20,7 @@ for _mod in [
 ]:
     sys.modules.setdefault(_mod, _external_mock)
 
-from agent import _build_scanner  # noqa: E402
+from agent import _build_scanner, _load_tickers  # noqa: E402
 
 
 _BASE_CONFIG = {
@@ -78,3 +79,32 @@ class TestBuildScannerMLExplicitProvider:
             with patch('src.model_scanner.LivePaperInferenceProvider') as MockLive:
                 _build_scanner(config)
         MockLive.assert_not_called()
+
+
+class TestLoadTickers:
+
+    def _args(self, *, universe=None, tickers=None, refresh_universe=False):
+        return SimpleNamespace(
+            universe=universe,
+            tickers=tickers,
+            refresh_universe=refresh_universe,
+        )
+
+    def test_etf_universe_uses_stable_preset(self):
+        with patch('src.universe.get_stable_etf_universe', return_value=['SPY', 'QQQ']) as mock_stable, \
+             patch('src.universe.get_etf_universe') as mock_all:
+            result = _load_tickers(self._args(universe='etf'), {'universe': 'etf'})
+
+        assert result == ['SPY', 'QQQ']
+        mock_stable.assert_called_once()
+        mock_all.assert_not_called()
+
+    def test_etf_all_universe_uses_full_listing(self):
+        with patch('src.universe.get_etf_universe', return_value=['AAA', 'BBB']) as mock_all:
+            result = _load_tickers(
+                self._args(universe='etf-all', refresh_universe=True),
+                {'universe': 'etf'},
+            )
+
+        assert result == ['AAA', 'BBB']
+        mock_all.assert_called_once()

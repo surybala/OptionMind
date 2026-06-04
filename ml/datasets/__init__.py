@@ -11,7 +11,12 @@ from ml.datasets.intraday_risk_dataset import (
     IntradayRiskDatasetConfig,
     IntradayRiskRow,
 )
-from ml.datasets.etf_universe import BROAD_ETF_UNDERLYINGS, broad_etf_underlyings
+from ml.datasets.etf_universe import (
+    BROAD_ETF_UNDERLYINGS,
+    STABLE_ETF_UNDERLYINGS,
+    broad_etf_underlyings,
+    stable_etf_underlyings,
+)
 
 __all__ = [
     "BROAD_ETF_UNDERLYINGS",
@@ -21,6 +26,8 @@ __all__ = [
     "IntradayRiskDatasetBuilder",
     "IntradayRiskDatasetConfig",
     "IntradayRiskRow",
+    "STABLE_ETF_UNDERLYINGS",
     "broad_etf_underlyings",
     "market_open_utc",
+    "stable_etf_underlyings",
 ]

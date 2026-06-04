@@ -485,28 +485,7 @@ class PositionMonitor:
         )
 
         contracts = int(pos.get('contracts') or 1)
-        # Trigger 1: stop-loss
-        sl_signal = self._stop_loss_rule.evaluate(entry_premium, current_mark, pnl_per_share, spot, pos)
-        if sl_signal:
-            pnl_dollars = round(pnl_per_share * 100 * contracts, 2)
-            tag = "[DRY RUN]" if dry_run else "[LIVE]"
-            print(f"{status_str}  → STOP-LOSS TRIGGERED {tag}")
-            pos['entry_premium'] = entry_premium
-            pos['current_mark']  = current_mark
-            pos['pnl_per_share'] = pnl_per_share
-            # Enrich with risk metrics so the position-closed email always
-            # shows the "Risk Metrics at Close" section with real values.
-            if metrics_fn is not None:
-                raw = _load_metrics()
-                if raw is not None:
-                    dte, risk = raw
-                    pos['dte']         = dte
-                    pos['ratio']       = risk['gamma_theta_ratio']
-                    pos['short_delta'] = abs(risk['net_short_delta'])
-                    pos['risk_score']  = risk['risk_score']
-            return self._execute_close(pos, current_mark, pnl_dollars, 'STOP_LOSS', dry_run)
-
-        # Trigger 2: profit-take (happy-path exit — lock in captured premium)
+        # Trigger 1: profit-take (happy-path exit — lock in captured premium)
         pt_signal = self._profit_take_rule.evaluate(entry_premium, current_mark, pnl_per_share, spot, pos)
         if pt_signal:
             pnl_dollars  = round(pnl_per_share * 100 * contracts, 2)
@@ -520,7 +499,7 @@ class PositionMonitor:
             pos['profit_take_pct']    = self._pt_pct
             return self._execute_close(pos, current_mark, pnl_dollars, 'PROFIT_TAKE', dry_run)
 
-        # Trigger 3: ML exit-risk model
+        # Trigger 2: ML exit-risk model (primary proactive drawdown guard)
         if self._ml_exit_risk.is_active():
             metrics = _load_metrics()
             risk = metrics[1] if metrics is not None else None
@@ -565,7 +544,28 @@ class PositionMonitor:
                             dry_run,
                         )
 
-        # Trigger 4: gamma risk
+        # Trigger 3: deterministic stop-loss fallback
+        sl_signal = self._stop_loss_rule.evaluate(entry_premium, current_mark, pnl_per_share, spot, pos)
+        if sl_signal:
+            pnl_dollars = round(pnl_per_share * 100 * contracts, 2)
+            tag = "[DRY RUN]" if dry_run else "[LIVE]"
+            print(f"{status_str}  → STOP-LOSS TRIGGERED {tag}")
+            pos['entry_premium'] = entry_premium
+            pos['current_mark']  = current_mark
+            pos['pnl_per_share'] = pnl_per_share
+            # Enrich with risk metrics so the position-closed email always
+            # shows the "Risk Metrics at Close" section with real values.
+            if metrics_fn is not None:
+                raw = _load_metrics()
+                if raw is not None:
+                    dte, risk = raw
+                    pos['dte']         = dte
+                    pos['ratio']       = risk['gamma_theta_ratio']
+                    pos['short_delta'] = abs(risk['net_short_delta'])
+                    pos['risk_score']  = risk['risk_score']
+            return self._execute_close(pos, current_mark, pnl_dollars, 'STOP_LOSS', dry_run)
+
+        # Trigger 4: gamma risk (legacy; disabled in live config)
         if self._gamma_risk_enabled and spot is not None:
             gr_result = gamma_risk_fn(entry_premium, pnl_per_share)
             if gr_result is not None:

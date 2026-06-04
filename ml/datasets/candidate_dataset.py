@@ -399,8 +399,9 @@ class HistoricalCandidateDatasetBuilder:
         expiration_gte = _datetime_to_date(window_start) + timedelta(days=config.min_dte)
         expiration_lte = _datetime_to_date(window_end) + timedelta(days=config.max_dte)
 
-        contracts = self.contract_provider.get_option_contracts(
-            [underlying],
+        contracts = _fetch_contracts_for_status(
+            self.contract_provider,
+            underlying,
             expiration_gte=expiration_gte,
             expiration_lte=expiration_lte,
             status=config.contract_status,
@@ -573,18 +574,20 @@ class HistoricalCandidateDatasetBuilder:
             if not short_path or not long_path:
                 continue
 
+            aligned_pairs = _aligned_option_pairs(
+                short_path,
+                long_path,
+                start=window_start,
+                end=window_end + timedelta(days=config.forward_days),
+            )
             if is_last_window:
-                window_bars = [b for b in short_path if window_start <= b.timestamp <= config.entry_end]
+                window_pairs = [pair for pair in aligned_pairs if window_start <= pair[0] <= config.entry_end]
             else:
-                window_bars = [b for b in short_path if window_start <= b.timestamp < window_end]
+                window_pairs = [pair for pair in aligned_pairs if window_start <= pair[0] < window_end]
 
-            long_by_time = {bar.timestamp: bar for bar in long_path}
-            for short_entry_bar in window_bars[:: config.sample_every_n_bars]:
-                long_entry_bar = long_by_time.get(short_entry_bar.timestamp)
-                if long_entry_bar is None:
-                    continue
+            for entry_timestamp, short_entry_bar, long_entry_bar in window_pairs[:: config.sample_every_n_bars]:
 
-                entry_dte = _dte(short_entry_bar.timestamp, short_contract.expiration)
+                entry_dte = _dte(entry_timestamp, short_contract.expiration)
                 if entry_dte is None or entry_dte < config.min_dte or entry_dte > config.max_dte:
                     continue
                 # Data quality gates: both legs must have real prices and volume.
@@ -598,25 +601,20 @@ class HistoricalCandidateDatasetBuilder:
                     continue
                 if (long_entry_bar.volume is None or long_entry_bar.volume < config.min_option_entry_volume):
                     continue
-                future_short_path = [
-                    bar
-                    for bar in short_path
-                    if short_entry_bar.timestamp < bar.timestamp
-                    <= short_entry_bar.timestamp + timedelta(days=config.forward_days)
+                future_pairs = [
+                    pair
+                    for pair in aligned_pairs
+                    if entry_timestamp < pair[0] <= entry_timestamp + timedelta(days=config.forward_days)
                 ]
-                future_long_path = [
-                    bar
-                    for bar in long_path
-                    if short_entry_bar.timestamp < bar.timestamp
-                    <= short_entry_bar.timestamp + timedelta(days=config.forward_days)
-                ]
-                if min(len(future_short_path), len(future_long_path)) < config.min_forward_bars:
+                if len(future_pairs) < config.min_forward_bars:
                     continue
+                future_short_path = [pair[1] for pair in future_pairs]
+                future_long_path = [pair[2] for pair in future_pairs]
 
-                underlying_features = _underlying_features(underlying_history, short_entry_bar.timestamp)
+                underlying_features = _underlying_features(underlying_history, entry_timestamp)
                 market_features = _market_regime_features(
                     market_history,
-                    short_entry_bar.timestamp,
+                    entry_timestamp,
                     config.market_regime_symbol,
                 )
                 greeks_features = _option_greeks_features(
@@ -629,22 +627,22 @@ class HistoricalCandidateDatasetBuilder:
                     underlying_features["underlying_realized_vol_5d"],
                     underlying_features["underlying_realized_vol_20d"],
                 )
-                lookback_features = _option_lookback_features(short_path, short_entry_bar.timestamp)
-                vix_feat = _vix_features(vix_bars, short_entry_bar.timestamp)
+                lookback_features = _option_lookback_features(short_path, entry_timestamp)
+                vix_feat = _vix_features(vix_bars, entry_timestamp)
                 event_feat = _event_features(
                     earnings_events.get(underlying.upper(), []),
-                    short_entry_bar.timestamp,
+                    entry_timestamp,
                     config.forward_days,
                 )
                 dividend_feat = _dividend_features(
                     dividend_events.get(underlying.upper(), []),
-                    short_entry_bar.timestamp,
+                    entry_timestamp,
                     config.forward_days,
                 )
                 macro_feat = _macro_event_features(
                     fomc_list,
                     macro_events,
-                    short_entry_bar.timestamp,
+                    entry_timestamp,
                     config.forward_days,
                 )
                 try:
@@ -685,6 +683,61 @@ class HistoricalCandidateDatasetBuilder:
                     )
                 )
         return rows
+
+
+def _aligned_option_pairs(
+    short_path: list[PriceBar],
+    long_path: list[PriceBar],
+    *,
+    start: datetime,
+    end: datetime,
+) -> list[tuple[datetime, PriceBar, PriceBar]]:
+    short_sorted = sorted((bar for bar in short_path if bar.timestamp <= end), key=lambda bar: bar.timestamp)
+    long_sorted = sorted((bar for bar in long_path if bar.timestamp <= end), key=lambda bar: bar.timestamp)
+    timeline = sorted(
+        {
+            bar.timestamp
+            for bar in [*short_sorted, *long_sorted]
+            if start <= bar.timestamp <= end
+        }
+    )
+    pairs: list[tuple[datetime, PriceBar, PriceBar]] = []
+    short_index = 0
+    long_index = 0
+    current_short: PriceBar | None = None
+    current_long: PriceBar | None = None
+    for timestamp in timeline:
+        while short_index < len(short_sorted) and short_sorted[short_index].timestamp <= timestamp:
+            current_short = short_sorted[short_index]
+            short_index += 1
+        while long_index < len(long_sorted) and long_sorted[long_index].timestamp <= timestamp:
+            current_long = long_sorted[long_index]
+            long_index += 1
+        if current_short is None or current_long is None:
+            continue
+        pairs.append(
+            (
+                timestamp,
+                _clone_bar_with_timestamp(current_short, timestamp),
+                _clone_bar_with_timestamp(current_long, timestamp),
+            )
+        )
+    return pairs
+
+
+def _clone_bar_with_timestamp(bar: PriceBar, timestamp: datetime) -> PriceBar:
+    return PriceBar(
+        symbol=bar.symbol,
+        timestamp=timestamp,
+        open=bar.open,
+        high=bar.high,
+        low=bar.low,
+        close=bar.close,
+        volume=bar.volume,
+        trade_count=bar.trade_count,
+        vwap=bar.vwap,
+        source=bar.source,
+    )
 
 
 def _candidate_contracts(
@@ -731,6 +784,37 @@ def _candidate_contracts(
                 next_values.append(bucket)
         bucket_values = next_values
     return ordered
+
+
+def _fetch_contracts_for_status(
+    contract_provider: OptionContractProvider,
+    underlying: str,
+    *,
+    expiration_gte: date | None,
+    expiration_lte: date | None,
+    status: str,
+    limit: int | None,
+) -> list[OptionContract]:
+    if status != "all":
+        return contract_provider.get_option_contracts(
+            [underlying],
+            expiration_gte=expiration_gte,
+            expiration_lte=expiration_lte,
+            status=status,
+            limit=limit,
+        )
+
+    merged: dict[str, OptionContract] = {}
+    for contract_status in ("active", "inactive"):
+        for contract in contract_provider.get_option_contracts(
+            [underlying],
+            expiration_gte=expiration_gte,
+            expiration_lte=expiration_lte,
+            status=contract_status,
+            limit=limit,
+        ):
+            merged.setdefault(contract.symbol, contract)
+    return list(merged.values())
 
 
 def _credit_spread_pairs(

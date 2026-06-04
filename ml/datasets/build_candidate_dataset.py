@@ -12,35 +12,75 @@ from dotenv import load_dotenv
 
 from ml.datasets import CandidateDatasetConfig, HistoricalCandidateDatasetBuilder
 from ml.datasets.candidate_dataset import CandidateDatasetRow
-from ml.datasets.etf_universe import broad_etf_underlyings
-from ml.providers import AlpacaProvider, FMPProvider, FREDProvider, MassiveProvider, YFinanceProvider
+from ml.datasets.etf_universe import broad_etf_underlyings, stable_etf_underlyings
+from ml.providers import AlpacaProvider, FMPProvider, FREDProvider, MassiveProvider, ParquetMinuteBarProvider, YFinanceProvider
 from ml.storage import ParquetDatasetWriter
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build prototype option candidate dataset rows.")
-    parser.add_argument("--provider", default="alpaca", choices=["alpaca", "massive"], help="Provider adapter to use for option data (contracts, option bars, dividends).")
+    parser.add_argument(
+        "--provider",
+        default="alpaca",
+        choices=["alpaca", "massive", "parquet"],
+        help=(
+            "Provider adapter to use for option contract metadata. "
+            "'parquet' derives contract metadata from a local option minute parquet dataset."
+        ),
+    )
     parser.add_argument(
         "--stock-provider",
         default="same",
-        choices=["same", "yfinance"],
+        choices=["same", "yfinance", "parquet"],
         help=(
             "Provider for underlying stock bars. "
             "'same' (default) uses the same provider as --provider. "
             "'yfinance' uses Yahoo Finance for stock bars — recommended when the main "
-            "provider has a limited stock bar retention window (e.g. Massive's 2-year cap)."
+            "provider has a limited stock bar retention window (e.g. Massive's 2-year cap). "
+            "'parquet' uses a local minute-bar parquet dataset."
         ),
     )
-    parser.add_argument("--underlyings", default="SPY", help="Comma-separated underlying symbols, or 'broad-etfs'.")
+    parser.add_argument(
+        "--option-price-provider",
+        default="same",
+        choices=["same", "parquet"],
+        help=(
+            "Provider for historical option bars used for entry-path sampling and labels. "
+            "'same' uses --provider. 'parquet' uses a local minute-bar parquet dataset."
+        ),
+    )
+    parser.add_argument(
+        "--stock-dataset-root",
+        default=None,
+        help="Required when --stock-provider parquet. Root of stock minute parquet dataset_version directory.",
+    )
+    parser.add_argument(
+        "--option-dataset-root",
+        default=None,
+        help="Required when --option-price-provider parquet. Root of option minute parquet dataset_version directory.",
+    )
+    parser.add_argument(
+        "--underlyings",
+        default="SPY",
+        help="Comma-separated underlying symbols, or a preset alias like 'stable-etfs' / 'broad-etfs'.",
+    )
     parser.add_argument(
         "--underlying-preset",
         default="custom",
-        choices=["custom", "broad-etfs"],
-        help="Preset universe. Use 'broad-etfs' for liquid ETF premium-selling research.",
+        choices=["custom", "stable-etfs", "broad-etfs"],
+        help=(
+            "Preset universe. Use 'stable-etfs' for the curated live-style ETF set "
+            "or 'broad-etfs' for the wider research ETF universe."
+        ),
     )
     parser.add_argument("--entry-start", required=True, help="Entry window start, ISO datetime or YYYY-MM-DD.")
     parser.add_argument("--entry-end", required=True, help="Entry window end, ISO datetime or YYYY-MM-DD.")
-    parser.add_argument("--contract-status", default="inactive", choices=["active", "inactive"], help="Option contract status.")
+    parser.add_argument(
+        "--contract-status",
+        default="inactive",
+        choices=["active", "inactive", "all"],
+        help="Option contract status. Use 'all' to combine active and inactive contracts for recent historical windows.",
+    )
     parser.add_argument("--strategy-family", default="credit-spreads", choices=["short-option", "credit-spreads"], help="Label family to generate.")
     parser.add_argument("--strategy-types", default="PCS,CCS", help="Comma-separated strategy types for credit-spreads.")
     parser.add_argument("--spread-widths", default="5,10,15,20", help="Comma-separated spread widths to pair for PCS/CCS rows.")
@@ -156,8 +196,13 @@ def main() -> int:
     args = parse_args()
     load_dotenv()
 
-    provider = _provider_from_args(args.provider)
-    stock_provider = _stock_provider_from_args(args.stock_provider, provider)
+    provider = _provider_from_args(args.provider, option_dataset_root=args.option_dataset_root)
+    stock_provider = _stock_provider_from_args(args.stock_provider, provider, dataset_root=args.stock_dataset_root)
+    option_price_provider = _option_price_provider_from_args(
+        args.option_price_provider,
+        provider,
+        dataset_root=args.option_dataset_root,
+    )
     event_provider = _event_provider_from_args(args.event_provider)
     dividend_provider = _dividend_provider_from_args(args.dividend_provider, provider)
     economic_provider = _economic_provider_from_args(args.economic_calendar)
@@ -199,7 +244,7 @@ def main() -> int:
     rows = HistoricalCandidateDatasetBuilder(
         stock_provider,
         provider,
-        provider,
+        option_price_provider,
         event_provider=event_provider,
         dividend_provider=dividend_provider,
         economic_provider=economic_provider,
@@ -244,6 +289,9 @@ def main() -> int:
             "dividend_provider": args.dividend_provider,
             "volatility_provider": args.volatility_provider,
             "stock_provider": args.stock_provider,
+            "option_price_provider": args.option_price_provider,
+            "stock_dataset_root": args.stock_dataset_root,
+            "option_dataset_root": args.option_dataset_root,
             "underlying_preset": underlying_preset,
             "min_output_rows": args.min_output_rows,
         },
@@ -272,12 +320,16 @@ def _write_jsonl(rows, output: Path) -> None:
 
 
 def _underlyings_from_args(args: argparse.Namespace) -> list[str]:
+    if _underlying_preset_from_args(args) == "stable-etfs":
+        return stable_etf_underlyings()
     if _underlying_preset_from_args(args) == "broad-etfs":
         return broad_etf_underlyings()
     return [item.strip().upper() for item in args.underlyings.split(",") if item.strip()]
 
 
 def _underlying_preset_from_args(args: argparse.Namespace) -> str:
+    if args.underlying_preset == "stable-etfs" or args.underlyings.strip().lower() in {"stable-etfs", "stable_etfs"}:
+        return "stable-etfs"
     if args.underlying_preset == "broad-etfs" or args.underlyings.strip().lower() in {"broad-etfs", "broad_etfs"}:
         return "broad-etfs"
     return "custom"
@@ -295,15 +347,19 @@ def _parse_datetime(value: str, *, end_of_day: bool = False) -> datetime:
     return parsed
 
 
-def _provider_from_args(provider_name: str):
+def _provider_from_args(provider_name: str, *, option_dataset_root: str | None = None):
     if provider_name == "alpaca":
         return AlpacaProvider.from_env()
     if provider_name == "massive":
         return MassiveProvider.from_env()
+    if provider_name == "parquet":
+        if not option_dataset_root:
+            raise ValueError("--option-dataset-root is required when --provider parquet")
+        return ParquetMinuteBarProvider(Path(option_dataset_root))
     raise ValueError(f"Unsupported provider: {provider_name}")
 
 
-def _stock_provider_from_args(name: str, market_provider=None):
+def _stock_provider_from_args(name: str, market_provider=None, *, dataset_root: str | None = None):
     """Return the MarketDataProvider used exclusively for underlying stock bars.
 
     'same' reuses the main market_provider (e.g. Massive) — suitable when the
@@ -315,7 +371,21 @@ def _stock_provider_from_args(name: str, market_provider=None):
         return market_provider
     if name == "yfinance":
         return YFinanceProvider()
+    if name == "parquet":
+        if not dataset_root:
+            raise ValueError("--stock-dataset-root is required when --stock-provider parquet")
+        return ParquetMinuteBarProvider(Path(dataset_root))
     raise ValueError(f"Unsupported stock provider: {name}")
+
+
+def _option_price_provider_from_args(name: str, price_provider=None, *, dataset_root: str | None = None):
+    if name == "same":
+        return price_provider
+    if name == "parquet":
+        if not dataset_root:
+            raise ValueError("--option-dataset-root is required when --option-price-provider parquet")
+        return ParquetMinuteBarProvider(Path(dataset_root))
+    raise ValueError(f"Unsupported option price provider: {name}")
 
 
 def _event_provider_from_args(name: str):

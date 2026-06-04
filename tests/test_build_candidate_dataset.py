@@ -1,12 +1,16 @@
 from datetime import UTC, datetime
+from pathlib import Path
 
 from ml.datasets.build_candidate_dataset import (
     _dividend_provider_from_args,
+    _option_price_provider_from_args,
     _parse_datetime,
+    _provider_from_args,
+    _stock_provider_from_args,
     _underlyings_from_args,
     parse_args,
 )
-from ml.providers import MassiveProvider
+from ml.providers import MassiveProvider, ParquetMinuteBarProvider
 
 
 def test_parse_datetime_keeps_date_start_for_entry_start():
@@ -74,6 +78,47 @@ def test_parse_args_defaults_to_full_contract_metadata_pagination(monkeypatch):
     assert args.dividend_provider == "massive"
     assert args.min_output_rows == 0
     assert args.append is False
+    assert args.option_price_provider == "same"
+    assert args.contract_status == "inactive"
+
+
+def test_parse_args_accepts_parquet_provider(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "build_candidate_dataset",
+            "--entry-start",
+            "2025-04-01",
+            "--entry-end",
+            "2025-04-30",
+            "--provider",
+            "parquet",
+            "--option-dataset-root",
+            "/tmp/options",
+        ],
+    )
+
+    args = parse_args()
+    assert args.provider == "parquet"
+    assert args.option_dataset_root == "/tmp/options"
+
+
+def test_parse_args_accepts_all_contract_status(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "build_candidate_dataset",
+            "--entry-start",
+            "2025-04-01",
+            "--entry-end",
+            "2025-04-30",
+            "--contract-status",
+            "all",
+        ],
+    )
+
+    args = parse_args()
+    assert args.contract_status == "all"
 
 
 def test_underlying_preset_expands_broad_etfs(monkeypatch):
@@ -92,6 +137,26 @@ def test_underlying_preset_expands_broad_etfs(monkeypatch):
 
     underlyings = _underlyings_from_args(parse_args())
     assert {"SPY", "QQQ", "IWM", "TLT", "GLD"}.issubset(set(underlyings))
+
+
+def test_underlying_preset_expands_stable_etfs(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "build_candidate_dataset",
+            "--entry-start",
+            "2025-04-01",
+            "--entry-end",
+            "2025-04-30",
+            "--underlying-preset",
+            "stable-etfs",
+        ],
+    )
+
+    underlyings = _underlyings_from_args(parse_args())
+    assert {"SPY", "QQQ", "TLT", "GLD"}.issubset(set(underlyings))
+    assert "IWM" not in underlyings
+    assert "XBI" not in underlyings
 
 
 def test_underlyings_accepts_broad_etfs_alias(monkeypatch):
@@ -113,7 +178,72 @@ def test_underlyings_accepts_broad_etfs_alias(monkeypatch):
     assert "XLF" in underlyings
 
 
+def test_underlyings_accepts_stable_etfs_alias(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "build_candidate_dataset",
+            "--entry-start",
+            "2025-04-01",
+            "--entry-end",
+            "2025-04-30",
+            "--underlyings",
+            "stable-etfs",
+        ],
+    )
+
+    underlyings = _underlyings_from_args(parse_args())
+    assert "SPY" in underlyings
+    assert "XLV" in underlyings
+    assert "IWM" not in underlyings
+
+
 def test_dividend_provider_reuses_massive_market_provider():
     provider = MassiveProvider(api_key="test")
 
     assert _dividend_provider_from_args("massive", provider) is provider
+
+
+def test_provider_from_args_builds_parquet_provider(tmp_path):
+    provider = _provider_from_args("parquet", option_dataset_root=str(tmp_path))
+
+    assert isinstance(provider, ParquetMinuteBarProvider)
+    assert Path(provider.dataset_root) == tmp_path
+
+
+def test_provider_from_args_requires_option_dataset_root_for_parquet():
+    try:
+        _provider_from_args("parquet")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "--option-dataset-root" in str(exc)
+
+
+def test_stock_provider_from_args_builds_parquet_provider(tmp_path):
+    provider = _stock_provider_from_args("parquet", dataset_root=str(tmp_path))
+
+    assert isinstance(provider, ParquetMinuteBarProvider)
+    assert Path(provider.dataset_root) == tmp_path
+
+
+def test_stock_provider_from_args_requires_dataset_root_for_parquet():
+    try:
+        _stock_provider_from_args("parquet")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "--stock-dataset-root" in str(exc)
+
+
+def test_option_price_provider_from_args_builds_parquet_provider(tmp_path):
+    provider = _option_price_provider_from_args("parquet", dataset_root=str(tmp_path))
+
+    assert isinstance(provider, ParquetMinuteBarProvider)
+    assert Path(provider.dataset_root) == tmp_path
+
+
+def test_option_price_provider_from_args_requires_dataset_root_for_parquet():
+    try:
+        _option_price_provider_from_args("parquet")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "--option-dataset-root" in str(exc)

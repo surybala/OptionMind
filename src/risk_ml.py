@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
-from ml.models.registry import ModelRegistryEntry, load_champion_artifact, load_registry
+from ml.models.registry import ModelRegistryEntry, load_registry
 
 _log = logging.getLogger("optionwheel")
 
@@ -17,6 +17,9 @@ class MlExitRiskService:
     def __init__(self, config: dict):
         risk = config.get("risk_parameters", {})
         self.stop_loss_multiplier = float(risk.get("stop_loss_multiplier", 2.0))
+        self.stop_loss_max_loss_pct = self._optional_float(risk.get("stop_loss_max_loss_pct"))
+        self.profit_take_enabled = bool(risk.get("profit_take_enabled", True))
+        self.profit_take_pct = float(risk.get("profit_take_pct", 0.75))
         self.config = dict(risk.get("ml_exit_risk", {}) or {})
         self.enabled = bool(self.config.get("enabled", False))
         self.threshold = float(self.config.get("threshold", 0.70))
@@ -123,26 +126,54 @@ class MlExitRiskService:
     def _load_artifact(self) -> tuple[ModelRegistryEntry | None, dict[str, Any], str | None]:
         artifact_path = self.config.get("artifact_path")
         if artifact_path:
-            artifact = json.loads(Path(str(artifact_path)).read_text(encoding="utf-8"))
-            return None, artifact, str(artifact_path)
+            resolved_artifact = self._resolve_path(str(artifact_path))
+            artifact = json.loads(resolved_artifact.read_text(encoding="utf-8"))
+            return None, artifact, str(resolved_artifact)
 
         registry_path = self.config.get("registry_path")
         if registry_path:
+            registry_file = self._resolve_path(str(registry_path))
+            registry = load_registry(str(registry_file))
             model_id = self.config.get("model_id")
             if model_id:
-                registry = load_registry(str(registry_path))
                 entry = registry.get(str(model_id))
                 if entry is None:
                     raise ValueError(f"No model found in registry {registry_path!r} for {model_id!r}")
-                artifact = json.loads(
-                    Path(entry.artifact_manifest.artifact_path).read_text(encoding="utf-8")
+                artifact_path = self._resolve_registry_artifact_path(
+                    registry_file,
+                    entry.artifact_manifest.artifact_path,
                 )
-                return entry, artifact, entry.artifact_manifest.artifact_path
+                artifact = json.loads(
+                    artifact_path.read_text(encoding="utf-8")
+                )
+                return entry, artifact, str(artifact_path)
 
-            entry, artifact = load_champion_artifact(str(registry_path))
-            return entry, artifact, entry.artifact_manifest.artifact_path
+            entry = registry.champion
+            if entry is None:
+                raise ValueError(f"No champion model is configured in {registry_file}")
+            artifact_path = self._resolve_registry_artifact_path(
+                registry_file,
+                entry.artifact_manifest.artifact_path,
+            )
+            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+            return entry, artifact, str(artifact_path)
 
         raise ValueError("ml_exit_risk requires artifact_path or registry_path")
+
+    @staticmethod
+    def _resolve_path(path_str: str) -> Path:
+        path = Path(path_str)
+        return path if path.is_absolute() else Path.cwd() / path
+
+    @staticmethod
+    def _resolve_registry_artifact_path(registry_file: Path, artifact_path: str) -> Path:
+        path = Path(artifact_path)
+        if path.is_absolute():
+            return path
+        cwd_resolved = Path.cwd() / path
+        if cwd_resolved.exists():
+            return cwd_resolved
+        return registry_file.parent / path
 
     def _build_feature_row(
         self,
@@ -188,15 +219,52 @@ class MlExitRiskService:
         max_loss_per_share = (
             max(0.0, spread_width - entry_premium) if spread_width is not None and spread_width > 0 else None
         )
-        stop_trigger_mark = (
-            (1.0 + self.stop_loss_multiplier)
-            * entry_premium
+        stop_trigger_mark = self._stop_trigger_mark(
+            entry_premium=entry_premium,
+            spread_width=spread_width,
         )
         if stop_trigger_mark <= 0 and entry_premium > 0:
             stop_trigger_mark = None
+        profit_take_debit = (
+            max(0.0, entry_premium * (1.0 - self.profit_take_pct))
+            if self.profit_take_enabled and entry_premium > 0
+            else None
+        )
         stop_proximity = (
             (current_mark - entry_premium) / max(1e-9, (stop_trigger_mark - entry_premium))
             if current_mark is not None and stop_trigger_mark is not None and stop_trigger_mark > entry_premium
+            else None
+        )
+        stop_distance_pct = (
+            ((stop_trigger_mark - current_mark) / stop_trigger_mark) * 100.0
+            if current_mark is not None and stop_trigger_mark is not None and stop_trigger_mark > 0
+            else None
+        )
+        minutes_to_expiry = float(dte * 390) if dte is not None else None
+        pnl_per_contract = (pnl_per_share * 100.0) if pnl_per_share is not None else None
+        current_debit_to_stop = (
+            current_mark / stop_trigger_mark
+            if current_mark is not None and stop_trigger_mark not in (None, 0.0)
+            else None
+        )
+        current_debit_to_profit_take = (
+            current_mark / profit_take_debit
+            if current_mark is not None and profit_take_debit not in (None, 0.0)
+            else None
+        )
+        debit_to_width = (
+            current_mark / spread_width
+            if current_mark is not None and spread_width not in (None, 0.0)
+            else None
+        )
+        loss_pct_of_max_loss = (
+            loss_per_share / max_loss_per_share
+            if max_loss_per_share not in (None, 0.0)
+            else None
+        )
+        credit_retained_pct = (
+            current_mark / entry_premium
+            if current_mark is not None and entry_premium > 0
             else None
         )
 
@@ -212,26 +280,44 @@ class MlExitRiskService:
 
         quote_metrics = self._quote_metrics(chain, short_put, long_put, short_call, long_call)
         risk = risk or self._risk_from_position(pos)
+        market_trend_regime = str(risk.get("market_trend_regime") or pos.get("market_trend_regime") or "").lower()
+        market_volatility_regime = str(
+            risk.get("market_volatility_regime") or pos.get("market_volatility_regime") or ""
+        ).lower()
 
         row = {
             "entry_premium": entry_premium,
             "current_mark": current_mark,
             "pnl_per_share": pnl_per_share,
+            "pnl_per_contract": pnl_per_contract,
             "loss_per_share": loss_per_share,
             "profit_per_share": max(0.0, pnl_per_share or 0.0),
             "profit_captured_pct": profit_captured_pct,
             "dte": dte,
             "minutes_since_entry": age_minutes,
+            "minutes_to_expiry": minutes_to_expiry,
             "spot": spot,
+            "underlying_close": spot,
             "contracts": contracts,
             "short_put_strike": short_put,
             "long_put_strike": long_put,
             "short_call_strike": short_call,
             "long_call_strike": long_call,
             "spread_width": spread_width,
+            "entry_credit": entry_premium,
             "max_loss_per_share": max_loss_per_share,
+            "max_loss": max_loss_per_share,
+            "current_debit": current_mark,
             "stop_trigger_mark": stop_trigger_mark,
+            "stop_debit": stop_trigger_mark,
+            "profit_take_debit": profit_take_debit,
             "stop_proximity": stop_proximity,
+            "stop_distance_pct": stop_distance_pct,
+            "current_debit_to_stop": current_debit_to_stop,
+            "current_debit_to_profit_take": current_debit_to_profit_take,
+            "debit_to_width": debit_to_width,
+            "loss_pct_of_max_loss": loss_pct_of_max_loss,
+            "credit_retained_pct": credit_retained_pct,
             "short_strike_distance_pct": primary_distance_pct,
             "has_broker_greeks": 1.0 if bool(getattr(chain, "has_broker_greeks", False) or pos.get("has_broker_greeks")) else 0.0,
             "is_pcs": 1.0 if strategy == "PCS" else 0.0,
@@ -247,9 +333,48 @@ class MlExitRiskService:
             "net_gamma": self._optional_float(risk.get("net_gamma") if risk else None),
             "net_theta": self._optional_float(risk.get("net_theta") if risk else None),
             "net_vega": self._optional_float(risk.get("net_vega") if risk else None),
+            "underlying_return_5m": self._optional_float(risk.get("underlying_return_5m") if risk else pos.get("underlying_return_5m")),
+            "underlying_return_15m": self._optional_float(risk.get("underlying_return_15m") if risk else pos.get("underlying_return_15m")),
+            "underlying_return_30m": self._optional_float(risk.get("underlying_return_30m") if risk else pos.get("underlying_return_30m")),
+            "abs_underlying_return_5m": self._optional_float(risk.get("abs_underlying_return_5m") if risk else pos.get("abs_underlying_return_5m")),
+            "abs_underlying_return_15m": self._optional_float(risk.get("abs_underlying_return_15m") if risk else pos.get("abs_underlying_return_15m")),
+            "abs_underlying_return_30m": self._optional_float(risk.get("abs_underlying_return_30m") if risk else pos.get("abs_underlying_return_30m")),
+            "underlying_realized_vol_15m": self._optional_float(risk.get("underlying_realized_vol_15m") if risk else pos.get("underlying_realized_vol_15m")),
+            "underlying_realized_vol_30m": self._optional_float(risk.get("underlying_realized_vol_30m") if risk else pos.get("underlying_realized_vol_30m")),
+            "underlying_vol_ratio_15m_30m": self._optional_float(risk.get("underlying_vol_ratio_15m_30m") if risk else pos.get("underlying_vol_ratio_15m_30m")),
+            "short_leg_close": self._optional_float(risk.get("short_leg_close") if risk else pos.get("short_leg_close")),
+            "long_leg_close": self._optional_float(risk.get("long_leg_close") if risk else pos.get("long_leg_close")),
+            "short_leg_share_of_debit": self._optional_float(risk.get("short_leg_share_of_debit") if risk else pos.get("short_leg_share_of_debit")),
+            "long_leg_share_of_debit": self._optional_float(risk.get("long_leg_share_of_debit") if risk else pos.get("long_leg_share_of_debit")),
+            "short_leg_volume": self._optional_float(risk.get("short_leg_volume") if risk else pos.get("short_leg_volume")),
+            "long_leg_volume": self._optional_float(risk.get("long_leg_volume") if risk else pos.get("long_leg_volume")),
+            "short_leg_trade_count": self._optional_float(risk.get("short_leg_trade_count") if risk else pos.get("short_leg_trade_count")),
+            "long_leg_trade_count": self._optional_float(risk.get("long_leg_trade_count") if risk else pos.get("long_leg_trade_count")),
+            "leg_volume_imbalance": self._optional_float(risk.get("leg_volume_imbalance") if risk else pos.get("leg_volume_imbalance")),
+            "leg_trade_count_imbalance": self._optional_float(risk.get("leg_trade_count_imbalance") if risk else pos.get("leg_trade_count_imbalance")),
+            "market_trend_uptrend": 1.0 if market_trend_regime == "uptrend" else 0.0,
+            "market_trend_sideways": 1.0 if market_trend_regime == "sideways" else 0.0,
+            "market_trend_downtrend": 1.0 if market_trend_regime == "downtrend" else 0.0,
+            "market_volatility_low": 1.0 if market_volatility_regime == "low" else 0.0,
+            "market_volatility_medium": 1.0 if market_volatility_regime == "medium" else 0.0,
+            "market_volatility_high": 1.0 if market_volatility_regime == "high" else 0.0,
             **quote_metrics,
         }
         return row
+
+    def _stop_trigger_mark(
+        self,
+        *,
+        entry_premium: float,
+        spread_width: float | None,
+    ) -> float:
+        if (
+            self.stop_loss_max_loss_pct is not None
+            and spread_width is not None
+            and spread_width > entry_premium
+        ):
+            return entry_premium + (spread_width - entry_premium) * self.stop_loss_max_loss_pct
+        return (1.0 + self.stop_loss_multiplier) * entry_premium
 
     def _guard_reason(self, row: dict[str, Any]) -> str | None:
         dte = self._optional_int(row.get("dte"))

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, is_dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -65,8 +66,10 @@ class ParquetDatasetWriter:
 
         all_files = [Path(path) for path in existing_manifest.files] + files if existing_manifest else files
         row_count = (existing_manifest.row_count if existing_manifest else 0) + len(normalized)
-        manifest_metadata = dict(existing_manifest.metadata) if existing_manifest else {}
-        manifest_metadata.update(metadata or {})
+        manifest_metadata = _merge_manifest_metadata(
+            existing_manifest.metadata if existing_manifest else None,
+            metadata or {},
+        )
         manifest = DatasetManifest.create(
             dataset_version=dataset_version,
             dataset_type=dataset_type,
@@ -133,3 +136,49 @@ def _read_manifest(path: Path) -> DatasetManifest | None:
         return None
     payload = json.loads(path.read_text(encoding="utf-8"))
     return DatasetManifest(**payload)
+
+
+def _merge_manifest_metadata(
+    existing: dict[str, Any] | None,
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(existing or {})
+    merged.update(incoming)
+    merged["start_date"] = _merge_iso_date_bound(
+        (existing or {}).get("start_date"),
+        incoming.get("start_date"),
+        pick=min,
+    )
+    merged["end_date"] = _merge_iso_date_bound(
+        (existing or {}).get("end_date"),
+        incoming.get("end_date"),
+        pick=max,
+    )
+    return {key: value for key, value in merged.items() if value is not None}
+
+
+def _merge_iso_date_bound(
+    existing_value: Any,
+    incoming_value: Any,
+    *,
+    pick,
+) -> str | Any | None:
+    if existing_value is None:
+        return incoming_value
+    if incoming_value is None:
+        return existing_value
+    existing_date = _parse_iso_date(existing_value)
+    incoming_date = _parse_iso_date(incoming_value)
+    if existing_date is None or incoming_date is None:
+        return incoming_value
+    return pick(existing_date, incoming_date).isoformat()
+
+
+def _parse_iso_date(value: Any) -> date | None:
+    text = str(value or "").strip()
+    if len(text) != 10:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None

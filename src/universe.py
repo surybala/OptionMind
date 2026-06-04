@@ -7,6 +7,8 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
+from src.etf_universe_presets import stable_etf_underlyings
+
 _log = logging.getLogger('optionwheel')
 
 NASDAQ_LISTED_URL  = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt"
@@ -192,6 +194,18 @@ def get_etf_universe(force_refresh=False, log=None):
         log.info("ETF universe built: %d tickers. Cached to %s.", len(all_etfs), ETF_CACHE_FILE)
 
     return all_etfs
+
+
+def get_stable_etf_universe(log=None):
+    """Return the curated stable ETF universe used by the live ML scanner."""
+    tickers = stable_etf_underlyings()
+    if log:
+        log.info(
+            "Stable ETF universe preset loaded: %d tickers "
+            "(curated liquid non-leveraged ETFs for options selling)",
+            len(tickers),
+        )
+    return tickers
 
 
 def _check_market_cap(symbol, min_cap):

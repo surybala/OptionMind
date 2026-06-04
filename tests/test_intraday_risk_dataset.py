@@ -75,6 +75,9 @@ def test_intraday_risk_builder_emits_state_rows(tmp_path):
         "exit_timestamp": timestamps[-1].isoformat(),
         "underlying": "SPY",
         "strategy": "PCS",
+        "market_regime_symbol": "SPY",
+        "market_trend_regime": "downtrend",
+        "market_volatility_regime": "high",
         "short_option_symbol": "SPY260626P00500000",
         "long_option_symbol": "SPY260626P00495000",
         "spread_width": 5.0,
@@ -103,3 +106,57 @@ def test_intraday_risk_builder_emits_state_rows(tmp_path):
     assert first.stop_loss_hit_5m == 1
     assert first.future_worst_debit_15m is not None
     assert first.intraday_exit_reason == "stop_loss"
+    assert first.market_regime_symbol == "SPY"
+    assert first.market_trend_regime == "downtrend"
+    assert first.market_volatility_regime == "high"
+
+
+def test_intraday_risk_builder_aligns_sparse_leg_and_stock_timestamps(tmp_path):
+    entry = datetime(2026, 5, 14, 4, 0, tzinfo=UTC)
+    provider = FakeIntradayProvider(
+        stock_bars={
+            "SPY": [
+                _bar("SPY", datetime(2026, 5, 14, 13, 30, tzinfo=UTC), 500.0),
+                _bar("SPY", datetime(2026, 5, 14, 13, 35, tzinfo=UTC), 500.5),
+                _bar("SPY", datetime(2026, 5, 14, 13, 40, tzinfo=UTC), 501.0),
+            ]
+        },
+        option_bars={
+            "SPY260626P00500000": [
+                _bar("SPY260626P00500000", datetime(2026, 5, 14, 13, 31, tzinfo=UTC), 3.00),
+                _bar("SPY260626P00500000", datetime(2026, 5, 14, 13, 36, tzinfo=UTC), 3.40),
+            ],
+            "SPY260626P00495000": [
+                _bar("SPY260626P00495000", datetime(2026, 5, 14, 13, 34, tzinfo=UTC), 1.00),
+                _bar("SPY260626P00495000", datetime(2026, 5, 14, 13, 39, tzinfo=UTC), 1.05),
+            ],
+        },
+    )
+    seed_row = {
+        "entry_timestamp": entry.isoformat(),
+        "exit_timestamp": datetime(2026, 5, 14, 13, 40, tzinfo=UTC).isoformat(),
+        "underlying": "SPY",
+        "strategy": "PCS",
+        "short_option_symbol": "SPY260626P00500000",
+        "long_option_symbol": "SPY260626P00495000",
+        "spread_width": 5.0,
+        "entry_credit": 2.0,
+        "expiration": date(2026, 6, 26).isoformat(),
+        "source": "fake",
+    }
+    seed_path = tmp_path / "seed_sparse.jsonl"
+    seed_path.write_text(json.dumps(seed_row) + "\n", encoding="utf-8")
+
+    rows = IntradayRiskDatasetBuilder(provider, provider).build(
+        seed_path,
+        IntradayRiskDatasetConfig(
+            sample_every_n_minutes=1,
+            max_workers=1,
+            min_state_rows_per_candidate=1,
+            stop_loss_multiple=2.0,
+            stop_loss_max_loss_pct=None,
+        ),
+    )
+
+    assert len(rows) >= 1
+    assert rows[0].entry_timestamp == datetime(2026, 5, 14, 13, 34, tzinfo=UTC)

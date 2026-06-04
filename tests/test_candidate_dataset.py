@@ -1,6 +1,7 @@
 from datetime import UTC, date, datetime, timedelta
 
 from ml.datasets import CandidateDatasetConfig, HistoricalCandidateDatasetBuilder
+from ml.datasets.candidate_dataset import _aligned_option_pairs, _fetch_contracts_for_status
 from ml.providers.models import OptionContract, PriceBar
 
 
@@ -256,6 +257,59 @@ def test_candidate_dataset_builder_can_fetch_vix_from_volatility_provider():
     assert rows[0].vix_close == 23.0
     assert rows[0].vix_above_20 == 1
     assert volatility_provider.calls[0]["symbols"] == ["I:VIX"]
+
+
+def test_aligned_option_pairs_forward_fills_sparse_leg_timestamps():
+    start = datetime(2026, 5, 14, 13, 30, tzinfo=UTC)
+    end = datetime(2026, 5, 14, 13, 40, tzinfo=UTC)
+    short_path = [
+        PriceBar("SPY260626P00500000", datetime(2026, 5, 14, 13, 31, tzinfo=UTC), 3.0, 3.0, 3.0, 3.0),
+        PriceBar("SPY260626P00500000", datetime(2026, 5, 14, 13, 36, tzinfo=UTC), 3.2, 3.2, 3.2, 3.2),
+    ]
+    long_path = [
+        PriceBar("SPY260626P00495000", datetime(2026, 5, 14, 13, 34, tzinfo=UTC), 1.0, 1.0, 1.0, 1.0),
+        PriceBar("SPY260626P00495000", datetime(2026, 5, 14, 13, 39, tzinfo=UTC), 1.1, 1.1, 1.1, 1.1),
+    ]
+
+    pairs = _aligned_option_pairs(short_path, long_path, start=start, end=end)
+
+    assert [timestamp for timestamp, _, _ in pairs] == [
+        datetime(2026, 5, 14, 13, 34, tzinfo=UTC),
+        datetime(2026, 5, 14, 13, 36, tzinfo=UTC),
+        datetime(2026, 5, 14, 13, 39, tzinfo=UTC),
+    ]
+
+
+def test_fetch_contracts_for_status_all_merges_active_and_inactive():
+    class FakeContractProvider:
+        def __init__(self):
+            self.calls = []
+
+        def get_option_contracts(self, underlyings, expiration_gte=None, expiration_lte=None, status="active", limit=None):
+            self.calls.append(status)
+            if status == "active":
+                return [OptionContract("SPY260626P00600000", "SPY", date(2026, 6, 26), 600.0, "put", status="active")]
+            return [
+                OptionContract("SPY260626P00600000", "SPY", date(2026, 6, 26), 600.0, "put", status="inactive"),
+                OptionContract("SPY260626P00595000", "SPY", date(2026, 6, 26), 595.0, "put", status="inactive"),
+            ]
+
+    provider = FakeContractProvider()
+
+    contracts = _fetch_contracts_for_status(
+        provider,
+        "SPY",
+        expiration_gte=date(2026, 6, 1),
+        expiration_lte=date(2026, 6, 30),
+        status="all",
+        limit=None,
+    )
+
+    assert provider.calls == ["active", "inactive"]
+    assert sorted(contract.symbol for contract in contracts) == [
+        "SPY260626P00595000",
+        "SPY260626P00600000",
+    ]
 
 
 def test_candidate_dataset_builder_continues_when_enrichment_provider_fails():

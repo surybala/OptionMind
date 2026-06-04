@@ -13,14 +13,29 @@ from ml.datasets.intraday_risk_dataset import (
     IntradayRiskDatasetConfig,
     IntradayRiskRow,
 )
-from ml.providers import MassiveProvider
+from ml.providers import MassiveProvider, ParquetMinuteBarProvider
 from ml.storage import ParquetDatasetWriter
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build minute-level spread-state rows for intraday risk model training.")
     parser.add_argument("--input", required=True, help="Seed candidate_rows dataset directory, parquet, or JSONL.")
-    parser.add_argument("--provider", default="massive", choices=["massive"], help="Historical provider for intraday stock/option bars.")
+    parser.add_argument(
+        "--provider",
+        default="massive",
+        choices=["massive", "parquet"],
+        help="Historical provider for intraday stock/option bars.",
+    )
+    parser.add_argument(
+        "--stock-dataset-root",
+        default=None,
+        help="Required when --provider parquet. Root of stock minute parquet dataset_version directory.",
+    )
+    parser.add_argument(
+        "--option-dataset-root",
+        default=None,
+        help="Required when --provider parquet. Root of option minute parquet dataset_version directory.",
+    )
     parser.add_argument("--entry-start", default=None, help="Optional seed-entry lower bound, ISO datetime or YYYY-MM-DD.")
     parser.add_argument("--entry-end", default=None, help="Optional seed-entry upper bound, ISO datetime or YYYY-MM-DD.")
     parser.add_argument("--strategy-types", default="PCS,CCS", help="Comma-separated spread strategies to include.")
@@ -44,9 +59,7 @@ def main() -> int:
     args = parse_args()
     load_dotenv()
 
-    if args.provider != "massive":
-        raise ValueError(f"Unsupported provider: {args.provider}")
-    provider = MassiveProvider.from_env()
+    market_provider, option_price_provider = _providers_from_args(args)
     config = IntradayRiskDatasetConfig(
         option_timeframe=args.option_timeframe,
         stock_timeframe=args.stock_timeframe,
@@ -58,7 +71,7 @@ def main() -> int:
         min_state_rows_per_candidate=args.min_state_rows_per_candidate,
         max_workers=args.max_workers,
     )
-    rows = IntradayRiskDatasetBuilder(provider, provider).build(
+    rows = IntradayRiskDatasetBuilder(market_provider, option_price_provider).build(
         Path(args.input),
         config,
         entry_start=_parse_datetime(args.entry_start) if args.entry_start else None,
@@ -73,6 +86,8 @@ def main() -> int:
         metadata={
             "provider": args.provider,
             "input": args.input,
+            "stock_dataset_root": args.stock_dataset_root,
+            "option_dataset_root": args.option_dataset_root,
             "entry_start": args.entry_start,
             "entry_end": args.entry_end,
             "strategy_types": [item.strip().upper() for item in args.strategy_types.split(",") if item.strip()],
@@ -96,6 +111,19 @@ def main() -> int:
         )
         return 2
     return 0
+
+
+def _providers_from_args(args: argparse.Namespace):
+    if args.provider == "massive":
+        provider = MassiveProvider.from_env()
+        return provider, provider
+    if args.provider == "parquet":
+        if not args.stock_dataset_root or not args.option_dataset_root:
+            raise ValueError("--stock-dataset-root and --option-dataset-root are required when --provider parquet")
+        stock_provider = ParquetMinuteBarProvider(Path(args.stock_dataset_root))
+        option_provider = ParquetMinuteBarProvider(Path(args.option_dataset_root))
+        return stock_provider, option_provider
+    raise ValueError(f"Unsupported provider: {args.provider}")
 
 
 def _parse_datetime(value: str, *, end_of_day: bool = False) -> datetime:

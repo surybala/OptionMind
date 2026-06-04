@@ -70,7 +70,7 @@
   "max_capital_per_period": 50000,
   "max_contracts_per_pick": 50,
 
-  "_universe_note": "etf = all ETFs on NASDAQ/NYSE/NYSE Arca (default). Options: etf | index (S&P500+NDX100+Dow30) | default (NASDAQ/NYSE stocks by market cap) | full (alias for default).",
+  "_universe_note": "etf = curated stable ETF preset for live options selling (default). etf-all = all ETFs on NASDAQ/NYSE/NYSE Arca. Other options: index (S&P500+NDX100+Dow30) | default (NASDAQ/NYSE stocks by market cap) | full (alias for default).",
   "universe": "etf",
 
   "_perf_note": "Legacy deterministic scanner setting retained for reference/tests.",
@@ -154,7 +154,7 @@
     "profit_take_pct": 0.75,
     "_profit_take_note": "Close any open position once this fraction of the entry premium has been captured as profit (pnl / entry_premium >= profit_take_pct). 0.75 = close when 75% of collected credit is locked in. Set profit_take_enabled to false or profit_take_pct to 0.0 to disable.",
     "gamma_risk": {
-      "enabled": true,
+      "enabled": false,
       "_gamma_risk_note": "Dynamic early-exit based on Black-Scholes Greeks. Closes a position when gamma is outpacing theta income AND the short leg delta is moving ITM — aiming to lock in remaining premium before it erodes.",
       "gamma_theta_ratio_threshold": 1.5,
       "_ratio_note": "Close when |net_gamma| / |net_theta_per_day| >= this value. Higher means gamma risk per dollar of daily theta income is too high. 1.5 = default; lower for more aggressive protection.",
@@ -166,14 +166,15 @@
       "_urgent_note": "If |short_delta| >= this value, bypass min_profit_captured_pct and close regardless — position has moved deeply ITM and is in urgent danger. Also serves as the near-expiry (DTE<=1) threshold when ratio-based check is bypassed."
     },
     "ml_exit_risk": {
-      "enabled": false,
-      "artifact_path": "artifacts/models/ml_exit_risk.json",
-      "threshold": 0.70,
+      "enabled": true,
+      "artifact_path": "",
+      "registry_path": "artifacts/risk_model_registry.json",
+      "threshold": 0.05,
       "confirmations_required": 2,
-      "min_age_minutes": 5,
+      "min_age_minutes": 10,
       "min_dte": 0,
       "max_dte": 21,
-      "_note": "Optional ML early-exit trigger for open positions. The monitor scores each position with the configured artifact and closes when score >= threshold for the required number of consecutive risk checks. Deterministic stop-loss, profit-take, and gamma-risk rules remain active as backstops."
+      "_note": "Primary proactive exit model for open positions. Loads the champion from artifacts/risk_model_registry.json and closes when score >= threshold for the required number of consecutive checks. Deterministic stop-loss remains active as the final fallback; gamma-risk manual close is disabled in live config."
     },
     "vix_filter": {
       "enabled": true,

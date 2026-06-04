@@ -162,6 +162,33 @@ def test_parquet_writer_can_append_to_existing_manifest(tmp_path, monkeypatch):
     assert manifest["metadata"]["chunk"] == "second"
 
 
+def test_parquet_writer_append_preserves_date_span(tmp_path, monkeypatch):
+    def fake_to_parquet(self, path, index=False):
+        path.write_text("fake parquet")
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", fake_to_parquet)
+    writer = ParquetDatasetWriter(root_dir=tmp_path)
+
+    writer.write(
+        [_row("SPY")],
+        dataset_version="candidate_rows_test",
+        dataset_type="candidate_rows",
+        metadata={"start_date": "2022-06-02", "end_date": "2024-01-31"},
+    )
+    result = writer.write(
+        [_row("QQQ")],
+        dataset_version="candidate_rows_test",
+        dataset_type="candidate_rows",
+        metadata={"start_date": "2023-11-08", "end_date": "2026-06-01"},
+        append=True,
+    )
+
+    manifest = json.loads(result.manifest_path.read_text())
+
+    assert manifest["metadata"]["start_date"] == "2022-06-02"
+    assert manifest["metadata"]["end_date"] == "2026-06-01"
+
+
 def test_parquet_writer_explains_missing_engine(tmp_path, monkeypatch):
     def fake_to_parquet(self, path, index=False):
         raise ImportError("missing parquet engine")

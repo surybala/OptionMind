@@ -41,6 +41,9 @@ Usage examples
   # Use full index universe instead of the default 10-ticker sample:
   python agent.py --universe index
 
+  # Use the full exchange-wide ETF universe instead of the curated live ETF list:
+  python agent.py --universe etf-all
+
   # Override max capital per period:
   python agent.py --max-capital 30000
 """
@@ -131,10 +134,17 @@ def _load_tickers(args, config: dict) -> list[str]:
     universe = args.universe or config.get('universe', 'etf')
 
     if universe == 'etf':
+        from src.universe import get_stable_etf_universe
+        print("Universe: loading curated stable ETF preset for options selling ...")
+        tickers = get_stable_etf_universe(log=log)
+        print(f"Universe: {len(tickers)} stable ETF tickers ready")
+        return tickers
+
+    if universe == 'etf-all':
         from src.universe import get_etf_universe
         print("Universe: loading all NASDAQ / NYSE / NYSE Arca ETFs ...")
         tickers = get_etf_universe(force_refresh=args.refresh_universe, log=log)
-        print(f"Universe: {len(tickers)} ETF tickers ready")
+        print(f"Universe: {len(tickers)} all-ETF tickers ready")
         return tickers
 
     if universe == 'index':
@@ -184,11 +194,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         '--universe',
-        choices=['etf', 'index', 'default', 'full'],
+        choices=['etf', 'etf-all', 'index', 'default', 'full'],
         default=None,           # None = read from config["universe"], fallback "etf"
         metavar='SRC',
         help=(
-            '"etf" (default) — all ETFs on NASDAQ / NYSE / NYSE Arca; '
+            '"etf" (default) — curated stable ETF preset for live options selling; '
+            '"etf-all" — all ETFs on NASDAQ / NYSE / NYSE Arca; '
             '"index" — S&P 500 + NASDAQ-100 + Dow 30 (~540 tickers); '
             '"default" / "full" — NASDAQ/NYSE stocks by market cap.'
         ),

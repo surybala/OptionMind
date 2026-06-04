@@ -19,6 +19,7 @@ results_*.json
 backtest-output/
 artifacts/*
 !artifacts/model_registry.json
+!artifacts/risk_model_registry.json
 !artifacts/models/
 artifacts/models/*
 !artifacts/models/xgboost_v006c_500r_dp28.json
@@ -27,6 +28,10 @@ artifacts/models/*
 !artifacts/models/large_loss_classifier_v006e.xgboost.json
 !artifacts/models/stop_loss_classifier_v006c.json
 !artifacts/models/stop_loss_classifier_v006c.xgboost.json
+!artifacts/models/intraday_risk_monitor_stop30m_fullraw_v002.json
+!artifacts/models/intraday_risk_monitor_stop30m_fullraw_v002.xgboost.json
+!artifacts/models/intraday_risk_monitor_stop30m_fullraw_v003.json
+!artifacts/models/intraday_risk_monitor_stop30m_fullraw_v003.xgboost.json
 
 # Runtime data (generated, not source)
 data/

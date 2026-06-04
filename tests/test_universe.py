@@ -31,6 +31,7 @@ from src.universe import (
     _fetch_other_symbols,
     _filter_by_market_cap,
     get_etf_universe,
+    get_stable_etf_universe,
     get_ticker_universe,
 )
 
@@ -676,6 +677,28 @@ class TestGetEtfUniverse(unittest.TestCase):
         with patch('src.universe.ETF_CACHE_FILE', self.cache_path), p[1], p[2]:
             result = get_etf_universe()
         self.assertEqual(result, [])
+
+
+class TestGetStableEtfUniverse(unittest.TestCase):
+
+    def test_returns_curated_stable_preset(self):
+        result = get_stable_etf_universe()
+
+        self.assertIn('SPY', result)
+        self.assertIn('QQQ', result)
+        self.assertIn('TLT', result)
+        self.assertNotIn('TQQQ', result)
+        self.assertNotIn('SQQQ', result)
+        self.assertNotIn('IWM', result)
+        self.assertNotIn('XBI', result)
+
+    def test_logs_when_requested(self):
+        mock_log = MagicMock()
+
+        result = get_stable_etf_universe(log=mock_log)
+
+        self.assertGreater(len(result), 0)
+        mock_log.info.assert_called()
 
 
 if __name__ == '__main__':

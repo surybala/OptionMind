@@ -40,6 +40,9 @@ class IntradayRiskRow:
     underlying: str
     strategy: str
     source: str
+    market_regime_symbol: str | None
+    market_trend_regime: str | None
+    market_volatility_regime: str | None
     expiration: date | None
     dte: int | None
     short_option_symbol: str
@@ -189,21 +192,32 @@ class IntradayRiskDatasetBuilder:
         if not short_path or not long_path or not underlying_path:
             return []
 
-        short_by_time = {bar.timestamp: bar for bar in short_path}
-        long_by_time = {bar.timestamp: bar for bar in long_path}
-        stock_by_time = {bar.timestamp: bar for bar in underlying_path}
-        short_entry_bar = short_by_time.get(entry_timestamp)
-        long_entry_bar = long_by_time.get(entry_timestamp)
-        if short_entry_bar is None or long_entry_bar is None:
+        aligned_states = _aligned_state_path(
+            short_path,
+            long_path,
+            underlying_path,
+            start=fetch_start,
+            end=fetch_end,
+        )
+        if not aligned_states:
             return []
+        eligible_states = [state for state in aligned_states if entry_timestamp <= state[0] <= exit_limit + max_horizon]
+        if not eligible_states:
+            return []
+        entry_timestamp = eligible_states[0][0]
+        short_entry_bar = eligible_states[0][1]
+        long_entry_bar = eligible_states[0][2]
+        aligned_short_path = [state[1] for state in eligible_states]
+        aligned_long_path = [state[2] for state in eligible_states]
+        aligned_stock_path = [state[3] for state in aligned_states]
 
         spread_width = float(seed["spread_width"])
         label = label_credit_spread_path(
             strategy=seed["strategy"],
             short_entry_bar=short_entry_bar,
             long_entry_bar=long_entry_bar,
-            short_path=short_path,
-            long_path=long_path,
+            short_path=aligned_short_path,
+            long_path=aligned_long_path,
             spread_width=spread_width,
             config=CreditSpreadLabelConfig(
                 profit_take_pct=config.profit_take_pct,
@@ -219,23 +233,23 @@ class IntradayRiskDatasetBuilder:
             config.stop_loss_max_loss_pct,
         )
 
-        common_timestamps = sorted(
-            timestamp
-            for timestamp in short_by_time
-            if timestamp in long_by_time and timestamp in stock_by_time and entry_timestamp <= timestamp <= label.exit_timestamp
-        )
-        if len(common_timestamps) < config.min_state_rows_per_candidate:
+        active_states = [state for state in eligible_states if entry_timestamp <= state[0] <= label.exit_timestamp]
+        if len(active_states) < config.min_state_rows_per_candidate:
             return []
+        state_timestamps = [state[0] for state in active_states]
+        short_by_time = {state[0]: state[1] for state in active_states}
+        long_by_time = {state[0]: state[2] for state in active_states}
+        stock_by_time = {state[0]: state[3] for state in active_states}
 
         rows: list[IntradayRiskRow] = []
         step = max(1, int(config.sample_every_n_minutes))
-        for timestamp in common_timestamps[::step]:
+        for timestamp in state_timestamps[::step]:
             current_short = short_by_time[timestamp]
             current_long = long_by_time[timestamp]
             current_stock = stock_by_time[timestamp]
             current_debit = _spread_debit(current_short.close, current_long.close, spread_width)
             future = _future_window_metrics(
-                common_timestamps,
+                state_timestamps,
                 short_by_time,
                 long_by_time,
                 timestamp,
@@ -264,6 +278,9 @@ class IntradayRiskDatasetBuilder:
                     underlying=underlying,
                     strategy=seed["strategy"],
                     source=str(seed.get("source") or "massive"),
+                    market_regime_symbol=_optional_string(seed.get("market_regime_symbol")),
+                    market_trend_regime=_optional_string(seed.get("market_trend_regime")),
+                    market_volatility_regime=_optional_string(seed.get("market_volatility_regime")),
                     expiration=seed.get("expiration"),
                     dte=_dte(timestamp, seed.get("expiration")),
                     short_option_symbol=short_symbol,
@@ -281,11 +298,11 @@ class IntradayRiskDatasetBuilder:
                     minutes_to_expiry=minutes_to_expiry,
                     minutes_to_exit=round((label.exit_timestamp - timestamp).total_seconds() / 60.0, 4),
                     underlying_close=float(current_stock.close),
-                    underlying_return_5m=_trailing_return(underlying_path, timestamp, 5),
-                    underlying_return_15m=_trailing_return(underlying_path, timestamp, 15),
-                    underlying_return_30m=_trailing_return(underlying_path, timestamp, 30),
-                    underlying_realized_vol_15m=_trailing_realized_vol(underlying_path, timestamp, 15),
-                    underlying_realized_vol_30m=_trailing_realized_vol(underlying_path, timestamp, 30),
+                    underlying_return_5m=_trailing_return(aligned_stock_path, timestamp, 5),
+                    underlying_return_15m=_trailing_return(aligned_stock_path, timestamp, 15),
+                    underlying_return_30m=_trailing_return(aligned_stock_path, timestamp, 30),
+                    underlying_realized_vol_15m=_trailing_realized_vol(aligned_stock_path, timestamp, 15),
+                    underlying_realized_vol_30m=_trailing_realized_vol(aligned_stock_path, timestamp, 30),
                     short_leg_close=float(current_short.close),
                     long_leg_close=float(current_long.close),
                     short_leg_volume=current_short.volume,
@@ -315,6 +332,69 @@ class IntradayRiskDatasetBuilder:
                 )
             )
         return rows
+
+
+def _aligned_state_path(
+    short_path: list[PriceBar],
+    long_path: list[PriceBar],
+    stock_path: list[PriceBar],
+    *,
+    start: datetime,
+    end: datetime,
+) -> list[tuple[datetime, PriceBar, PriceBar, PriceBar]]:
+    short_sorted = sorted((bar for bar in short_path if bar.timestamp <= end), key=lambda bar: bar.timestamp)
+    long_sorted = sorted((bar for bar in long_path if bar.timestamp <= end), key=lambda bar: bar.timestamp)
+    stock_sorted = sorted((bar for bar in stock_path if bar.timestamp <= end), key=lambda bar: bar.timestamp)
+    timeline = sorted(
+        {
+            bar.timestamp
+            for bar in [*short_sorted, *long_sorted, *stock_sorted]
+            if start <= bar.timestamp <= end
+        }
+    )
+    states: list[tuple[datetime, PriceBar, PriceBar, PriceBar]] = []
+    short_index = 0
+    long_index = 0
+    stock_index = 0
+    current_short: PriceBar | None = None
+    current_long: PriceBar | None = None
+    current_stock: PriceBar | None = None
+    for timestamp in timeline:
+        while short_index < len(short_sorted) and short_sorted[short_index].timestamp <= timestamp:
+            current_short = short_sorted[short_index]
+            short_index += 1
+        while long_index < len(long_sorted) and long_sorted[long_index].timestamp <= timestamp:
+            current_long = long_sorted[long_index]
+            long_index += 1
+        while stock_index < len(stock_sorted) and stock_sorted[stock_index].timestamp <= timestamp:
+            current_stock = stock_sorted[stock_index]
+            stock_index += 1
+        if current_short is None or current_long is None or current_stock is None:
+            continue
+        states.append(
+            (
+                timestamp,
+                _clone_bar_with_timestamp(current_short, timestamp),
+                _clone_bar_with_timestamp(current_long, timestamp),
+                _clone_bar_with_timestamp(current_stock, timestamp),
+            )
+        )
+    return states
+
+
+def _clone_bar_with_timestamp(bar: PriceBar, timestamp: datetime) -> PriceBar:
+    return PriceBar(
+        symbol=bar.symbol,
+        timestamp=timestamp,
+        open=bar.open,
+        high=bar.high,
+        low=bar.low,
+        close=bar.close,
+        volume=bar.volume,
+        trade_count=bar.trade_count,
+        vwap=bar.vwap,
+        source=bar.source,
+    )
 
 
 def _seed_candidates(
@@ -376,6 +456,13 @@ def _coerce_date(value: Any) -> date | None:
     if isinstance(value, date) and not isinstance(value, datetime):
         return value
     return pd.Timestamp(value).date()
+
+
+def _optional_string(value: Any) -> str | None:
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _future_window_metrics(
