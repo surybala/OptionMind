@@ -1,5 +1,5 @@
 {
-  "champion_model_id": "xgboost_v006c_500r_dp28",
+  "champion_model_id": "xgboost_v007b_dte21_quant",
   "models": [
     {
       "artifact_manifest": {
@@ -223,9 +223,9 @@
         "walk_forward_top_decile_worst_actual_mean": -1242.666667
       },
       "model_id": "xgboost_v006c_500r_dp28",
-      "notes": "Champion: RoR ranker trained via 2-pass Optuna optimisation (100 HP trials + 64 feature trials). Passes all 33 exit criteria (V006b passed 16/33). Holdout RoR 0.167 (+10.2%), PF 2.471 (+26.1%), WR 78.6% (+3pp), slippage PF 1.538 (+25%). 39 features: dropped underlying_price, vol_momentum, market_regime, vix_features, credit_efficiency. HP: depth=3, lambda=37.5, colsample=0.42, eta=0.020, dp=2.83, huber_delta=2.20.",
+      "notes": "Former champion (superseded by V007b). RoR ranker trained via 2-pass Optuna on all-DTE data. 39 features, depth=3. Holdout RoR 0.167, PF 2.471, WR 78.6%. Replaced because production trades DTE≤21 only — V007b is regime-matched with quant structural features.",
       "promoted_at": "2026-05-28T16:00:33.962860+00:00",
-      "promotion_status": "champion",
+      "promotion_status": "rollback",
       "registered_at": "2026-05-28T16:00:33.962720+00:00"
     },
     {
@@ -512,9 +512,9 @@
         "walk_forward_test_rows": 93485
       },
       "model_id": "large_loss_classifier_v006e",
-      "notes": "V006e large-loss classifier: same trained model as V006d (identical model_sha256=21e40d9a). Fix: WF evaluation now uses optimized scale_pos_weight=12.19 in every fold instead of fold-recomputed natural ratio (~7.0), making WF metrics production-accurate. WF AUC 0.8502, WF recall 98.85% (V006d reported 98.00% due to SPW bug). Holdout: recall 98.8% (BEST), FN 190 (BEST), mean_prob_positive 0.755. 61 features, all 11 groups \u2014 L1 reg_alpha=3.86. HP: eta=0.045, depth=4, lambda=17.77, alpha=3.86, scale_pos_weight=12.19.",
+      "notes": "Former champion LLC (superseded by V007b). Trained on all-DTE data. WF AUC 0.8502, recall 98.85%, FN 190. Replaced because DTE\u226421 regime has higher base loss rate (14% vs 12.2%) \u2014 all-DTE classifier was over-vetoing short-DTE trades.",
       "promoted_at": "2026-05-28T20:09:29.308178+00:00",
-      "promotion_status": "champion",
+      "promotion_status": "rollback",
       "registered_at": "2026-05-28T20:09:29.308178+00:00"
     },
     {
@@ -666,8 +666,162 @@
       "promoted_at": null,
       "promotion_status": "candidate",
       "registered_at": "2026-06-02T20:16:36.730098+00:00"
+    },
+    {
+      "artifact_manifest": {
+        "artifact_created_at": "2026-06-04T19:34:53.441182+00:00",
+        "artifact_path": "artifacts/models/xgboost_v007b_dte21_quant.json",
+        "artifact_sha256": "4a2a298343096a607a891b03bb268f2b8aac311f44f51494a93f80d3d7a3d792",
+        "model_path": "artifacts/models/xgboost_v007b_dte21_quant.xgboost.json",
+        "model_sha256": "93161a58ff4600ad437b06dcbe20f590029f1c2c0c9a610fa9ac78755d432c5b",
+        "model_type": "xgboost_asymmetric_pseudohuber_v002",
+        "target_column": "return_on_risk"
+      },
+      "data_range": {
+        "end": "2026-04-25T23:59:59.999999+00:00",
+        "start": "2022-05-26T00:00:00+00:00"
+      },
+      "feature_version": "features_v006",
+      "label_version": "credit_spread_labels_v002",
+      "metadata": {
+        "dataset": "candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k_dte21",
+        "dataset_rows": 500000,
+        "max_dte": 21,
+        "excluded_feature_groups": [
+          "underlying_price",
+          "vol_momentum",
+          "market_regime",
+          "vix_features",
+          "credit_efficiency"
+        ],
+        "included_feature_groups": [
+          "contract_structure",
+          "spread_structure",
+          "underlying_vol",
+          "option_entry",
+          "option_activity",
+          "greeks",
+          "iv_surface",
+          "event_risk",
+          "quant_structural"
+        ],
+        "n_features": 43,
+        "quant_structural_features": [
+          "vrp_5d", "vrp_20d", "gamma_theta_ratio", "sigma_buffer", "vega_margin_ratio"
+        ],
+        "optimization": {
+          "pass1_study": "ror_v007a_dte21",
+          "pass1_best_trial": 53,
+          "pass1_n_trials": 100
+        },
+        "hyperparameters": {
+          "eta": 0.05491765263559793,
+          "max_depth": 7,
+          "min_child_weight": 6.757760040863936,
+          "subsample": 0.5448557313684634,
+          "colsample_bytree": 0.7835970566111529,
+          "reg_lambda": 0.5991385679260381,
+          "reg_alpha": 2.924467214460607,
+          "downside_penalty": 2.497467369671468,
+          "huber_delta": 2.5951117627640494,
+          "downside_scale": 8.832702215915027
+        }
+      },
+      "metrics": {
+        "holdout_ror": 0.4717,
+        "holdout_pf": 1.733,
+        "holdout_wr": 0.689,
+        "holdout_mean_pnl": 46.39,
+        "holdout_max_drawdown": 78527,
+        "wf_pf_min": 1.874,
+        "wf_pf_avg": 2.604,
+        "wf_pnl_avg": 81.77,
+        "wf_wr_min": 0.690,
+        "exit_criteria_passed": 29,
+        "exit_criteria_total": 33,
+        "exit_criteria_score": 67.9
+      },
+      "model_id": "xgboost_v007b_dte21_quant",
+      "notes": "Champion: DTE≤21 regime-matched ranker with 5 quant structural features (vrp_5d, vrp_20d, gamma_theta_ratio, sigma_buffer, vega_margin_ratio). Trained on 500K balanced DTE≤21 dataset. Optuna-tuned HP (100 trials): depth=7, eta=0.055, colsample=0.78, reg_alpha=2.92. Holdout RoR 0.472 (+182% vs V006c 0.167), WF PF min 1.874 (vs 1.580), WF mean PnL $81.77 (vs $73.71), max drawdown $78,527 (−15%). 43 features. Insurance-model optimised: paired with aggressive SLC threshold 0.70.",
+      "promoted_at": "2026-06-04T21:00:00.000000+00:00",
+      "promotion_status": "champion",
+      "registered_at": "2026-06-04T21:00:00.000000+00:00"
+    },
+    {
+      "artifact_manifest": {
+        "artifact_created_at": "2026-06-04T20:24:38.189176+00:00",
+        "artifact_path": "artifacts/models/large_loss_classifier_v007b_dte21.json",
+        "artifact_sha256": "8c0626c20595c1c5949288fbb7177627f862c2507a6837052a5eb077b06f0c74",
+        "model_path": "artifacts/models/large_loss_classifier_v007b_dte21.xgboost.json",
+        "model_sha256": "f6c692842cbbccd69b7f6e828c863cef1b647ffb8e7a5068083c1356152a0f1f",
+        "model_type": "xgboost_binary_large_loss_v001",
+        "target_column": "large_loss_label"
+      },
+      "data_range": {
+        "end": "2026-04-25T23:59:59.999999+00:00",
+        "start": "2022-05-26T00:00:00+00:00"
+      },
+      "feature_version": "features_v006",
+      "label_version": "credit_spread_labels_v002",
+      "metadata": {
+        "dataset": "candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k_dte21",
+        "max_dte": 21,
+        "n_features": 66,
+        "veto_threshold": 0.90
+      },
+      "metrics": {
+        "test_auc": 0.8387,
+        "test_recall": 0.9973,
+        "test_precision": 0.1481,
+        "test_fn": 47,
+        "test_positive_rate": 0.1404,
+        "walk_forward_auc_mean": 0.8455,
+        "walk_forward_recall_mean": 1.0000
+      },
+      "model_id": "large_loss_classifier_v007b_dte21",
+      "notes": "Champion LLC: retrained on 500K DTE≤21 balanced dataset. AUC 0.839, recall 99.7%, FN 47, WF recall 100%. Veto threshold raised to 0.90 — threshold sweep showed ranker's signal dominates for DTE≤21; LLC at 0.70 was destroying value by over-vetoing capital-efficient short-DTE trades. At 0.90 the classifier catches the worst 4.3% (catastrophic-only filter).",
+      "promoted_at": "2026-06-04T21:00:00.000000+00:00",
+      "promotion_status": "champion",
+      "registered_at": "2026-06-04T21:00:00.000000+00:00"
+    },
+    {
+      "artifact_manifest": {
+        "artifact_created_at": "2026-06-04T20:24:38.294835+00:00",
+        "artifact_path": "artifacts/models/stop_loss_classifier_v007b_dte21.json",
+        "artifact_sha256": "b495ccc75163b83e7db128c464c8180b957ebe24c7340b277698e7ea9f2751cc",
+        "model_path": "artifacts/models/stop_loss_classifier_v007b_dte21.xgboost.json",
+        "model_sha256": "0ad9fcfcbe3a6259f8fec383590b7330ec6e8caf921603b3cbc85a1c31bf58d8",
+        "model_type": "xgboost_binary_risk_v001",
+        "target_column": "stop_loss_hit"
+      },
+      "data_range": {
+        "end": "2026-04-25T23:59:59.999999+00:00",
+        "start": "2022-05-26T00:00:00+00:00"
+      },
+      "feature_version": "features_v006",
+      "label_version": "credit_spread_labels_v002",
+      "metadata": {
+        "dataset": "candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k_dte21",
+        "max_dte": 21,
+        "n_features": 66,
+        "veto_threshold": 0.70
+      },
+      "metrics": {
+        "test_auc": 0.7973,
+        "test_recall": 0.9949,
+        "test_precision": 0.3093,
+        "test_fn": 187,
+        "test_positive_rate": 0.2931,
+        "walk_forward_auc_mean": 0.8160,
+        "walk_forward_recall_mean": 0.9979
+      },
+      "model_id": "stop_loss_classifier_v007b_dte21",
+      "notes": "Champion SLC: retrained on 500K DTE≤21 balanced dataset. AUC 0.797, recall 99.5%, FN 187, WF AUC 0.816. Aggressive 0.70 veto threshold for insurance-model operation — vetoes 20% of candidates, reduces stop-loss rate 18.4%→16.8%, WR 69.0%→70.0%. Higher base positive rate (29.3% vs 20% at all-DTE) confirms short-DTE trades have inherently higher stop-loss risk, making aggressive filtering appropriate.",
+      "promoted_at": "2026-06-04T21:00:00.000000+00:00",
+      "promotion_status": "champion",
+      "registered_at": "2026-06-04T21:00:00.000000+00:00"
     }
   ],
-  "rollback_model_id": "xgboost_v006b_500r_dp25",
+  "rollback_model_id": "xgboost_v006c_500r_dp28",
   "schema_version": "model_registry_v001"
 }

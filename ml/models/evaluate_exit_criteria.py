@@ -106,6 +106,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--selection-fraction", type=float, default=ExitCriteriaConfig.selection_fraction)
     parser.add_argument("--catastrophic-account-limit", type=float, default=ExitCriteriaConfig.catastrophic_account_limit)
     parser.add_argument("--slippage-penalty-fraction", type=float, default=ExitCriteriaConfig.slippage_penalty_fraction)
+    parser.add_argument("--max-dte", type=int, default=None, help="Maximum DTE filter: drop rows where dte > this value.")
     return parser.parse_args()
 
 
@@ -116,7 +117,7 @@ def main() -> int:
         catastrophic_account_limit=args.catastrophic_account_limit,
         slippage_penalty_fraction=args.slippage_penalty_fraction,
     )
-    report = evaluate_exit_criteria(Path(args.input), Path(args.artifact), config=config)
+    report = evaluate_exit_criteria(Path(args.input), Path(args.artifact), config=config, max_dte=args.max_dte)
     payload = _report_to_dict(report)
     if args.json_output:
         output = Path(args.json_output)
@@ -131,12 +132,16 @@ def evaluate_exit_criteria(
     artifact_path: Path,
     *,
     config: ExitCriteriaConfig | None = None,
+    max_dte: int | None = None,
 ) -> ExitCriteriaReport:
     if xgb is None:
         raise ImportError("xgboost is required to score model exit criteria")
     cfg = config or ExitCriteriaConfig()
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
     df = load_dataset(dataset_path)
+    if max_dte is not None and "dte" in df.columns:
+        dte_col = pd.to_numeric(df["dte"], errors="coerce")
+        df = df[dte_col <= max_dte]
     scored = _score_holdout(df, artifact)
     holdout = _selection_metrics(scored, "prediction", cfg)
     walk_forward = _walk_forward_summary(artifact)

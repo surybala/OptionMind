@@ -37,6 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-underlying-share", type=float, default=BalanceConfig.max_underlying_share)
     parser.add_argument("--max-oversample-factor", type=float, default=BalanceConfig.max_oversample_factor)
     parser.add_argument("--random-seed", type=int, default=BalanceConfig.random_seed)
+    parser.add_argument("--max-dte", type=int, default=None, help="Maximum DTE filter: drop rows where dte > this value before balancing.")
     return parser.parse_args()
 
 
@@ -51,6 +52,11 @@ def main() -> int:
     )
     source_path = Path(args.input)
     df = load_dataset(source_path)
+    if args.max_dte is not None and "dte" in df.columns:
+        dte_col = pd.to_numeric(df["dte"], errors="coerce")
+        pre_filter = len(df)
+        df = df[dte_col <= args.max_dte].reset_index(drop=True)
+        print(f"DTE filter: {pre_filter:,} → {len(df):,} rows (max_dte={args.max_dte})")
     balanced = balance_candidate_frame(df, cfg)
     manifest = df.attrs.get("dataset_manifest") if hasattr(df, "attrs") else None
     source_metadata = dict((manifest or {}).get("metadata") or {})

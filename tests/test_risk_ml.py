@@ -175,6 +175,23 @@ def test_ml_exit_risk_service_applies_min_age_guard(tmp_path):
     assert payload["ml_exit_risk_guard_reason"] == "below_min_age_minutes"
 
 
+def test_ml_exit_risk_service_still_scores_without_greek_risk_payload(tmp_path):
+    service = MlExitRiskService(_monitor_config(tmp_path))
+    pos = _base_position()
+
+    payload = service.score_position(
+        pos,
+        current_mark=1.20,
+        spot=99.0,
+        risk=None,
+        chain=None,
+    )
+
+    assert payload is not None
+    assert "ml_exit_risk_score" in payload
+    assert payload["ml_exit_risk_model_id"] is not None
+
+
 def test_position_monitor_ml_exit_requires_confirmations(tmp_path):
     monitor = PositionMonitor(MagicMock(), MagicMock(), _monitor_config(tmp_path, confirmations_required=2))
     monitor._execute_close = MagicMock(return_value={"closed": True})

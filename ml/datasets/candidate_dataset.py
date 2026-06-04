@@ -179,6 +179,13 @@ class CandidateDatasetRow:
     days_to_macro_event: int | None = None
     has_macro_event_in_forward_days: int | None = None
 
+    # Quant structural features (features_v006)
+    vrp_5d: float | None = None
+    vrp_20d: float | None = None
+    gamma_theta_ratio: float | None = None
+    sigma_buffer: float | None = None
+    vega_margin_ratio: float | None = None
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -1036,6 +1043,17 @@ def _row_from_label(
         has_fomc_in_forward_days=macro_features.get("has_fomc_in_forward_days"),
         days_to_macro_event=macro_features.get("days_to_macro_event"),
         has_macro_event_in_forward_days=macro_features.get("has_macro_event_in_forward_days"),
+        **_quant_structural_features(
+            iv=greeks_features.get("implied_volatility"),
+            realized_vol_5d=underlying_features.get("underlying_realized_vol_5d"),
+            realized_vol_20d=underlying_features.get("underlying_realized_vol_20d"),
+            gamma=greeks_features.get("option_gamma"),
+            theta=greeks_features.get("option_theta"),
+            vega=greeks_features.get("option_vega"),
+            strike_distance_pct=_strike_distance_pct(contract.strike, underlying_features["underlying_close"]),
+            dte=entry_dte,
+            max_loss=None,
+        ),
     )
 
 
@@ -1165,6 +1183,17 @@ def _row_from_credit_spread_label(
         has_fomc_in_forward_days=macro_features.get("has_fomc_in_forward_days"),
         days_to_macro_event=macro_features.get("days_to_macro_event"),
         has_macro_event_in_forward_days=macro_features.get("has_macro_event_in_forward_days"),
+        **_quant_structural_features(
+            iv=greeks_features.get("implied_volatility"),
+            realized_vol_5d=underlying_features.get("underlying_realized_vol_5d"),
+            realized_vol_20d=underlying_features.get("underlying_realized_vol_20d"),
+            gamma=greeks_features.get("option_gamma"),
+            theta=greeks_features.get("option_theta"),
+            vega=greeks_features.get("option_vega"),
+            strike_distance_pct=_strike_distance_pct(short_contract.strike, underlying_features["underlying_close"]),
+            dte=entry_dte,
+            max_loss=label.max_loss,
+        ),
     )
 
 
@@ -1590,6 +1619,50 @@ def _volatility_regime(realized_vol_20d: float | None) -> str | None:
     if realized_vol_20d <= 0.15:
         return "low"
     return "normal"
+
+
+def _quant_structural_features(
+    iv: float | None,
+    realized_vol_5d: float | None,
+    realized_vol_20d: float | None,
+    gamma: float | None,
+    theta: float | None,
+    vega: float | None,
+    strike_distance_pct: float | None,
+    dte: int | None,
+    max_loss: float | None,
+) -> dict[str, float | None]:
+    """Compute quant structural features (features_v006).
+
+    - vrp_5d / vrp_20d: IV minus realized vol (variance risk premium).
+    - gamma_theta_ratio: |gamma| / |theta| — directional risk per unit of decay.
+    - sigma_buffer: strike distance in annualised standard deviations.
+    - vega_margin_ratio: |vega| / max_loss — vol exposure per dollar at risk.
+    """
+    vrp_5d = round(iv - realized_vol_5d, 8) if iv is not None and realized_vol_5d else None
+    vrp_20d = round(iv - realized_vol_20d, 8) if iv is not None and realized_vol_20d else None
+
+    gamma_theta_ratio = None
+    if gamma is not None and theta is not None and abs(theta) > 1e-12:
+        gamma_theta_ratio = round(abs(gamma) / abs(theta), 8)
+
+    sigma_buffer = None
+    if strike_distance_pct is not None and iv is not None and iv > 0 and dte is not None and dte > 0:
+        annual_sigma = iv * math.sqrt(dte / 365.0)
+        if annual_sigma > 1e-12:
+            sigma_buffer = round(abs(strike_distance_pct) / annual_sigma, 8)
+
+    vega_margin_ratio = None
+    if vega is not None and max_loss is not None and max_loss > 0:
+        vega_margin_ratio = round(abs(vega) / max_loss, 8)
+
+    return {
+        "vrp_5d": vrp_5d,
+        "vrp_20d": vrp_20d,
+        "gamma_theta_ratio": gamma_theta_ratio,
+        "sigma_buffer": sigma_buffer,
+        "vega_margin_ratio": vega_margin_ratio,
+    }
 
 
 def _range_pct(high: float | None, low: float | None, close: float | None) -> float | None:

@@ -57,6 +57,7 @@ class PositionRiskService:
         self.config = config
         risk = config.get('risk_parameters', {})
         self.stop_loss_multiplier = float(risk.get('stop_loss_multiplier', 2.0))
+        self._gamma_risk_enabled = bool((risk.get('gamma_risk', {}) or {}).get('enabled', True))
 
     # ── Factory ───────────────────────────────────────────────────────────────
 
@@ -239,11 +240,12 @@ class PositionRiskService:
                     pos, chain.leg_specs, chain.osi_map, chain.snapshots
                 )
                 if not greeks_legs:
-                    _log.warning(
-                        "[HFT] pos %s (%s/%s): all legs missing broker greeks — "
-                        "gamma-risk check skipped; price-based stop-loss still active",
-                        pos.get('id', '?'), pos.get('symbol', '?'), pos.get('type', '?'),
-                    )
+                    if self._gamma_risk_enabled:
+                        _log.warning(
+                            "[HFT] pos %s (%s/%s): all legs missing broker greeks — "
+                            "gamma-risk check skipped; price-based stop-loss still active",
+                            pos.get('id', '?'), pos.get('symbol', '?'), pos.get('type', '?'),
+                        )
                     return None
                 risk = _prs_g(greeks_legs)
             else:
@@ -318,11 +320,12 @@ class PositionRiskService:
                 continue
             row = snapshots.get(osi)
             if row is None:
-                _log.warning(
-                    "[HFT] snapshot not returned by Alpaca for %s (pos %s) — "
-                    "leg skipped from gamma check",
-                    osi, pos.get('id', '?'),
-                )
+                if self._gamma_risk_enabled:
+                    _log.warning(
+                        "[HFT] snapshot not returned by Alpaca for %s (pos %s) — "
+                        "leg skipped from gamma check",
+                        osi, pos.get('id', '?'),
+                    )
                 continue
 
             delta = row.get('delta')
@@ -331,12 +334,13 @@ class PositionRiskService:
             vega = row.get('vega')
 
             if delta is None or gamma is None or theta is None:
-                _log.warning(
-                    "[HFT] broker greeks are None for %s (pos %s) — "
-                    "likely outside market hours or contract not priced by Alpaca; "
-                    "leg skipped from gamma check",
-                    osi, pos.get('id', '?'),
-                )
+                if self._gamma_risk_enabled:
+                    _log.warning(
+                        "[HFT] broker greeks are None for %s (pos %s) — "
+                        "likely outside market hours or contract not priced by Alpaca; "
+                        "leg skipped from gamma check",
+                        osi, pos.get('id', '?'),
+                    )
                 continue
 
             legs.append({

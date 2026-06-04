@@ -59,6 +59,9 @@ TOGGLEABLE: dict[str, list[str]] = {
     "credit_efficiency": [
         "credit_per_day_per_risk",
     ],
+    "quant_structural": [
+        "vrp_5d", "vrp_20d", "gamma_theta_ratio", "sigma_buffer", "vega_margin_ratio",
+    ],
 }
 
 CHAMPION_GROUPS: dict[str, bool] = {g: True for g in TOGGLEABLE}

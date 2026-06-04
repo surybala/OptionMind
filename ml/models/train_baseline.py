@@ -100,6 +100,12 @@ DEFAULT_FEATURE_COLUMNS = [
     # Normalises entry_credit by both time and capital exposure so the model can
     # compare trades across different DTEs and spread widths on equal footing.
     "credit_per_day_per_risk",
+    # Quant structural features (features_v006)
+    "vrp_5d",
+    "vrp_20d",
+    "gamma_theta_ratio",
+    "sigma_buffer",
+    "vega_margin_ratio",
 ]
 
 DEFAULT_FEATURE_VERSION = "features_v005"
@@ -339,6 +345,36 @@ def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     _iv_skew_required = {"long_option_entry_price", "underlying_close", "long_strike", "option_type", "dte"}
     if _iv_skew_required.issubset(df.columns) and "iv_skew_wing" not in df.columns:
         df["iv_skew_wing"] = _compute_iv_skew_wing(df)
+
+    # Quant structural features (features_v006).
+    # Backfill for datasets built before _quant_structural_features existed.
+    if "implied_volatility" in df.columns and "underlying_realized_vol_5d" in df.columns:
+        iv = pd.to_numeric(df["implied_volatility"], errors="coerce")
+        rv5 = pd.to_numeric(df["underlying_realized_vol_5d"], errors="coerce")
+        if "vrp_5d" not in df.columns:
+            df["vrp_5d"] = (iv - rv5).round(8)
+    if "implied_volatility" in df.columns and "underlying_realized_vol_20d" in df.columns:
+        iv = pd.to_numeric(df["implied_volatility"], errors="coerce")
+        rv20 = pd.to_numeric(df["underlying_realized_vol_20d"], errors="coerce")
+        if "vrp_20d" not in df.columns:
+            df["vrp_20d"] = (iv - rv20).round(8)
+    if "option_gamma" in df.columns and "option_theta" in df.columns:
+        if "gamma_theta_ratio" not in df.columns:
+            gamma = pd.to_numeric(df["option_gamma"], errors="coerce").abs()
+            theta = pd.to_numeric(df["option_theta"], errors="coerce").abs()
+            df["gamma_theta_ratio"] = (gamma / theta.replace(0.0, np.nan)).round(8)
+    if {"strike_distance_pct", "implied_volatility", "dte"}.issubset(df.columns):
+        if "sigma_buffer" not in df.columns:
+            sd = pd.to_numeric(df["strike_distance_pct"], errors="coerce").abs()
+            iv_s = pd.to_numeric(df["implied_volatility"], errors="coerce")
+            dte_s = pd.to_numeric(df["dte"], errors="coerce")
+            annual_sigma = iv_s * np.sqrt(dte_s / 365.0)
+            df["sigma_buffer"] = (sd / annual_sigma.replace(0.0, np.nan)).round(8)
+    if "option_vega" in df.columns and "max_loss" in df.columns:
+        if "vega_margin_ratio" not in df.columns:
+            vega = pd.to_numeric(df["option_vega"], errors="coerce").abs()
+            ml = pd.to_numeric(df["max_loss"], errors="coerce")
+            df["vega_margin_ratio"] = (vega / ml.replace(0.0, np.nan)).round(8)
 
     return df
 

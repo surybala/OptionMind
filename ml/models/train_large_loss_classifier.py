@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -118,6 +119,12 @@ def parse_args() -> argparse.Namespace:
             "Example: --exclude-features vix_regime,market_return_5d"
         ),
     )
+    parser.add_argument(
+        "--max-dte",
+        type=int,
+        default=None,
+        help="Maximum DTE filter: drop rows where dte > this value before training.",
+    )
     return parser.parse_args()
 
 
@@ -130,6 +137,11 @@ def main() -> int:
         else output.with_name(f"{output.stem}.xgboost.json")
     )
     df = load_dataset(Path(args.input))
+    if args.max_dte is not None and "dte" in df.columns:
+        dte_col = pd.to_numeric(df["dte"], errors="coerce")
+        pre = len(df)
+        df = df[dte_col <= args.max_dte].reset_index(drop=True)
+        print(f"DTE filter: {pre:,} -> {len(df):,} rows (max_dte={args.max_dte})", file=sys.stderr)
     exclude_features = {f.strip() for f in args.exclude_features.split(",") if f.strip()}
     artifact = train_large_loss_classifier(
         df,

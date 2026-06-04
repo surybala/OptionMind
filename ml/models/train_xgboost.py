@@ -135,6 +135,16 @@ def parse_args() -> argparse.Namespace:
             "Example: --exclude-features vix_regime,vix_return_5d,option_gamma"
         ),
     )
+    parser.add_argument(
+        "--max-dte",
+        type=int,
+        default=None,
+        help=(
+            "Maximum DTE filter: drop rows where dte > this value before "
+            "train/test split. Use to match the model's training distribution "
+            "to the live trading universe (e.g. --max-dte 21 for 3-week trades)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -160,6 +170,7 @@ def main() -> int:
         max_rows_per_underlying=args.max_rows_per_underlying,
         high_vol_oversample_factor=args.high_vol_oversample_factor,
         exclude_features=exclude_features,
+        max_dte=args.max_dte,
         loss_config=AsymmetricLossConfig(
             downside_scale=args.downside_scale,
             error_scale=args.error_scale,
@@ -197,6 +208,7 @@ def train_xgboost(
     max_rows_per_underlying: int | None = None,
     high_vol_oversample_factor: int = 1,
     exclude_features: set[str] | None = None,
+    max_dte: int | None = None,
 ) -> XGBoostModelArtifact:
     if xgb is None:
         raise ImportError("xgboost is required and must be loadable. Install xgboost and its native runtime dependencies.")
@@ -210,6 +222,10 @@ def train_xgboost(
         raise ValueError(f"Need at least {min_rows} labeled rows, found {len(clean)}")
     if "entry_timestamp" in clean:
         clean = clean.sort_values("entry_timestamp")
+
+    if max_dte is not None and "dte" in clean.columns:
+        dte_col = pd.to_numeric(clean["dte"], errors="coerce")
+        clean = clean[dte_col <= max_dte]
 
     # Per-underlying row cap: prevents any single ETF from dominating training.
     # Applied before train/test split so the holdout reflects the capped distribution.

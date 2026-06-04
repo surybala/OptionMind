@@ -44,6 +44,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--n-trials", type=int, default=100)
     p.add_argument("--storage-dir", default="artifacts/optuna")
     p.add_argument("--num-boost-round", type=int, default=500)
+    p.add_argument("--max-dte", type=int, default=None, help="Maximum DTE filter passed to train and eval.")
+    p.add_argument("--exclude-features", default="", help="Comma-separated features to exclude from training.")
     return p.parse_args()
 
 
@@ -83,6 +85,8 @@ def _objective(
     dataset: str,
     num_boost_round: int,
     storage_dir: Path,
+    max_dte: int | None = None,
+    exclude_features: str = "",
 ) -> float:
     eta = trial.suggest_float("eta", 0.01, 0.20, log=True)
     max_depth = trial.suggest_int("max_depth", 3, 8)
@@ -127,6 +131,10 @@ def _objective(
         "--downside-scale", str(downside_scale),
         "--error-scale", str(downside_scale),
     ]
+    if max_dte is not None:
+        cmd_train.extend(["--max-dte", str(max_dte)])
+    if exclude_features:
+        cmd_train.extend(["--exclude-features", exclude_features])
 
     t0 = time.time()
     r = subprocess.run(cmd_train, capture_output=True, env=env)
@@ -141,6 +149,8 @@ def _objective(
         "--artifact", str(artifact_path),
         "--json-output", str(eval_path),
     ]
+    if max_dte is not None:
+        cmd_eval.extend(["--max-dte", str(max_dte)])
 
     r = subprocess.run(cmd_eval, capture_output=True, env=env)
     elapsed = time.time() - t0
@@ -250,17 +260,17 @@ def main() -> None:
     # Seed trial 0 with champion hyperparameters so TPE has a known-good anchor
     completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
     if not completed:
-        print("Seeding trial 0 with champion hyperparameters...")
+        print("Seeding trial 0 with V006c champion hyperparameters...")
         study.enqueue_trial({
-            "eta": 0.05,
+            "eta": 0.02033541341546644,
             "max_depth": 3,
-            "min_child_weight": 5.0,
-            "subsample": 0.85,
-            "colsample_bytree": 0.85,
-            "reg_lambda": 10.0,
-            "reg_alpha": 0.0,
-            "downside_penalty": 2.5,
-            "huber_delta": 1.0,
+            "min_child_weight": 5.467924645206163,
+            "subsample": 0.6688247220130267,
+            "colsample_bytree": 0.41677825864481716,
+            "reg_lambda": 37.4687664351599,
+            "reg_alpha": 0.1564206251204104,
+            "downside_penalty": 2.829276302091746,
+            "huber_delta": 2.2027261783930134,
             "downside_scale": 1000.0,
         })
     else:
@@ -271,7 +281,8 @@ def main() -> None:
     print(f"Running {args.n_trials} trial(s). Ctrl-C to stop early (progress is saved).\n")
 
     objective = lambda trial: _objective(
-        trial, args.input, args.num_boost_round, storage_dir
+        trial, args.input, args.num_boost_round, storage_dir,
+        max_dte=args.max_dte, exclude_features=args.exclude_features,
     )
 
     try:

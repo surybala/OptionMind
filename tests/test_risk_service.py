@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import sys
 import os
+import logging
 from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
@@ -210,6 +211,28 @@ class TestHftPath:
         enriched = svc.enrich_position(_pos())
         assert 'risk_level' in enriched   # must complete without raising
         assert enriched['has_broker_greeks'] is True
+
+    def test_broker_greeks_none_stays_quiet_when_gamma_risk_disabled(self, caplog):
+        svc = _svc(config={'risk_parameters': {'stop_loss_multiplier': 2.0, 'gamma_risk': {'enabled': False}}})
+        snap_short = {'delta': None, 'gamma': None, 'theta': None, 'bid': 1.10, 'ask': 1.30}
+        snap_long = {'delta': None, 'gamma': None, 'theta': None, 'bid': 0.25, 'ask': 0.35}
+        short_osi = 'AAPL991231P00190000'
+        long_osi = 'AAPL991231P00185000'
+        chain = _chain(
+            has_broker_greeks=True,
+            spot=195.0,
+            put_map={190.0: snap_short, 185.0: snap_long},
+            snapshots={short_osi: snap_short, long_osi: snap_long},
+            osi_map={(190.0, 'put'): short_osi, (185.0, 'put'): long_osi},
+            leg_specs=[(190.0, 'put', 'short'), (185.0, 'put', 'long')],
+        )
+        svc._data.get_position_chain.return_value = chain
+
+        with caplog.at_level(logging.WARNING):
+            enriched = svc.enrich_position(_pos())
+
+        assert 'risk_level' in enriched
+        assert 'broker greeks are None' not in caplog.text
 
 
 # ── Chain failure (HFT RuntimeError) ─────────────────────────────────────────
