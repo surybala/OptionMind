@@ -70,7 +70,6 @@ from src.agent_risk import (
     capital_for_pick,
     max_loss_multiple as max_loss_multiple_for_pick,
     filter_max_loss_multiple,
-    apply_directional_exposure_caps,
     apply_portfolio_gamma_risk,
     apply_regime_quantity_multiplier,
 )
@@ -107,9 +106,7 @@ from src.agent_risk import (                        # noqa: F811
     capital_for_pick as _capital_for_pick,
     max_loss_per_contract as _max_loss_per_contract_for_pick,
     max_loss_multiple as _max_loss_multiple_for_pick,
-    directional_exposure as _directional_exposure,
     filter_max_loss_multiple as _filter_max_loss_multiple,
-    apply_directional_exposure_caps as _apply_directional_exposure_caps,
 )
 from src.agent_market import (                      # noqa: F811
     reconcile_positions_before_budget as _reconcile_positions_before_budget,
@@ -851,22 +848,6 @@ def _run_once(args, headless: bool = False) -> None:
 
     account_capital = config.get('account_capital') or capital_budget
     before_gate = list(picks)
-    picks = apply_directional_exposure_caps(
-        picks, capital_positions, config, account_capital,
-    )
-    capture_rejections(
-        before_gate,
-        picks,
-        'Directional exposure cap',
-        'Position would exceed configured put/call side exposure limits',
-        risk_rejected,
-    )
-    if not picks:
-        log.info("No picks survived directional exposure caps — nothing to trade.")
-        write_scan_audit([], risk_rejected, db=db)
-        return
-
-    before_gate = list(picks)
     picks = apply_portfolio_gamma_risk(
         picks, capital_positions, config, account_capital, monitor,
     )
@@ -1015,12 +996,6 @@ def _run_once(args, headless: bool = False) -> None:
                 new_picks = budgeted
             if not new_picks:
                 log.info("[agent] No picks fit within capital budget after fresh model request — aborting.")
-                return
-            new_picks = apply_directional_exposure_caps(
-                new_picks, capital_positions, config, account_capital,
-            )
-            if not new_picks:
-                log.info("[agent] No picks survived directional exposure caps after fresh model request — aborting.")
                 return
             new_picks = apply_portfolio_gamma_risk(
                 new_picks, capital_positions, config, account_capital, monitor,

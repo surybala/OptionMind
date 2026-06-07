@@ -128,13 +128,6 @@
       },
       "_note": "Reject new trades whose max loss per contract is too large relative to collected credit. 30.0 means do not risk more than $30 for each $1 collected."
     },
-    "directional_exposure_caps": {
-      "enabled": true,
-      "put": 0.5,
-      "call": 0.5,
-      "min_side_cap_dollars": 1500,
-      "_note": "Cap aggregate same-direction max-loss exposure as a fraction of account_capital, or max_capital_per_period when account_capital is not configured, with a dollar floor for small budgets. This is a gross side-exposure concentration guard; portfolio stress and symbol stress caps are the primary tail-risk brakes. PCS/CSP count as put risk, CCS/CC count as call risk, and IC/IFLY/STRANGLE split exposure across both sides."
-    },
     "portfolio_gamma_risk": {
       "enabled": true,
       "fail_closed": true,

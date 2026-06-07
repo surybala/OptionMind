@@ -25,10 +25,7 @@ def _config() -> dict:
     return {
         "ml_scanner": {"top_n": 10},
         "pick_selection": {"mode": "model_ranked"},
-        "risk_parameters": {
-            "directional_exposure_caps": {"enabled": False},
-            "portfolio_gamma_risk": {"enabled": False},
-        },
+        "risk_parameters": {"portfolio_gamma_risk": {"enabled": False}},
     }
 
 
@@ -54,40 +51,6 @@ def test_portfolio_controls_marks_pick_selection_rejections():
     assert diagnostics["gate_stage"].loc[2] == "pick_selection"
     assert diagnostics["gate_reason"].loc[2] == "scanner_controls"
     assert diagnostics["gate_stage_counts"] == {"selected": 1, "pick_selection": 1}
-
-
-def test_portfolio_controls_marks_directional_exposure_rejections():
-    df = pd.DataFrame([
-        _row(1, 0.95, "PCS"),
-        _row(2, 0.90, "PCS"),
-        _row(3, 0.85, "PCS"),
-    ]).set_index("row_id")
-    config = _config()
-    config["risk_parameters"]["directional_exposure_caps"] = {
-        "enabled": True,
-        "put": 0.02,
-        "call": 0.02,
-    }
-
-    scores, diagnostics = apply_portfolio_risk_controls(
-        df,
-        "gated_score",
-        account_capital=50_000,
-        scanner_controls=True,
-        scanner_config=config,
-        return_diagnostics=True,
-    )
-
-    assert math.isfinite(scores.loc[1])
-    assert math.isfinite(scores.loc[2])
-    assert not math.isfinite(scores.loc[3])
-    assert diagnostics["gate_stage"].loc[3] == "directional_exposure"
-    assert diagnostics["gate_reason"].loc[3] == "side_exposure_cap"
-    assert diagnostics["gate_stage_counts"] == {
-        "selected": 2,
-        "directional_exposure": 1,
-    }
-
 
 def test_portfolio_controls_uses_scanner_gamma_config_for_rejections():
     df = pd.DataFrame([_row(1, 0.90)]).set_index("row_id")

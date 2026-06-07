@@ -27,7 +27,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.agent_risk import apply_directional_exposure_caps
 from src.pick_selection import select_top_picks_with_scanner_controls
 from src.portfolio_risk import PortfolioRiskService
 
@@ -46,9 +45,9 @@ def apply_portfolio_risk_controls(
 ) -> pd.Series | tuple[pd.Series, dict[str, Any]]:
     """Return scores filtered by live scanner controls plus rejection diagnostics.
 
-    Rows that survive pick selection, directional exposure caps, and portfolio
-    gamma risk keep their original score; rejected rows are set to ``-inf`` so
-    downstream selectors ignore them.
+    Rows that survive pick selection and portfolio gamma risk keep their
+    original score; rejected rows are set to ``-inf`` so downstream selectors
+    ignore them.
 
     Historical rows are evaluated one entry date at a time.  Expiry is
     normalised to today + row.dte because PortfolioRiskService computes DTE
@@ -141,34 +140,13 @@ def apply_portfolio_risk_controls(
             diagnostics["gate_stage"].loc[list(rejected_by_selection)] = "pick_selection"
             diagnostics["gate_reason"].loc[list(rejected_by_selection)] = "scanner_controls"
 
-        directional_requested_qty = {
+        gamma_requested_qty = {
             pick["_row_index"]: int(pick.get("quantity") or 1)
             for pick in picks
         }
-        directional_picks = apply_directional_exposure_caps(
-            picks,
-            [],
-            scanner_config or {},
-            account_capital,
-        )
-        directional_index = {pick["_row_index"] for pick in directional_picks}
-        rejected_by_directional = selected_index - directional_index
-        if rejected_by_directional:
-            diagnostics["gate_stage"].loc[list(rejected_by_directional)] = "directional_exposure"
-            diagnostics["gate_reason"].loc[list(rejected_by_directional)] = "side_exposure_cap"
-        for pick in directional_picks:
-            row_index = pick["_row_index"]
-            diagnostics["directional_reduced"].loc[row_index] = (
-                int(pick.get("quantity") or 1) < directional_requested_qty.get(row_index, 1)
-            )
-
-        gamma_requested_qty = {
-            pick["_row_index"]: int(pick.get("quantity") or 1)
-            for pick in directional_picks
-        }
         gamma_rejections: list[dict[str, Any]] = []
         accepted = svc.filter_picks(
-            directional_picks,
+            picks,
             [],
             account_capital=account_capital,
             rejection_sink=gamma_rejections,

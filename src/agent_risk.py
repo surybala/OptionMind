@@ -47,19 +47,6 @@ def capital_for_pick(pick: dict) -> float:
         return price * 0.20 * 100
     return 0.0
 
-
-def strategy_sides(strategy: str) -> set[str]:
-    """Return directional risk side(s) for a strategy."""
-    strat = (strategy or '').upper()
-    if strat in ('CSP', 'PCS'):
-        return {'put'}
-    if strat in ('CC', 'CCS'):
-        return {'call'}
-    if strat in ('IC', 'IFLY', 'STRANGLE'):
-        return {'put', 'call'}
-    return set()
-
-
 def pick_width(pick: dict) -> float:
     strat = (pick.get('strategy') or '').upper()
     if strat in ('PCS', 'CCS'):
@@ -97,54 +84,6 @@ def max_loss_multiple(pick: dict) -> float:
     return round(max_loss_per_contract(pick) / credit, 4)
 
 
-# ── Position-level helpers ───────────────────────────────────────────────────
-
-def max_loss_for_position(pos: dict) -> float:
-    """Estimate max remaining strategy loss for an open DB position."""
-    import json as _json
-    strat = (pos.get('type') or '').upper()
-    legs = pos.get('legs') or {}
-    if isinstance(legs, str):
-        try:
-            legs = _json.loads(legs) or {}
-        except Exception:
-            legs = {}
-    premium = max(0.0, float(pos.get('premium') or 0))
-    strike = float(pos.get('strike') or 0)
-    contracts = int(pos.get('contracts') or 1)
-
-    width = 0.0
-    if strat in ('PCS', 'CCS'):
-        ss = legs.get('short_strike') or legs.get('short_put') or legs.get('short_call') or strike
-        ls = legs.get('long_strike') or legs.get('long_put') or legs.get('long_call') or 0
-        width = abs(float(ss or 0) - float(ls or 0))
-    elif strat in ('IC', 'IFLY'):
-        sp = float(legs.get('short_put') or 0)
-        lp = float(legs.get('long_put') or 0)
-        sc = float(legs.get('short_call') or 0)
-        lc = float(legs.get('long_call') or 0)
-        width = max(abs(sp - lp), abs(sc - lc))
-    elif strat in ('CSP', 'STRANGLE'):
-        width = float(legs.get('short_strike') or legs.get('short_put') or strike or 0)
-    elif strat == 'CC':
-        width = float(legs.get('short_strike') or legs.get('short_call') or strike or 0)
-
-    return max(0.0, round((width - premium) * 100 * contracts, 2))
-
-
-def directional_exposure(open_positions: list[dict]) -> dict[str, float]:
-    exposure = {'put': 0.0, 'call': 0.0}
-    for pos in open_positions:
-        sides = strategy_sides(pos.get('type', ''))
-        if not sides:
-            continue
-        loss = max_loss_for_position(pos)
-        share = loss / len(sides)
-        for side in sides:
-            exposure[side] += share
-    return {k: round(v, 2) for k, v in exposure.items()}
-
-
 # ── Risk filters ─────────────────────────────────────────────────────────────
 
 def filter_max_loss_multiple(picks: list[dict], config: dict) -> list[dict]:
@@ -175,73 +114,6 @@ def filter_max_loss_multiple(picks: list[dict], config: dict) -> list[dict]:
     if rejected:
         log.info("Max-loss multiple filter: kept %d/%d pick(s).", len(kept), len(picks))
     return kept
-
-
-def apply_directional_exposure_caps(
-    picks: list[dict],
-    open_positions: list[dict],
-    config: dict,
-    account_capital: Optional[float],
-) -> list[dict]:
-    cfg = config.get('risk_parameters', {}).get('directional_exposure_caps', {})
-    if not cfg.get('enabled', True) or not account_capital:
-        return picks
-    try:
-        account_capital = float(account_capital)
-    except (TypeError, ValueError):
-        log.warning(
-            "Directional cap disabled: account_capital/max_capital_per_period is not numeric."
-        )
-        return picks
-
-    min_side_cap = float(cfg.get('min_side_cap_dollars', 0.0) or 0.0)
-    put_limit = max(
-        float(cfg.get('put', cfg.get('max_put_pct', 0.04))) * account_capital,
-        float(cfg.get('min_put_cap_dollars', min_side_cap) or 0.0),
-    )
-    call_limit = max(
-        float(cfg.get('call', cfg.get('max_call_pct', 0.04))) * account_capital,
-        float(cfg.get('min_call_cap_dollars', min_side_cap) or 0.0),
-    )
-    limits = {'put': put_limit, 'call': call_limit}
-    used = directional_exposure(open_positions)
-    capped: list[dict] = []
-
-    for pick in sorted(picks, key=lambda x: x.get('score', 0.0), reverse=True):
-        sides = strategy_sides(pick.get('strategy', ''))
-        if not sides:
-            capped.append(pick)
-            continue
-        per_contract_loss = max_loss_per_contract(pick)
-        if per_contract_loss <= 0:
-            continue
-        requested_qty = int(pick.get('quantity') or 1)
-        per_side_loss = per_contract_loss / len(sides)
-        side_cap_qty = requested_qty
-        for side in sides:
-            remaining = limits[side] - used.get(side, 0.0)
-            side_cap_qty = min(side_cap_qty, int(remaining // per_side_loss))
-        if side_cap_qty <= 0:
-            log.info(
-                "Directional cap: rejected %s %s; side exposure used=%s limits=%s.",
-                pick.get('strategy'), pick.get('symbol'), used, limits,
-            )
-            continue
-        if side_cap_qty < requested_qty:
-            log.info(
-                "Directional cap: reduced %s %s quantity %d → %d.",
-                pick.get('strategy'), pick.get('symbol'), requested_qty, side_cap_qty,
-            )
-        pick['quantity'] = side_cap_qty
-        for side in sides:
-            used[side] = round(used.get(side, 0.0) + per_side_loss * side_cap_qty, 2)
-        capped.append(pick)
-
-    log.info(
-        "Directional exposure after sizing: put=$%.0f/$%.0f, call=$%.0f/$%.0f.",
-        used.get('put', 0.0), put_limit, used.get('call', 0.0), call_limit,
-    )
-    return capped
 
 
 def apply_portfolio_gamma_risk(
