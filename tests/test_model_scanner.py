@@ -424,7 +424,7 @@ def test_live_paper_inference_provider_ignores_strategy_specific_ranker_config(t
     assert str(ccs_artifact) not in {pick["model_artifact_path"] for pick in picks}
 
 
-def test_live_paper_inference_provider_applies_regime_allocation_to_ranked_picks(tmp_path):
+def test_live_paper_inference_provider_ignores_regime_allocation_side_overrides(tmp_path):
     provider = WiderSpreadLiveProvider()
     registry_path = _champion_registry(tmp_path)
     inference = LivePaperInferenceProvider(
@@ -460,7 +460,7 @@ def test_live_paper_inference_provider_applies_regime_allocation_to_ranked_picks
     picks = inference.get_top_picks(["SPY"], n=2)
 
     assert len(picks) == 2
-    assert {pick["strategy"] for pick in picks} == {"PCS", "CCS"}
+    assert [pick["strategy"] for pick in picks] == ["PCS", "PCS"]
 
 
 def _large_loss_classifier_artifact(tmp_path, always_veto: bool = False):

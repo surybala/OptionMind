@@ -209,7 +209,7 @@ class TestModelRankedStrategyCaps:
 
 
 class TestModelRankedRegimeAllocation:
-    def test_orange_regime_caps_pcs_and_reserves_ccs_capacity(self):
+    def test_orange_regime_allocation_does_not_override_ranked_scores(self):
         picks = (
             [_p("PCS", f"P{i}", 10.0 - i * 0.1) for i in range(10)]
             + [_p("CCS", f"C{i}", 4.0 - i * 0.1) for i in range(10)]
@@ -233,12 +233,9 @@ class TestModelRankedRegimeAllocation:
             regime_label="ORANGE",
         )
 
-        pcs_count = sum(1 for p in result if p["strategy"] == "PCS")
-        ccs_count = sum(1 for p in result if p["strategy"] == "CCS")
-        assert pcs_count <= 4
-        assert ccs_count >= 4
+        assert all(p["strategy"] == "PCS" for p in result)
 
-    def test_green_regime_cap_can_zero_out_ccs_even_if_scores_dominate(self):
+    def test_green_regime_allocation_does_not_zero_out_higher_scored_ccs(self):
         picks = (
             [_p("CCS", f"C{i}", 10.0 - i * 0.1) for i in range(10)]
             + [_p("PCS", f"P{i}", 4.0 - i * 0.1) for i in range(10)]
@@ -262,7 +259,7 @@ class TestModelRankedRegimeAllocation:
             regime_label="GREEN",
         )
 
-        assert all(p["strategy"] == "PCS" for p in result)
+        assert all(p["strategy"] == "CCS" for p in result)
 
 
 # ── Mode fallback behavior ────────────────────────────────────────────────────

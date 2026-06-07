@@ -9,15 +9,15 @@ equal_diversity (default)
     ``strategies.iron_condor.ic_allocation_pct``.
 
 model_ranked
-    Pure top-N by model score with no per-strategy floors.  Only hard caps
-    apply: IC allocation cap, per-ticker cap, and optional per-strategy caps
-    from ``config["pick_selection"]["strategy_caps"]``.  Designed for the ML
-    scanner where the model score already encodes strategy quality — forcing
-    PCS and CCS into equal quotas suppresses the model's signal.
+    Pure top-N by model score with no per-strategy floors or regime-driven
+    side overrides. Only hard caps apply: IC allocation cap, per-ticker cap,
+    and optional per-strategy caps from
+    ``config["pick_selection"]["strategy_caps"]``. Designed for the ML
+    scanner where the ranker and loss models already encode directional trade
+    quality.
 """
 from __future__ import annotations
 
-import math
 from collections import defaultdict
 from typing import Any
 
@@ -68,12 +68,6 @@ def select_top_picks_with_scanner_controls(
             strat: max(1, int(float(frac) * n))
             for strat, frac in raw_caps.items()
         }
-        regime_caps, regime_floors = _regime_strategy_limits(
-            selection_cfg.get("regime_allocation"),
-            n=n,
-            regime_label=regime_label,
-        )
-        strategy_caps = _merge_strategy_caps(strategy_caps, regime_caps)
         return _model_ranked_selection(
             ranked,
             n,
@@ -81,7 +75,6 @@ def select_top_picks_with_scanner_controls(
             ic_pct=ic_pct,
             max_per_ticker=max_per_ticker,
             strategy_caps=strategy_caps,
-            strategy_floors=regime_floors,
         )
 
     return _equal_diversity_selection(
@@ -101,52 +94,15 @@ def _model_ranked_selection(
     ic_pct: float,
     max_per_ticker: "int | None",
     strategy_caps: dict[str, int],
-    strategy_floors: dict[str, int],
 ) -> list[dict[str, Any]]:
-    """Greedy top-N by score with hard caps only — no per-strategy floors."""
+    """Greedy top-N by score with hard caps only."""
     selected: list[dict[str, Any]] = []
     strategy_ct: dict[str, int] = defaultdict(int)
     ticker_ct: dict[str, int] = defaultdict(int)
-    selected_indices: set[int] = set()
 
-    floor_items = sorted(
-        ((strat, floor) for strat, floor in strategy_floors.items() if floor > 0),
-        key=lambda item: (-item[1], item[0]),
-    )
-    for strat, floor in floor_items:
-        effective_floor = floor
-        if strat == "IC" and ic_pct < 1.0:
-            effective_floor = min(effective_floor, max_ic_slots)
-        cap = strategy_caps.get(strat)
-        if cap is not None:
-            effective_floor = min(effective_floor, cap)
-        if effective_floor <= 0:
-            continue
-        for idx, pick in enumerate(ranked):
-            if len(selected) >= n or strategy_ct[strat] >= effective_floor:
-                break
-            if idx in selected_indices or str(pick.get("strategy") or "") != strat:
-                continue
-            if not _model_ranked_can_select(
-                pick,
-                strategy_ct=strategy_ct,
-                ticker_ct=ticker_ct,
-                max_per_ticker=max_per_ticker,
-                max_ic_slots=max_ic_slots,
-                ic_pct=ic_pct,
-                strategy_caps=strategy_caps,
-            ):
-                continue
-            selected.append(pick)
-            selected_indices.add(idx)
-            strategy_ct[strat] += 1
-            ticker_ct[str(pick.get("symbol") or "")] += 1
-
-    for idx, pick in enumerate(ranked):
+    for pick in ranked:
         if len(selected) >= n:
             break
-        if idx in selected_indices:
-            continue
         if not _model_ranked_can_select(
             pick,
             strategy_ct=strategy_ct,
@@ -158,7 +114,6 @@ def _model_ranked_selection(
         ):
             continue
         selected.append(pick)
-        selected_indices.add(idx)
         strat = str(pick.get("strategy") or "")
         sym = str(pick.get("symbol") or "")
         strategy_ct[strat] += 1
@@ -258,57 +213,3 @@ def _equal_diversity_selection(
         key=lambda x: x.get("score", x.get("model_score", 0.0)), reverse=True
     )
     return selected[:n]
-
-
-def _merge_strategy_caps(
-    base_caps: dict[str, int],
-    regime_caps: dict[str, int],
-) -> dict[str, int]:
-    merged = dict(base_caps)
-    for strat, cap in regime_caps.items():
-        if strat in merged:
-            merged[strat] = min(merged[strat], cap)
-        else:
-            merged[strat] = cap
-    return merged
-
-
-def _regime_strategy_limits(
-    raw: Any,
-    *,
-    n: int,
-    regime_label: str | None,
-) -> tuple[dict[str, int], dict[str, int]]:
-    if not isinstance(raw, dict) or not raw.get("enabled", False) or n <= 0:
-        return {}, {}
-    label = str(regime_label or raw.get("runtime_regime_label") or "").upper()
-    if not label:
-        return {}, {}
-    regimes = raw.get("regimes")
-    if not isinstance(regimes, dict):
-        return {}, {}
-    regime_cfg = regimes.get(label)
-    if not isinstance(regime_cfg, dict):
-        return {}, {}
-    caps: dict[str, int] = {}
-    floors: dict[str, int] = {}
-    for strat, limits in regime_cfg.items():
-        if not isinstance(limits, dict):
-            continue
-        max_fraction = _fraction_or_none(limits.get("max_fraction"))
-        min_fraction = _fraction_or_none(limits.get("min_fraction"))
-        if max_fraction is not None:
-            caps[str(strat).upper()] = max(0, int(math.floor(max_fraction * n)))
-        if min_fraction is not None:
-            floors[str(strat).upper()] = max(0, int(math.ceil(min_fraction * n)))
-    return caps, floors
-
-
-def _fraction_or_none(value: Any) -> float | None:
-    try:
-        fraction = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(fraction):
-        return None
-    return max(0.0, min(1.0, fraction))

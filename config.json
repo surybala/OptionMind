@@ -40,27 +40,9 @@
     "stop_loss_veto_threshold": 0.70
   },
 
-  "_pick_selection_note": "model_ranked = pure top-N by model score, no per-strategy floors (right choice for ML scanner). equal_diversity = guaranteed floor per strategy (legacy default).",
+  "_pick_selection_note": "model_ranked = pure top-N by model score, with no per-strategy floors or regime-driven PCS/CCS overrides (right choice for ML scanner). equal_diversity = guaranteed floor per strategy (legacy default).",
   "pick_selection": {
-    "mode": "model_ranked",
-    "regime_allocation": {
-      "enabled": true,
-      "_note": "Optional regime-aware PCS/CCS allocation layered on top of model_ranked scoring. Caps prevent one side from crowding out the other; floors guarantee some representation for the favored side when the regime turns hostile.",
-      "regimes": {
-        "GREEN": {
-          "PCS": {"min_fraction": 0.50, "max_fraction": 1.00},
-          "CCS": {"max_fraction": 0.35}
-        },
-        "YELLOW": {
-          "PCS": {"min_fraction": 0.35, "max_fraction": 0.75},
-          "CCS": {"min_fraction": 0.10, "max_fraction": 0.55}
-        },
-        "ORANGE": {
-          "PCS": {"max_fraction": 0.35},
-          "CCS": {"min_fraction": 0.35, "max_fraction": 0.85}
-        }
-      }
-    }
+    "mode": "model_ranked"
   },
 
   "_legacy_scanner_note": "The following scanner/strategy settings are retained for legacy tests/reference and old risk/execution compatibility. They are not the north-star candidate-generation path.",
