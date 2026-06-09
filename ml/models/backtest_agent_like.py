@@ -34,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pcs-ranker-artifact", default=None, help="Optional explicit PCS ranker artifact path.")
     parser.add_argument("--ccs-ranker-artifact", default=None, help="Optional explicit CCS ranker artifact path.")
     parser.add_argument("--large-loss-artifact", default=None, help="Optional explicit large-loss artifact path.")
+    parser.add_argument("--stop-loss-artifact", default=None, help="Optional explicit stop-loss artifact path.")
     parser.add_argument("--json-output", default=None, help="Optional JSON report output path.")
     return parser.parse_args()
 
@@ -49,6 +50,7 @@ def main() -> int:
         pcs_ranker_artifact_path=Path(args.pcs_ranker_artifact) if args.pcs_ranker_artifact else None,
         ccs_ranker_artifact_path=Path(args.ccs_ranker_artifact) if args.ccs_ranker_artifact else None,
         large_loss_artifact_path=Path(args.large_loss_artifact) if args.large_loss_artifact else None,
+        stop_loss_artifact_path=Path(args.stop_loss_artifact) if args.stop_loss_artifact else None,
     )
     payload = json.loads(json.dumps(report, default=str))
     if args.json_output:
@@ -69,6 +71,7 @@ def run_backtest(
     pcs_ranker_artifact_path: Path | None = None,
     ccs_ranker_artifact_path: Path | None = None,
     large_loss_artifact_path: Path | None = None,
+    stop_loss_artifact_path: Path | None = None,
 ) -> dict[str, Any]:
     if xgb is None:
         raise ImportError("xgboost is required for ML backtesting.")
@@ -84,33 +87,64 @@ def run_backtest(
         pcs_ranker_artifact_path=pcs_ranker_artifact_path,
         ccs_ranker_artifact_path=ccs_ranker_artifact_path,
     )
-    large_loss_artifact_path = large_loss_artifact_path or Path(
-        str(config.get("ml_scanner", {}).get("large_loss_classifier_path") or "")
+    large_loss_artifact_path = _resolve_optional_artifact_path(
+        repo_root,
+        large_loss_artifact_path,
+        str(config.get("ml_scanner", {}).get("large_loss_classifier_path") or ""),
     )
-    if not large_loss_artifact_path.is_absolute():
-        large_loss_artifact_path = repo_root / large_loss_artifact_path
+    stop_loss_artifact_path = _resolve_optional_artifact_path(
+        repo_root,
+        stop_loss_artifact_path,
+        str(config.get("ml_scanner", {}).get("stop_loss_classifier_path") or ""),
+    )
+    if large_loss_artifact_path is None:
+        raise ValueError("Unable to resolve large-loss classifier artifact path.")
     if not ranker_artifact_path.is_absolute():
         ranker_artifact_path = repo_root / ranker_artifact_path
 
     df = load_dataset(dataset_path)
-    df = _filter_year(df, year)
+    df = _filter_backtest_universe(
+        df,
+        year=year,
+        min_dte=int(config.get("ml_scanner", {}).get("min_dte", 7) or 7),
+        max_dte=int(config.get("ml_scanner", {}).get("max_dte", config.get("expiry_days_max", 45) or 45)),
+    )
     scored = _score_rankers(df, strategy_ranker_paths)
     scored["large_loss_probability"] = _score_classifier(scored, large_loss_artifact_path)
-    scored["gated_score"] = apply_large_loss_gate(
-        scored["prediction"],
-        scored["large_loss_probability"],
-        max_large_loss_probability=float(config.get("ml_scanner", {}).get("large_loss_veto_threshold", 0.70)),
-    )
+    if stop_loss_artifact_path is not None and stop_loss_artifact_path.exists():
+        scored["stop_loss_probability"] = _score_classifier(scored, stop_loss_artifact_path)
+    else:
+        scored["stop_loss_probability"] = pd.Series(pd.NA, index=scored.index, dtype="Float64")
+    scored["gated_score"] = pd.to_numeric(scored["prediction"], errors="coerce").fillna(-np.inf)
     scored["gate_stage"] = pd.Series(pd.NA, index=scored.index, dtype="string")
     scored["gate_reason"] = pd.Series(pd.NA, index=scored.index, dtype="string")
     scored["gate_violation_codes"] = pd.Series(pd.NA, index=scored.index, dtype="string")
     scored["directional_reduced"] = False
     scored["portfolio_gamma_reduced"] = False
     large_loss_threshold = float(config.get("ml_scanner", {}).get("large_loss_veto_threshold", 0.70))
+    stop_loss_threshold = float(config.get("ml_scanner", {}).get("stop_loss_veto_threshold", 0.70))
+    scored["gated_score"] = apply_large_loss_gate(
+        scored["gated_score"],
+        scored["large_loss_probability"],
+        max_large_loss_probability=large_loss_threshold,
+    )
     large_loss_veto = ~np.isfinite(pd.to_numeric(scored["gated_score"], errors="coerce"))
     scored.loc[large_loss_veto, "gate_stage"] = "large_loss_veto"
     scored.loc[large_loss_veto, "gate_reason"] = (
         "p_large_loss>" + pd.to_numeric(scored.loc[large_loss_veto, "large_loss_probability"], errors="coerce").round(4).astype(str)
+    )
+    scored["gated_score"] = apply_large_loss_gate(
+        scored["gated_score"],
+        scored["stop_loss_probability"],
+        max_large_loss_probability=stop_loss_threshold,
+    )
+    stop_loss_veto = (
+        ~np.isfinite(pd.to_numeric(scored["gated_score"], errors="coerce"))
+        & ~large_loss_veto
+    )
+    scored.loc[stop_loss_veto, "gate_stage"] = "stop_loss_veto"
+    scored.loc[stop_loss_veto, "gate_reason"] = (
+        "p_stop_loss>" + pd.to_numeric(scored.loc[stop_loss_veto, "stop_loss_probability"], errors="coerce").round(4).astype(str)
     )
     scored["allocator_regime_label"] = _allocator_regime_labels(scored)
     portfolio_result = apply_portfolio_risk_controls(
@@ -136,6 +170,11 @@ def run_backtest(
     scored.loc[large_loss_veto, "gate_violation_codes"] = pd.NA
     scored.loc[large_loss_veto, "directional_reduced"] = False
     scored.loc[large_loss_veto, "portfolio_gamma_reduced"] = False
+    scored.loc[stop_loss_veto, "gate_stage"] = "stop_loss_veto"
+    scored.loc[stop_loss_veto, "gate_reason"] = f"p_stop_loss>{stop_loss_threshold:.2f}"
+    scored.loc[stop_loss_veto, "gate_violation_codes"] = pd.NA
+    scored.loc[stop_loss_veto, "directional_reduced"] = False
+    scored.loc[stop_loss_veto, "portfolio_gamma_reduced"] = False
     scored["quarter"] = pd.PeriodIndex(pd.to_datetime(scored["entry_timestamp"]), freq="Q").astype(str)
     selected = scored[np.isfinite(pd.to_numeric(scored["portfolio_score"], errors="coerce"))].copy()
     selected = selected.sort_values(["entry_timestamp", "portfolio_score"], ascending=[True, False])
@@ -154,10 +193,18 @@ def run_backtest(
         "ranker_artifact": str(ranker_artifact_path),
         "strategy_rankers": {key: str(value.path) for key, value in strategy_ranker_paths.items()},
         "large_loss_artifact": str(large_loss_artifact_path),
+        "stop_loss_artifact": (
+            str(stop_loss_artifact_path)
+            if stop_loss_artifact_path is not None and stop_loss_artifact_path.exists()
+            else None
+        ),
         "runtime": {
             "pick_selection_mode": ((config.get("pick_selection") or {}).get("mode")),
             "scanner_top_n": ((config.get("ml_scanner") or {}).get("top_n")),
+            "min_dte": int(config.get("ml_scanner", {}).get("min_dte", 7) or 7),
+            "max_dte": int(config.get("ml_scanner", {}).get("max_dte", config.get("expiry_days_max", 45) or 45)),
             "large_loss_veto_threshold": float(config.get("ml_scanner", {}).get("large_loss_veto_threshold", 0.70)),
+            "stop_loss_veto_threshold": float(config.get("ml_scanner", {}).get("stop_loss_veto_threshold", 0.70)),
             "max_capital_per_period": float(config.get("max_capital_per_period", 50_000.0)),
             "regime_allocator_enabled": bool(((config.get("pick_selection") or {}).get("regime_allocation") or {}).get("enabled", False)),
             "allocator_regime_source": "dataset_proxy_v1",
@@ -243,13 +290,29 @@ def _resolve_source_path(repo_root: Path, source: Any) -> Path:
     raise ValueError(f"Unable to resolve strategy ranker {target_id!r} from {registry_path}")
 
 
-def _filter_year(df: pd.DataFrame, year: int) -> pd.DataFrame:
+def _resolve_optional_artifact_path(repo_root: Path, explicit_path: Path | None, configured_path: str) -> Path | None:
+    path = explicit_path
+    if path is None:
+        stripped = configured_path.strip()
+        if not stripped:
+            return None
+        path = Path(stripped)
+    if not path.is_absolute():
+        path = repo_root / path
+    return path
+
+
+def _filter_backtest_universe(df: pd.DataFrame, *, year: int, min_dte: int, max_dte: int) -> pd.DataFrame:
     if "entry_timestamp" not in df:
         raise ValueError("Dataset is missing entry_timestamp; cannot run calendar backtest.")
     working = df.copy()
     working["entry_timestamp"] = pd.to_datetime(working["entry_timestamp"], errors="coerce", utc=True)
     working = working.dropna(subset=["entry_timestamp"])
-    return working.loc[working["entry_timestamp"].dt.year == year].copy()
+    working = working.loc[working["entry_timestamp"].dt.year == year].copy()
+    if "dte" in working.columns:
+        dte = pd.to_numeric(working["dte"], errors="coerce")
+        working = working.loc[dte.between(min_dte, max_dte, inclusive="both")].copy()
+    return working
 
 
 def _load_scoring_artifact(strategy: str, path: Path) -> _ScoringArtifact:
