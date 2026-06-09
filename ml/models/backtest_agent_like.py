@@ -121,8 +121,8 @@ def run_backtest(
     scored["gate_violation_codes"] = pd.Series(pd.NA, index=scored.index, dtype="string")
     scored["directional_reduced"] = False
     scored["portfolio_gamma_reduced"] = False
-    large_loss_threshold = float(config.get("ml_scanner", {}).get("large_loss_veto_threshold", 0.70))
-    stop_loss_threshold = float(config.get("ml_scanner", {}).get("stop_loss_veto_threshold", 0.70))
+    large_loss_threshold = float(config.get("ml_scanner", {}).get("large_loss_veto_threshold", 0.60))
+    stop_loss_threshold = float(config.get("ml_scanner", {}).get("stop_loss_veto_threshold", 0.30))
     scored["gated_score"] = apply_large_loss_gate(
         scored["gated_score"],
         scored["large_loss_probability"],
@@ -203,8 +203,8 @@ def run_backtest(
             "scanner_top_n": ((config.get("ml_scanner") or {}).get("top_n")),
             "min_dte": int(config.get("ml_scanner", {}).get("min_dte", 7) or 7),
             "max_dte": int(config.get("ml_scanner", {}).get("max_dte", config.get("expiry_days_max", 45) or 45)),
-            "large_loss_veto_threshold": float(config.get("ml_scanner", {}).get("large_loss_veto_threshold", 0.70)),
-            "stop_loss_veto_threshold": float(config.get("ml_scanner", {}).get("stop_loss_veto_threshold", 0.70)),
+            "large_loss_veto_threshold": float(config.get("ml_scanner", {}).get("large_loss_veto_threshold", 0.60)),
+            "stop_loss_veto_threshold": float(config.get("ml_scanner", {}).get("stop_loss_veto_threshold", 0.30)),
             "max_capital_per_period": float(config.get("max_capital_per_period", 50_000.0)),
             "regime_allocator_enabled": bool(((config.get("pick_selection") or {}).get("regime_allocation") or {}).get("enabled", False)),
             "allocator_regime_source": "dataset_proxy_v1",

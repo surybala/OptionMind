@@ -34,10 +34,10 @@
     "_spread_widths_note": "Dollar widths evaluated for each PCS/CCS short leg. Multiple widths let the model score and rank different risk/reward profiles per expiry; the highest-scored width wins selection.",
     "large_loss_classifier_path": "artifacts/models/large_loss_classifier_v007b_dte21.json",
     "_large_loss_classifier_note": "V007b LLC: retrained on 500K DTE≤21 balanced dataset. AUC 0.839, recall 99.7%, 47 FN. Defensive 0.70 threshold prioritizes avoiding large realized losses over preserving every capital-efficient short-DTE pick.",
-    "large_loss_veto_threshold": 0.70,
+    "large_loss_veto_threshold": 0.60,
     "stop_loss_classifier_path": "artifacts/models/stop_loss_classifier_v007b_dte21.json",
-    "_stop_loss_classifier_note": "V007b SLC: retrained on 500K DTE≤21 balanced dataset. AUC 0.797, recall 99.5%. Ultra-defensive 0.15 threshold matches the artifact's high-recall operating point and prioritizes avoiding intraday stop-loss exits over candidate volume or per-trade RoR maximisation.",
-    "stop_loss_veto_threshold": 0.15
+    "_stop_loss_classifier_note": "V007b SLC: retrained on 500K DTE≤21 balanced dataset. AUC 0.797, recall 99.5%. Eased from 0.15 to 0.30 — ultra-defensive 0.15 was over-vetoing; 0.30 still catches high-risk stop-loss candidates while improving candidate volume.",
+    "stop_loss_veto_threshold": 0.30
   },
 
   "_pick_selection_note": "model_ranked = pure top-N by model score, with no per-strategy floors or regime-driven PCS/CCS overrides (right choice for ML scanner). equal_diversity = guaranteed floor per strategy (legacy default).",

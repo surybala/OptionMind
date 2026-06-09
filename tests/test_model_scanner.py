@@ -529,7 +529,7 @@ def test_large_loss_classifier_veto_removes_picks(tmp_path):
                 "max_dte": 45,
                 "vix_symbol": "I:VIX",
                 "large_loss_classifier_path": str(clf_path),
-                "large_loss_veto_threshold": 0.70,
+                "large_loss_veto_threshold": 0.60,
             },
             "strategies": {
                 "put_credit_spread": {"enabled": True, "strike_width": 5, "min_net_credit": 0.10},
@@ -590,7 +590,7 @@ def test_stop_loss_classifier_veto_removes_picks(tmp_path):
                 "max_dte": 45,
                 "vix_symbol": "I:VIX",
                 "stop_loss_classifier_path": str(clf_path),
-                "stop_loss_veto_threshold": 0.70,
+                "stop_loss_veto_threshold": 0.30,
             },
             "strategies": {
                 "put_credit_spread": {"enabled": True, "strike_width": 5, "min_net_credit": 0.10},

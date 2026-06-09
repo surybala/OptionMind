@@ -167,11 +167,11 @@ class LivePaperInferenceProvider:
         self.default_model_binding: _LoadedModelBinding | None = None
         self.large_loss_model: _ChampionModel | None = None
         self.large_loss_veto_threshold: float = float(
-            self.scanner_config.get("large_loss_veto_threshold", 0.70)
+            self.scanner_config.get("large_loss_veto_threshold", 0.60)
         )
         self.stop_loss_model: _ChampionModel | None = None
         self.stop_loss_veto_threshold: float = float(
-            self.scanner_config.get("stop_loss_veto_threshold", 0.70)
+            self.scanner_config.get("stop_loss_veto_threshold", 0.30)
         )
         self._runtime_regime_label: str | None = None
         self._last_scan_stats: dict[str, int] = {}

@@ -21,9 +21,9 @@ def test_run_backtest_applies_stop_loss_veto_after_large_loss_gate(tmp_path, mon
                     "min_dte": 7,
                     "max_dte": 21,
                     "large_loss_classifier_path": str(large_loss_artifact),
-                    "large_loss_veto_threshold": 0.90,
+                    "large_loss_veto_threshold": 0.60,
                     "stop_loss_classifier_path": str(stop_loss_artifact),
-                    "stop_loss_veto_threshold": 0.70,
+                    "stop_loss_veto_threshold": 0.30,
                     "top_n": 10,
                 },
                 "pick_selection": {"mode": "model_ranked"},
@@ -103,7 +103,7 @@ def test_run_backtest_applies_stop_loss_veto_after_large_loss_gate(tmp_path, mon
     )
 
     assert report["stop_loss_artifact"] == str(stop_loss_artifact)
-    assert report["runtime"]["stop_loss_veto_threshold"] == 0.70
+    assert report["runtime"]["stop_loss_veto_threshold"] == 0.30
     assert report["runtime"]["min_dte"] == 7
     assert report["runtime"]["max_dte"] == 21
     assert report["runtime"]["max_capital_per_period"] == 50000.0
