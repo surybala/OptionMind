@@ -347,9 +347,99 @@ def test_risk_monitor_reports_portfolio_gamma_summary(dashboard_client, monkeypa
     assert payload["thresholds"]["min_symbol_stress_dollars"] == pytest.approx(250.0)
     assert payload["regime"]["label"] == "GREEN"
     assert payload["regime"]["metrics"]["enabled"] is False
+    assert payload["risk_level_counts"]["SAFE"] == 1
+    assert payload["status_counts"]["WATCH"] == 1
+    assert payload["at_risk_count"] == 0
+    assert payload["exit_trigger_count"] == 0
     assert portfolio["daily_theta"] == pytest.approx(8.0)
     assert payload["positions"][0]["net_delta"] == pytest.approx(0.04)
     assert payload["positions"][0]["net_vega"] == pytest.approx(-3.0)
+
+
+def test_risk_monitor_counts_risk_levels_separately_from_exit_signals(dashboard_client, monkeypatch):
+    client, db_path = dashboard_client
+    expiry = (date.today() + timedelta(days=7)).isoformat()
+    _insert_trade(
+        db_path,
+        symbol="SPY",
+        status="EXECUTED",
+        expiry=expiry,
+        type="PCS",
+        strike=480.0,
+        premium=1.00,
+        legs='{"short_strike": 480.0, "long_strike": 475.0}',
+    )
+    _insert_trade(
+        db_path,
+        symbol="QQQ",
+        status="EXECUTED",
+        expiry=expiry,
+        type="PCS",
+        strike=420.0,
+        premium=1.00,
+        legs='{"short_strike": 420.0, "long_strike": 415.0}',
+    )
+
+    class FakeRiskService:
+        _data = None
+
+        @staticmethod
+        def _get_position_leg_specs(pos):
+            return []
+
+        @staticmethod
+        def _build_osi_symbol(*args):
+            return ""
+
+        def enrich_position(self, pos, prefetch=None):
+            if pos["symbol"] == "SPY":
+                return {
+                    **pos,
+                    "spot": 500.0,
+                    "current_mark": 2.10,
+                    "pnl_per_share": -1.10,
+                    "profit_captured_pct": -110.0,
+                    "gamma_theta_ratio": 0.4,
+                    "net_short_delta": 0.05,
+                    "risk_score": 0.4,
+                    "net_delta": 0.01,
+                    "net_gamma": -0.0001,
+                    "net_theta": 0.02,
+                    "net_vega": -1.0,
+                    "dte": 7,
+                    "has_broker_greeks": True,
+                    "risk_level": "CRITICAL",
+                }
+            return {
+                **pos,
+                "spot": 430.0,
+                "current_mark": 0.90,
+                "pnl_per_share": 0.10,
+                "profit_captured_pct": 10.0,
+                "gamma_theta_ratio": 1.25,
+                "net_short_delta": 0.12,
+                "risk_score": 1.25,
+                "net_delta": 0.02,
+                "net_gamma": -0.0002,
+                "net_theta": 0.03,
+                "net_vega": -1.5,
+                "dte": 7,
+                "has_broker_greeks": True,
+                "risk_level": "CAUTION",
+            }
+
+    monkeypatch.setattr(dashboard, "_get_risk_service", lambda: FakeRiskService())
+
+    res = client.get("/api/risk-monitor")
+
+    assert res.status_code == 200
+    payload = res.get_json()
+    assert payload["risk_level_counts"]["CRITICAL"] == 1
+    assert payload["risk_level_counts"]["CAUTION"] == 1
+    assert payload["status_counts"]["STOP_LOSS"] == 1
+    assert payload["status_counts"]["WARNING"] == 1
+    assert payload["at_risk_count"] == 1
+    assert payload["exit_trigger_count"] == 1
 
 
 def test_risk_monitor_surfaces_regime_filter_state(dashboard_client, monkeypatch):

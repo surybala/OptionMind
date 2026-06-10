@@ -493,6 +493,8 @@ td { padding: 10px 12px; vertical-align: middle; white-space: nowrap; }
 }
 .risk-SAFE      { background: rgba(63,185,80,0.18);   color: var(--green);      }
 .risk-WATCH     { background: rgba(88,166,255,0.18);  color: var(--accent);     }
+.risk-CAUTION   { background: rgba(210,153,34,0.18);  color: var(--yellow);     }
+.risk-CRITICAL  { background: rgba(248,81,73,0.22);   color: var(--red);        }
 .risk-WARNING   { background: rgba(210,153,34,0.18);  color: var(--yellow);     }
 .risk-TRIGGER   { background: rgba(255,166,87,0.22);  color: var(--orange);     }
 .risk-STOP_LOSS { background: rgba(248,81,73,0.22);   color: var(--red);        }
@@ -933,24 +935,29 @@ td { padding: 10px 12px; vertical-align: middle; white-space: nowrap; }
         <div class="stat-sub">open &amp; not expired</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">At Risk</div>
+        <div class="stat-label">Critical</div>
         <div class="stat-value" id="rs-atrisk">—</div>
-        <div class="stat-sub">trigger or stop-loss</div>
+        <div class="stat-sub">shared risk level</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">Warning Zone</div>
+        <div class="stat-label">Caution</div>
         <div class="stat-value" id="rs-warning">—</div>
-        <div class="stat-sub">approaching thresholds</div>
+        <div class="stat-sub">elevated risk</div>
       </div>
       <div class="stat-card">
         <div class="stat-label">Watching</div>
         <div class="stat-value acc" id="rs-watch">—</div>
-        <div class="stat-sub">minor drift, monitor</div>
+        <div class="stat-sub">incomplete or drifting</div>
       </div>
       <div class="stat-card">
         <div class="stat-label">Safe</div>
         <div class="stat-value pos" id="rs-safe">—</div>
         <div class="stat-sub">within normal bounds</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Exit Signals</div>
+        <div class="stat-value" id="rs-exits">—</div>
+        <div class="stat-sub">trigger or stop-loss</div>
       </div>
       <div class="stat-card">
         <div class="stat-label">Avg γ/θ Ratio</div>
@@ -1064,12 +1071,13 @@ td { padding: 10px 12px; vertical-align: middle; white-space: nowrap; }
               <th title="% of entry premium already earned. Higher = safer to close early.">Profit %</th>
               <th title="How far the current mark is from the stop-loss trigger, as % of premium. Negative = already past stop-loss.">SL Distance</th>
               <th title="Total unrealized P&amp;L across all contracts">P&amp;L</th>
-              <th title="Exit trigger evaluation">Status</th>
+              <th title="Shared risk classification from PositionRiskService">Risk Level</th>
+              <th title="Exit trigger evaluation">Exit Signal</th>
               <th>Action</th>
             </tr>
           </thead>
           <tbody id="riskTbody">
-            <tr><td colspan="14" class="loading">Click "Refresh risk data" to compute live Greeks.</td></tr>
+            <tr><td colspan="15" class="loading">Click "Refresh risk data" to compute live Greeks.</td></tr>
           </tbody>
         </table>
       </div>
@@ -1079,11 +1087,12 @@ td { padding: 10px 12px; vertical-align: middle; white-space: nowrap; }
     <div style="margin-top:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 18px;">
       <div class="chart-title" style="margin-bottom:10px">Status Legend &amp; Trigger Logic</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;font-size:0.8rem;color:var(--text-muted)">
-        <div><span class="risk-badge risk-SAFE">SAFE</span> &nbsp; γ/θ &lt; 60% of threshold, Δ &lt; 40% of min-delta</div>
-        <div><span class="risk-badge risk-WATCH">WATCH</span> &nbsp; Drifting toward thresholds — monitor closely</div>
-        <div><span class="risk-badge risk-WARNING">WARNING</span> &nbsp; Within 70% of one or both thresholds</div>
-        <div><span class="risk-badge risk-TRIGGER">TRIGGER</span> &nbsp; Gamma risk trigger would fire — exit recommended</div>
-        <div><span class="risk-badge risk-STOP_LOSS">STOP LOSS</span> &nbsp; Stop-loss threshold exceeded — close immediately</div>
+        <div><span class="risk-badge risk-SAFE">SAFE</span> &nbsp; Risk service sees normal stop, profit, and gamma/theta conditions</div>
+        <div><span class="risk-badge risk-WATCH">WATCH</span> &nbsp; Incomplete data or early drift that deserves monitoring</div>
+        <div><span class="risk-badge risk-CAUTION">CAUTION</span> &nbsp; Elevated risk on stop proximity, profit capture, or gamma/theta</div>
+        <div><span class="risk-badge risk-CRITICAL">CRITICAL</span> &nbsp; Highest shared risk classification before action logic</div>
+        <div><span class="risk-badge risk-TRIGGER">TRIGGER</span> &nbsp; Exit signal: gamma risk trigger would fire</div>
+        <div><span class="risk-badge risk-STOP_LOSS">STOP LOSS</span> &nbsp; Exit signal: stop-loss threshold exceeded</div>
       </div>
       <div style="margin-top:10px;font-size:0.78rem;color:var(--text-muted);line-height:1.6">
         <strong style="color:var(--text)">Gamma risk trigger</strong> fires when:
@@ -1163,6 +1172,11 @@ function colorClass(v) {
   return n > 0 ? 'pos' : 'neg';
 }
 
+function statValueClass(cls) {
+  if (!cls) return 'stat-value';
+  return String(cls).includes('stat-value') ? cls : 'stat-value ' + cls;
+}
+
 function statusBadge(s) {
   const key = (s || '').toLowerCase().replace(/_/g, '_');
   return `<span class="badge badge-${key}">${s || '—'}</span>`;
@@ -1181,7 +1195,7 @@ function setText(id, text, cls) {
   const el = $(id);
   if (!el) return;
   el.textContent = text;
-  if (cls) { el.className = 'stat-value ' + cls; }
+  if (cls) { el.className = statValueClass(cls); }
 }
 
 // ── API calls ──────────────────────────────────────────────────────────────────
@@ -1231,8 +1245,8 @@ async function loadStats() {
     setText('s-winrate',  fmtPct(s.win_rate),  colorClass(s.win_rate));
     setText('s-avgprem',  fmt(s.avg_premium, '$'), 'acc');
     setText('s-totprem',  fmt(s.total_premium, '$'), 'acc');
-    setText('s-best',     fmtMoney(s.best_trade), 'pos');
-    setText('s-worst',    fmtMoney(s.worst_trade), 'neg');
+    setText('s-best',     fmtMoney(s.best_trade), colorClass(s.best_trade));
+    setText('s-worst',    fmtMoney(s.worst_trade), colorClass(s.worst_trade));
     const avg = parseFloat(s.avg_pnl) || 0;
     setText('s-avgpnl',   fmtMoney(avg), colorClass(avg));
 
@@ -2169,6 +2183,33 @@ function riskScoreColor(v) {
   return 'var(--red)';
 }
 
+function riskBadge(level) {
+  const normalized = String(level || 'UNKNOWN').toUpperCase();
+  const labels = {
+    SAFE: 'Safe',
+    WATCH: 'Watch',
+    CAUTION: 'Caution',
+    CRITICAL: 'Critical',
+    WARNING: 'Warning',
+    TRIGGER: 'Trigger',
+    STOP_LOSS: 'Stop Loss',
+    UNKNOWN: 'Unknown',
+  };
+  return `<span class="risk-badge risk-${normalized}">${labels[normalized] || normalized}</span>`;
+}
+
+function lossClass(loss, limit) {
+  const n = parseFloat(loss || 0);
+  const cap = parseFloat(limit || 0);
+  if (n <= 0) return 'neu';
+  return cap > 0 && n > cap ? 'neg' : 'neu';
+}
+
+function fmtLoss(v) {
+  const n = parseFloat(v || 0);
+  return fmtDollars(Math.max(0, n));
+}
+
 /** Render the config threshold pills strip. */
 function renderRiskConfigPills(thresholds) {
   if (!thresholds) return;
@@ -2223,13 +2264,13 @@ function renderPortfolioRisk(summary) {
   const ratio = summary.gamma_loss_to_daily_theta;
   const ratioLimit = parseFloat(limits.gamma_loss_to_theta || 0);
 
-  setText('prs-worst', fmtDollars(-worst), worstLimit && worst > worstLimit ? 'neg' : 'pos');
-  setText('prs-onepct', fmtDollars(-summary.one_pct_stress_loss), 'neu');
+  setText('prs-worst', fmtLoss(worst), lossClass(worst, worstLimit));
+  setText('prs-onepct', fmtLoss(summary.one_pct_stress_loss), 'neu');
   setText('prs-theta', fmtMoney(summary.daily_theta), parseFloat(summary.daily_theta || 0) >= 0 ? 'pos' : 'neg');
   setText('prs-ratio', fmtRatio(ratio), (ratio === Infinity || parseFloat(ratio || 0) > ratioLimit) ? 'neg' : 'pos');
-  setText('prs-near', fmtDollars(-near), nearLimit && near > nearLimit ? 'neg' : 'pos');
-  setText('prs-bucket', fmtDollars(-bucket), bucketLimit && bucket > bucketLimit ? 'neg' : 'pos');
-  setText('prs-symbol', fmtDollars(-symbol), symbolLimit && symbol > symbolLimit ? 'neg' : 'pos');
+  setText('prs-near', fmtLoss(near), lossClass(near, nearLimit));
+  setText('prs-bucket', fmtLoss(bucket), lossClass(bucket, bucketLimit));
+  setText('prs-symbol', fmtLoss(symbol), lossClass(symbol, symbolLimit));
 
   const wl = $('prs-worst-limit');
   if (wl) wl.textContent = worstLimit ? `limit ${fmtDollars(worstLimit)}` : 'shock + IV expansion';
@@ -2246,7 +2287,7 @@ function renderPortfolioRisk(summary) {
   const scenarioRows = $('portfolioScenarioRows');
   if (scenarioRows) {
     scenarioRows.innerHTML = scenarios.length
-      ? scenarios.map(([move, loss]) => `<tr><td>${move}</td><td class="${parseFloat(loss) > 0 ? 'neg' : 'neu'}">${fmtDollars(-loss)}</td></tr>`).join('')
+      ? scenarios.map(([move, loss]) => `<tr><td>${move}</td><td class="${lossClass(loss, worstLimit)}">${fmtLoss(loss)}</td></tr>`).join('')
       : '<tr><td colspan="2" class="loading">No stress scenarios available.</td></tr>';
   }
 
@@ -2255,7 +2296,7 @@ function renderPortfolioRisk(summary) {
   if (bucketRows) {
     bucketRows.innerHTML = buckets.length
       ? buckets.sort((a, b) => a[0].localeCompare(b[0]))
-          .map(([expiry, loss]) => `<tr><td>${expiry}</td><td class="${parseFloat(loss) > bucketLimit ? 'neg' : 'neu'}">${fmtDollars(-loss)}</td></tr>`).join('')
+          .map(([expiry, loss]) => `<tr><td>${expiry}</td><td class="${lossClass(loss, bucketLimit)}">${fmtLoss(loss)}</td></tr>`).join('')
       : '<tr><td colspan="2" class="loading">No expiry bucket risk available.</td></tr>';
   }
 
@@ -2264,7 +2305,7 @@ function renderPortfolioRisk(summary) {
   if (symbolRows) {
     symbolRows.innerHTML = symbols.length
       ? symbols.sort((a, b) => parseFloat(b[1]) - parseFloat(a[1]))
-          .map(([sym, loss]) => `<tr><td>${sym}</td><td class="${parseFloat(loss) > symbolLimit ? 'neg' : 'neu'}">${fmtDollars(-loss)}</td></tr>`).join('')
+          .map(([sym, loss]) => `<tr><td>${sym}</td><td class="${lossClass(loss, symbolLimit)}">${fmtLoss(loss)}</td></tr>`).join('')
       : '<tr><td colspan="2" class="loading">No symbol bucket risk available.</td></tr>';
   }
 }
@@ -2272,7 +2313,7 @@ function renderPortfolioRisk(summary) {
 function renderRiskTable(positions) {
   const tbody = $('riskTbody');
   if (!positions || positions.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="14"><div class="empty-state"><p>No open positions found.</p></div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="15"><div class="empty-state"><p>No open positions found.</p></div></td></tr>';
     return;
   }
 
@@ -2334,11 +2375,8 @@ function renderRiskTable(positions) {
       ? `<span class="${colorClass(upnl)}">${fmtMoney(upnl)}</span>`
       : '—';
 
-    const statusBadgeHtml = `<span class="risk-badge risk-${p.trigger_status || 'UNKNOWN'}">${
-      p.trigger_status === 'STOP_LOSS' ? 'Stop Loss'
-      : p.trigger_status === 'TRIGGER' ? 'Trigger'
-      : (p.trigger_status || 'Unknown')
-    }</span>`;
+    const riskLevelBadgeHtml = riskBadge(p.risk_level);
+    const triggerStatusBadgeHtml = riskBadge(p.trigger_status);
 
     // ── error row (chain unavailable) ─────────────────────────────────────
     if (p.error) {
@@ -2347,8 +2385,9 @@ function renderRiskTable(positions) {
         <td><strong>${p.symbol || '—'}</strong></td>
         <td>${stratBadge(p.type)}</td>
         <td>${dteStr}</td>
-        <td colspan="9" style="color:var(--text-muted);font-size:0.78rem;font-style:italic">${p.error}</td>
-        <td>${statusBadgeHtml}</td>
+        <td colspan="8" style="color:var(--text-muted);font-size:0.78rem;font-style:italic">${p.error}</td>
+        <td>${riskLevelBadgeHtml}</td>
+        <td>${triggerStatusBadgeHtml}</td>
         <td></td>
       </tr>`;
     }
@@ -2366,7 +2405,8 @@ function renderRiskTable(positions) {
       <td>${profCapStr}</td>
       <td>${slDistStr}</td>
       <td>${upnlStr}</td>
-      <td>${statusBadgeHtml}</td>
+      <td>${riskLevelBadgeHtml}</td>
+      <td>${triggerStatusBadgeHtml}</td>
       <td onclick="event.stopPropagation()">
         <button class="btn"
                 style="padding:3px 10px;font-size:0.75rem;background:transparent;border:1px solid var(--red);color:var(--red);border-radius:var(--radius);cursor:pointer"
@@ -2383,22 +2423,24 @@ async function loadRisk() {
   const msg = $('riskLoadMsg');
   if (btn) btn.disabled = true;
   if (msg) msg.textContent = 'Computing live Greeks from option chains… (may take a moment)';
-  $('riskTbody').innerHTML = '<tr><td colspan="14" class="loading">Fetching option chains and computing Black-Scholes Greeks…</td></tr>';
+  $('riskTbody').innerHTML = '<tr><td colspan="15" class="loading">Fetching option chains and computing Black-Scholes Greeks…</td></tr>';
 
   try {
     const data = await fetchJSON('/api/risk-monitor');
     const positions = data.positions || [];
+    const levels    = data.risk_level_counts || {};
     const sc        = data.status_counts || {};
 
     // ── Update summary cards ──────────────────────────────────────────────
     setText('rs-total',   data.count || 0, 'acc');
     const atRisk = (data.at_risk_count || 0);
     setText('rs-atrisk',  atRisk, atRisk > 0 ? 'neg' : 'neu');
-    const warnN = sc.WARNING || 0;
-    setText('rs-warning', warnN, warnN > 0 ? 'stat-value' : 'neu');
-    $('rs-warning').style.color = warnN > 0 ? 'var(--yellow)' : '';
-    setText('rs-watch',   sc.WATCH   || 0, 'acc');
-    setText('rs-safe',    sc.SAFE    || 0, 'pos');
+    const cautionN = levels.CAUTION || 0;
+    setText('rs-warning', cautionN, cautionN > 0 ? 'ratio-watch' : 'neu');
+    setText('rs-watch',   levels.WATCH || 0, (levels.WATCH || 0) > 0 ? 'acc' : 'neu');
+    setText('rs-safe',    levels.SAFE || 0, (levels.SAFE || 0) > 0 ? 'pos' : 'neu');
+    const exitN = data.exit_trigger_count ?? ((sc.TRIGGER || 0) + (sc.STOP_LOSS || 0));
+    setText('rs-exits', exitN, exitN > 0 ? 'neg' : 'neu');
 
     const avgR = parseFloat(data.avg_ratio) || 0;
     const avgREl = $('rs-avgratio');
@@ -2410,8 +2452,9 @@ async function loadRisk() {
     // ── Alert badge on tab ────────────────────────────────────────────────
     const alertBadge = $('riskAlertBadge');
     if (alertBadge) {
-      if (atRisk > 0) {
-        alertBadge.textContent = atRisk;
+      const alertCount = Math.max(atRisk, exitN);
+      if (alertCount > 0) {
+        alertBadge.textContent = alertCount;
         alertBadge.style.display = 'inline';
       } else {
         alertBadge.style.display = 'none';
@@ -2432,7 +2475,7 @@ async function loadRisk() {
     const now = new Date().toLocaleTimeString();
     if (msg) msg.textContent = `Greeks computed at ${now}`;
   } catch(e) {
-    $('riskTbody').innerHTML = `<tr><td colspan="14" class="loading">Error loading risk data: ${e.message}</td></tr>`;
+    $('riskTbody').innerHTML = `<tr><td colspan="15" class="loading">Error loading risk data: ${e.message}</td></tr>`;
     if (msg) msg.textContent = 'Failed to load — check Flask logs.';
   } finally {
     if (btn) btn.disabled = false;

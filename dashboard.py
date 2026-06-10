@@ -1001,17 +1001,26 @@ def api_risk_monitor():
         })
 
     # ── Aggregate summary ─────────────────────────────────────────────────────
+    risk_level_counts: dict[str, int] = {
+        'SAFE': 0, 'WATCH': 0, 'CAUTION': 0, 'CRITICAL': 0, 'UNKNOWN': 0,
+    }
     status_counts: dict[str, int] = {
         'SAFE': 0, 'WATCH': 0, 'WARNING': 0,
         'TRIGGER': 0, 'STOP_LOSS': 0, 'UNKNOWN': 0,
     }
     for r in result:
-        key = r.get('trigger_status', 'UNKNOWN')
+        level = str(r.get('risk_level') or 'UNKNOWN').upper()
+        if level not in risk_level_counts:
+            level = 'UNKNOWN'
+        risk_level_counts[level] += 1
+
+        key = str(r.get('trigger_status') or 'UNKNOWN').upper()
         status_counts[key] = status_counts.get(key, 0) + 1
 
     ratios    = [r['gamma_theta_ratio'] for r in result if r.get('greeks_available')]
     avg_ratio = round(sum(ratios) / len(ratios), 3) if ratios else 0.0
-    at_risk   = status_counts['TRIGGER'] + status_counts['STOP_LOSS']
+    at_risk   = risk_level_counts['CRITICAL']
+    exit_trigger_count = status_counts['TRIGGER'] + status_counts['STOP_LOSS']
     account_capital = cfg.get('account_capital') or cfg.get('max_capital_per_period')
     try:
         account_capital = float(account_capital or 0)
@@ -1025,8 +1034,10 @@ def api_risk_monitor():
     return jsonify({
         'positions':     result,
         'count':         len(result),
+        'risk_level_counts': risk_level_counts,
         'status_counts': status_counts,
         'at_risk_count': at_risk,
+        'exit_trigger_count': exit_trigger_count,
         'avg_ratio':     avg_ratio,
         'thresholds': {
             'stop_loss_multiplier':        stop_loss_mult,
