@@ -183,7 +183,7 @@
       "enabled": true,
       "artifact_path": "",
       "registry_path": "artifacts/risk_model_registry.json",
-      "threshold": 0.05,
+      "threshold": 0.08,
       "confirmations_required": 2,
       "min_age_minutes": 10,
       "min_dte": 0,

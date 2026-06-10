@@ -153,6 +153,13 @@ def parse_args() -> argparse.Namespace:
         help="Soft upper bound on false-close rate used when choosing the close threshold.",
     )
     parser.add_argument(
+        "--fixed-threshold",
+        type=float,
+        default=None,
+        help="Use a fixed probability threshold instead of auto-selecting via validation set. "
+        "All metrics (train, test, walk-forward) are evaluated at this threshold.",
+    )
+    parser.add_argument(
         "--include-features",
         default=None,
         help="Comma-separated feature columns to include. Defaults to all engineered features.",
@@ -187,6 +194,7 @@ def main() -> int:
         val_fraction=args.val_fraction,
         early_stopping_rounds=args.early_stopping_rounds,
         scale_pos_weight=args.scale_pos_weight,
+        fixed_threshold=args.fixed_threshold,
         min_threshold_recall=args.min_threshold_recall,
         max_threshold_close_rate=args.max_threshold_close_rate,
         max_threshold_false_close_rate=args.max_threshold_false_close_rate,
@@ -222,6 +230,7 @@ def train_intraday_risk_monitor(
     early_stopping_rounds: int = 20,
     num_boost_round: int = 300,
     scale_pos_weight: float | None = None,
+    fixed_threshold: float | None = None,
     min_threshold_recall: float = 0.75,
     max_threshold_close_rate: float | None = 0.15,
     max_threshold_false_close_rate: float | None = 0.12,
@@ -296,16 +305,19 @@ def train_intraday_risk_monitor(
     )
     best_rounds = getattr(booster, "best_iteration", num_boost_round - 1) + 1
 
-    threshold_frame = val_df if len(val_df) else train_sub_df
-    threshold_prob = _predict_prob(booster, _transform_frame(threshold_frame, feature_columns, fill_values))
-    recommended_threshold = _choose_close_threshold(
-        threshold_frame,
-        target_column=target_column,
-        y_prob=threshold_prob,
-        min_recall=min_threshold_recall,
-        max_close_rate=max_threshold_close_rate,
-        max_false_close_rate=max_threshold_false_close_rate,
-    )
+    if fixed_threshold is not None:
+        recommended_threshold = fixed_threshold
+    else:
+        threshold_frame = val_df if len(val_df) else train_sub_df
+        threshold_prob = _predict_prob(booster, _transform_frame(threshold_frame, feature_columns, fill_values))
+        recommended_threshold = _choose_close_threshold(
+            threshold_frame,
+            target_column=target_column,
+            y_prob=threshold_prob,
+            min_recall=min_threshold_recall,
+            max_close_rate=max_threshold_close_rate,
+            max_false_close_rate=max_threshold_false_close_rate,
+        )
 
     train_prob = _predict_prob(booster, x_train_frame)
     test_prob = _predict_prob(booster, x_test_frame) if len(x_test_frame) else np.array([])
@@ -328,6 +340,7 @@ def train_intraday_risk_monitor(
         embargo_days=embargo_days,
         val_fraction=val_fraction,
         early_stopping_rounds=early_stopping_rounds,
+        fixed_threshold=fixed_threshold,
         min_threshold_recall=min_threshold_recall,
         max_threshold_close_rate=max_threshold_close_rate,
         max_threshold_false_close_rate=max_threshold_false_close_rate,
@@ -682,6 +695,7 @@ def _walk_forward_grouped(
     embargo_days: int,
     val_fraction: float,
     early_stopping_rounds: int,
+    fixed_threshold: float | None = None,
     min_threshold_recall: float,
     max_threshold_close_rate: float | None,
     max_threshold_false_close_rate: float | None,
@@ -734,16 +748,19 @@ def _walk_forward_grouped(
             verbose_eval=False,
         )
 
-        threshold_df = val_df if len(val_df) else train_sub_df
-        threshold_prob = _predict_prob(booster, _transform_frame(threshold_df, feature_columns, fill_values))
-        threshold = _choose_close_threshold(
-            threshold_df,
-            target_column=target_column,
-            y_prob=threshold_prob,
-            min_recall=min_threshold_recall,
-            max_close_rate=max_threshold_close_rate,
-            max_false_close_rate=max_threshold_false_close_rate,
-        )
+        if fixed_threshold is not None:
+            threshold = fixed_threshold
+        else:
+            threshold_df = val_df if len(val_df) else train_sub_df
+            threshold_prob = _predict_prob(booster, _transform_frame(threshold_df, feature_columns, fill_values))
+            threshold = _choose_close_threshold(
+                threshold_df,
+                target_column=target_column,
+                y_prob=threshold_prob,
+                min_recall=min_threshold_recall,
+                max_close_rate=max_threshold_close_rate,
+                max_false_close_rate=max_threshold_false_close_rate,
+            )
         test_prob = _predict_prob(booster, _transform_frame(test_df, feature_columns, fill_values))
         fold_metrics = _clf_metrics(test_df[target_column].to_numpy(dtype=float), test_prob, threshold)
         fold_metrics.update(_policy_metrics(test_df, target_column=target_column, y_prob=test_prob, threshold=threshold))

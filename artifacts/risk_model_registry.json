@@ -1,6 +1,72 @@
 {
-  "champion_model_id": "intraday_risk_monitor_stop30m_fullraw_v003",
+  "champion_model_id": "intraday_risk_monitor_stop30m_v004",
   "models": [
+    {
+      "artifact_manifest": {
+        "artifact_created_at": "2026-06-10T19:57:19.540644+00:00",
+        "artifact_path": "artifacts/models/intraday_risk_monitor_stop30m_v004.json",
+        "artifact_sha256": "a8d27ec662f5a9db92526914c3f54dfc8a75672298e19c5c2aac0f9254a7ca99",
+        "model_path": "artifacts/models/intraday_risk_monitor_stop30m_v004.xgboost.json",
+        "model_sha256": "0cd78b7b1dc08ebc3ea570fb2e61b43b83e3917215a814a56f15681768414338",
+        "model_type": "xgboost_intraday_risk_monitor_v001",
+        "target_column": "stop_loss_hit_30m"
+      },
+      "data_range": {
+        "end": "2025-05-14T15:42:00+00:00",
+        "start": "2022-09-01T13:30:00+00:00"
+      },
+      "feature_version": "intraday_risk_live_monitor_features_v001",
+      "label_version": "intraday_risk_stop_loss_hit_30m_v001",
+      "metadata": {
+        "optuna_hp_study": "irm_hp_t008_v004",
+        "optuna_feat_study": "irm_feat_t008_v004",
+        "operating_threshold": 0.08,
+        "feature_groups_included": ["underlying_path", "underlying_volatility", "leg_marks", "leg_activity", "market_regime"],
+        "features_count": 45
+      },
+      "metrics": {
+        "test_auc": 0.930315,
+        "test_close_rate": 0.063957,
+        "test_f1": 0.063913,
+        "test_f2": 0.140329,
+        "test_false_close_rate": 0.061815,
+        "test_fn": 227,
+        "test_fp": 14683,
+        "test_mean_false_positive_minutes_to_exit": 3403.277464,
+        "test_mean_flagged_minutes_to_exit": 3289.757438,
+        "test_mean_flagged_pnl_per_contract": -55.920879,
+        "test_mean_missed_risk_pnl_per_contract": -42.920705,
+        "test_mean_true_positive_minutes_to_exit": 15.072692,
+        "test_positive_rate": 0.003099,
+        "test_precision": 0.033504,
+        "test_profit_take_false_close_rate": 0.000303,
+        "test_recall": 0.691576,
+        "test_rows": 237533,
+        "test_threshold": 0.08,
+        "test_tn": 222114,
+        "test_tp": 509,
+        "train_auc": 0.976892,
+        "walk_forward_auc_mean": 0.94818,
+        "walk_forward_auc_min": 0.925335,
+        "walk_forward_close_rate_mean": 0.053864,
+        "walk_forward_f2_mean": 0.143971,
+        "walk_forward_f2_min": 0.138434,
+        "walk_forward_false_close_rate_mean": 0.052019,
+        "walk_forward_folds": 4,
+        "walk_forward_mean_true_positive_minutes_to_exit_mean": 14.788743,
+        "walk_forward_precision_mean": 0.034556,
+        "walk_forward_profit_take_false_close_rate_mean": 0.000172,
+        "walk_forward_recall_mean": 0.708939,
+        "walk_forward_recall_min": 0.628931,
+        "walk_forward_test_groups": 4779,
+        "walk_forward_test_rows": 849215
+      },
+      "model_id": "intraday_risk_monitor_stop30m_v004",
+      "notes": "Optuna-optimized at threshold 0.08. Dominates V003 at all thresholds (+3-6pp recall). 45 features (all groups). Operating threshold raised from 0.05 to 0.08.",
+      "promoted_at": "2026-06-10T19:57:19.540644+00:00",
+      "promotion_status": "champion",
+      "registered_at": "2026-06-10T19:57:19.540644+00:00"
+    },
     {
       "artifact_manifest": {
         "artifact_created_at": "2026-06-04T09:05:05.208593+00:00",
@@ -77,9 +143,9 @@
         "walk_forward_test_rows": 3201023
       },
       "model_id": "intraday_risk_monitor_stop30m_fullraw_v003",
-      "notes": "Champion risk-exit model: V003 active for live proactive exits; V002 retained as rollback.",
+      "notes": "Previous champion (threshold 0.05). Replaced by V004 which dominates at all thresholds.",
       "promoted_at": "2026-06-04T15:35:54.840508+00:00",
-      "promotion_status": "champion",
+      "promotion_status": "rollback",
       "registered_at": "2026-06-04T15:35:44.378354+00:00"
     },
     {
@@ -160,10 +226,10 @@
       "model_id": "intraday_risk_monitor_stop30m_fullraw_v002",
       "notes": null,
       "promoted_at": null,
-      "promotion_status": "rollback",
+      "promotion_status": "retired",
       "registered_at": "2026-06-04T15:35:50.832619+00:00"
     }
   ],
-  "rollback_model_id": "intraday_risk_monitor_stop30m_fullraw_v002",
+  "rollback_model_id": "intraday_risk_monitor_stop30m_fullraw_v003",
   "schema_version": "model_registry_v001"
 }
