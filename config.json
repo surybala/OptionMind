@@ -50,7 +50,7 @@
   "max_picks_per_ticker": 1,
 
   "max_capital_per_period": 50000,
-  "max_contracts_per_pick": 50,
+  "max_contracts_per_pick": 4,
 
   "_universe_note": "etf = curated stable ETF preset for live options selling (default). etf-all = all ETFs on NASDAQ/NYSE/NYSE Arca. Other options: index (S&P500+NDX100+Dow30) | default (NASDAQ/NYSE stocks by market cap) | full (alias for default).",
   "universe": "etf",
