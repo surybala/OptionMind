@@ -779,9 +779,9 @@
         "walk_forward_recall_mean": 1.0000
       },
       "model_id": "large_loss_classifier_v007b_dte21",
-      "notes": "Champion LLC: retrained on 500K DTE≤21 balanced dataset. AUC 0.839, recall 99.7%, FN 47, WF recall 100%. Veto threshold raised to 0.90 — threshold sweep showed ranker's signal dominates for DTE≤21; LLC at 0.70 was destroying value by over-vetoing capital-efficient short-DTE trades. At 0.90 the classifier catches the worst 4.3% (catastrophic-only filter).",
+      "notes": "Former champion LLC. Superseded by V008 (Optuna-optimized for threshold 0.60).",
       "promoted_at": "2026-06-04T21:00:00.000000+00:00",
-      "promotion_status": "champion",
+      "promotion_status": "retired",
       "registered_at": "2026-06-04T21:00:00.000000+00:00"
     },
     {
@@ -816,10 +816,92 @@
         "walk_forward_recall_mean": 0.9979
       },
       "model_id": "stop_loss_classifier_v007b_dte21",
-      "notes": "Champion SLC: retrained on 500K DTE≤21 balanced dataset. AUC 0.797, recall 99.5%, FN 187, WF AUC 0.816. Aggressive 0.70 veto threshold for insurance-model operation — vetoes 20% of candidates, reduces stop-loss rate 18.4%→16.8%, WR 69.0%→70.0%. Higher base positive rate (29.3% vs 20% at all-DTE) confirms short-DTE trades have inherently higher stop-loss risk, making aggressive filtering appropriate.",
+      "notes": "Former champion SLC. Superseded by V008 (Optuna-optimized for threshold 0.30).",
       "promoted_at": "2026-06-04T21:00:00.000000+00:00",
-      "promotion_status": "champion",
+      "promotion_status": "retired",
       "registered_at": "2026-06-04T21:00:00.000000+00:00"
+    },
+    {
+      "artifact_manifest": {
+        "artifact_created_at": "2026-06-10T16:15:27.532690+00:00",
+        "artifact_path": "artifacts/models/large_loss_classifier_v008.json",
+        "artifact_sha256": "701f1621378b5333bcb114719eafbd28a96863c314e7db20a579cc207a5f19ff",
+        "model_path": "artifacts/models/large_loss_classifier_v008.xgboost.json",
+        "model_sha256": "7122a2f398ecea1e5be95a7639bc814c76b0daebed05ed7246a947c4f3dc6db0",
+        "model_type": "xgboost_binary_large_loss_v001",
+        "target_column": "large_loss_label"
+      },
+      "data_range": {
+        "end": "2026-04-25T23:59:59.999999+00:00",
+        "start": "2022-05-26T00:00:00+00:00"
+      },
+      "feature_version": "features_v005",
+      "label_version": "credit_spread_labels_v002",
+      "metadata": {
+        "dataset": "candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k_dte21",
+        "max_dte": 21,
+        "n_features": 34,
+        "veto_threshold": 0.60,
+        "optuna_hp_study": "llc_hp_v008",
+        "optuna_feat_study": "llc_feat_v008",
+        "excluded_groups": ["market_regime", "option_entry", "option_activity", "greeks", "iv_surface", "event_risk", "credit_efficiency", "quant_structural"],
+        "included_groups": ["underlying_price", "underlying_vol", "vol_momentum", "vix_features"]
+      },
+      "metrics": {
+        "test_auc": 0.843878,
+        "test_recall": 0.910883,
+        "test_precision": 0.38261,
+        "test_fn": 1564,
+        "test_positive_rate": 0.175,
+        "walk_forward_auc_mean": 0.852065,
+        "walk_forward_recall_mean": 0.922282
+      },
+      "model_id": "large_loss_classifier_v008",
+      "notes": "Champion LLC: 2-pass Optuna (75 HP + 48 feature trials) on DTE≤21 dataset, optimized for threshold 0.60. WF AUC 0.852 (+0.008 vs V007b), recall 91.1%@0.60, 34 features. Heavy SPW (23.4), deep trees (6), strong L1 (4.79). Drops 8 groups — keeps only underlying_price/vol, vol_momentum, vix_features. Backtest: LL rate 0.0-0.6%, PF 1.4-2.6 (2023-2025).",
+      "promoted_at": "2026-06-10T16:30:00.000000+00:00",
+      "promotion_status": "champion",
+      "registered_at": "2026-06-10T16:30:00.000000+00:00"
+    },
+    {
+      "artifact_manifest": {
+        "artifact_created_at": "2026-06-10T16:15:30.990050+00:00",
+        "artifact_path": "artifacts/models/stop_loss_classifier_v008.json",
+        "artifact_sha256": "07af21fe431fa1f4cf4a8d9b72e73fc2a1bbe8cc2af3862d18b69ad48a081ae5",
+        "model_path": "artifacts/models/stop_loss_classifier_v008.xgboost.json",
+        "model_sha256": "787c6782c98842fc7d330dba1745619841569c2f23cfcf8fce8f6f1adc757b4b",
+        "model_type": "xgboost_binary_risk_v001",
+        "target_column": "stop_loss_hit"
+      },
+      "data_range": {
+        "end": "2026-04-25T23:59:59.999999+00:00",
+        "start": "2022-05-26T00:00:00+00:00"
+      },
+      "feature_version": "features_v005",
+      "label_version": "credit_spread_labels_v002",
+      "metadata": {
+        "dataset": "candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k_dte21",
+        "max_dte": 21,
+        "n_features": 41,
+        "veto_threshold": 0.30,
+        "optuna_hp_study": "slc_hp_v008",
+        "optuna_feat_study": "slc_feat_v008",
+        "excluded_groups": ["underlying_vol", "vol_momentum", "market_regime", "option_activity", "event_risk", "quant_structural"],
+        "included_groups": ["underlying_price", "option_entry", "greeks", "iv_surface", "vix_features", "credit_efficiency"]
+      },
+      "metrics": {
+        "test_auc": 0.800183,
+        "test_recall": 0.995387,
+        "test_precision": 0.365765,
+        "test_fn": 169,
+        "test_positive_rate": 0.293,
+        "walk_forward_auc_mean": 0.822999,
+        "walk_forward_recall_mean": 0.997803
+      },
+      "model_id": "stop_loss_classifier_v008",
+      "notes": "Champion SLC: 2-pass Optuna (75 HP + 48 feature trials) on DTE≤21 dataset, optimized for threshold 0.30. WF AUC 0.823 (+0.007 vs V007b), recall 99.5%@0.30, 41 features. Strong L2 (73.0), moderate L1 (2.18), SPW 11.2. Drops 6 groups — keeps underlying_price, option_entry, greeks, iv_surface, vix_features, credit_efficiency. Backtest: SL rate 0.7-1.7%, PF 1.4-2.6 (2023-2025).",
+      "promoted_at": "2026-06-10T16:30:00.000000+00:00",
+      "promotion_status": "champion",
+      "registered_at": "2026-06-10T16:30:00.000000+00:00"
     }
   ],
   "rollback_model_id": "xgboost_v006c_500r_dp28",

@@ -38,6 +38,10 @@ artifacts/models/*
 !artifacts/models/intraday_risk_monitor_stop30m_fullraw_v002.xgboost.json
 !artifacts/models/intraday_risk_monitor_stop30m_fullraw_v003.json
 !artifacts/models/intraday_risk_monitor_stop30m_fullraw_v003.xgboost.json
+!artifacts/models/large_loss_classifier_v008.json
+!artifacts/models/large_loss_classifier_v008.xgboost.json
+!artifacts/models/stop_loss_classifier_v008.json
+!artifacts/models/stop_loss_classifier_v008.xgboost.json
 
 # Runtime data (generated, not source)
 data/

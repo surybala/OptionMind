@@ -111,6 +111,13 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.15,
+        help="Probability threshold for classification metrics (recall, precision, F1). "
+             "Should match the veto threshold used at inference time.",
+    )
+    parser.add_argument(
         "--exclude-features",
         default="",
         help=(
@@ -156,6 +163,7 @@ def main() -> int:
         early_stopping_rounds=args.early_stopping_rounds,
         scale_pos_weight=args.scale_pos_weight,
         exclude_features=exclude_features,
+        threshold=args.threshold,
         params={
             "max_depth": args.max_depth,
             "eta": args.eta,
@@ -187,6 +195,7 @@ def train_large_loss_classifier(
     num_boost_round: int = 200,
     scale_pos_weight: float | None = None,
     exclude_features: set[str] | None = None,
+    threshold: float = 0.15,
     params: dict[str, Any] | None = None,
 ) -> LargeLossClassifierArtifact:
     """Train and evaluate a binary large-loss classifier.
@@ -262,9 +271,9 @@ def train_large_loss_classifier(
     train_prob = _predict_prob(booster, _transform_frame(clean.iloc[:split_index], feature_columns, fill_values))
     test_prob = _predict_prob(booster, x_test_frame) if len(x_test_frame) > 0 else np.array([])
 
-    metrics = _prefixed_clf_metrics("train", y_train, train_prob)
+    metrics = _prefixed_clf_metrics("train", y_train, train_prob, threshold)
     if len(test_prob):
-        metrics.update(_prefixed_clf_metrics("test", y_test, test_prob))
+        metrics.update(_prefixed_clf_metrics("test", y_test, test_prob, threshold))
 
     walk_forward = _walk_forward_clf(
         clean,
@@ -275,6 +284,7 @@ def train_large_loss_classifier(
         params=model_params,
         num_boost_round=best_rounds,
         embargo_days=embargo_days,
+        threshold=threshold,
     )
     metrics.update(_walk_forward_summary_clf(walk_forward))
 
@@ -375,8 +385,8 @@ def _clf_metrics(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.15
     }
 
 
-def _prefixed_clf_metrics(prefix: str, y_true: np.ndarray, y_prob: np.ndarray) -> dict[str, Any]:
-    return {f"{prefix}_{k}": v for k, v in _clf_metrics(y_true, y_prob).items()}
+def _prefixed_clf_metrics(prefix: str, y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.15) -> dict[str, Any]:
+    return {f"{prefix}_{k}": v for k, v in _clf_metrics(y_true, y_prob, threshold).items()}
 
 
 def _walk_forward_clf(
@@ -389,6 +399,7 @@ def _walk_forward_clf(
     params: dict[str, Any],
     num_boost_round: int,
     embargo_days: int,
+    threshold: float = 0.15,
 ) -> list[dict[str, Any]]:
     folds: list[dict[str, Any]] = []
     y_all = df[target_column].to_numpy(dtype=float)
@@ -412,7 +423,7 @@ def _walk_forward_clf(
 
         x_test_frame = _transform_frame(test_df, feature_columns, fold_fill)
         prob = _predict_prob(booster, x_test_frame)
-        fold_metrics = _clf_metrics(y_all[test_start:test_end], prob)
+        fold_metrics = _clf_metrics(y_all[test_start:test_end], prob, threshold)
 
         from ml.models.train_baseline import _row_timestamp
         folds.append({

@@ -32,11 +32,11 @@
     "risk_free_rate": 0.045,
     "spread_widths": [5, 10, 15, 20],
     "_spread_widths_note": "Dollar widths evaluated for each PCS/CCS short leg. Multiple widths let the model score and rank different risk/reward profiles per expiry; the highest-scored width wins selection.",
-    "large_loss_classifier_path": "artifacts/models/large_loss_classifier_v007b_dte21.json",
-    "_large_loss_classifier_note": "V007b LLC: retrained on 500K DTE≤21 balanced dataset. AUC 0.839, recall 99.7%, 47 FN. Defensive 0.70 threshold prioritizes avoiding large realized losses over preserving every capital-efficient short-DTE pick.",
+    "large_loss_classifier_path": "artifacts/models/large_loss_classifier_v008.json",
+    "_large_loss_classifier_note": "V008 LLC: 2-pass Optuna (75 HP + 48 feature trials) on DTE≤21 dataset at threshold 0.60. WF AUC 0.852, recall 91.1% @0.60, 34 features. Drops 8 groups (market_regime, option_entry/activity, greeks, iv_surface, event_risk, credit_efficiency, quant_structural).",
     "large_loss_veto_threshold": 0.60,
-    "stop_loss_classifier_path": "artifacts/models/stop_loss_classifier_v007b_dte21.json",
-    "_stop_loss_classifier_note": "V007b SLC: retrained on 500K DTE≤21 balanced dataset. AUC 0.797, recall 99.5%. Eased from 0.15 to 0.30 — ultra-defensive 0.15 was over-vetoing; 0.30 still catches high-risk stop-loss candidates while improving candidate volume.",
+    "stop_loss_classifier_path": "artifacts/models/stop_loss_classifier_v008.json",
+    "_stop_loss_classifier_note": "V008 SLC: 2-pass Optuna (75 HP + 48 feature trials) on DTE≤21 dataset at threshold 0.30. WF AUC 0.823, recall 99.5% @0.30, 41 features. Drops 6 groups (underlying_vol, vol_momentum, market_regime, option_activity, event_risk, quant_structural).",
     "stop_loss_veto_threshold": 0.30
   },
 

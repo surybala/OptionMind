@@ -15,18 +15,33 @@ Works for both targets:
     --target large_loss_label   (default)
     --target stop_loss_hit
 
+Threshold-aware: metrics (recall, precision, F1) are evaluated at the
+operating veto threshold (0.60 for LLC, 0.30 for SLC by default) so the
+optimizer maximises signal quality at the actual decision boundary.
+
 Usage
 -----
-# Pass 1
+# LLC Pass 1
 PYTHONPATH=. .venv/bin/python -m ml.models.optimize_large_loss_classifier \\
     --mode hp --target large_loss_label \\
-    --study-name llc_hp_v006c --n-trials 75
+    --study-name llc_hp_v008 --n-trials 75
 
-# Pass 2 (after Pass 1 finishes)
+# LLC Pass 2 (after Pass 1 finishes)
 PYTHONPATH=. .venv/bin/python -m ml.models.optimize_large_loss_classifier \\
     --mode features --target large_loss_label \\
-    --study-name llc_feat_v006c --n-trials 48 \\
-    --hp-params artifacts/optuna/llc_hp_v006c_best_params.json
+    --study-name llc_feat_v008 --n-trials 48 \\
+    --hp-params artifacts/optuna/llc_hp_v008_best_params.json
+
+# SLC Pass 1
+PYTHONPATH=. .venv/bin/python -m ml.models.optimize_large_loss_classifier \\
+    --mode hp --target stop_loss_hit \\
+    --study-name slc_hp_v008 --n-trials 75
+
+# SLC Pass 2
+PYTHONPATH=. .venv/bin/python -m ml.models.optimize_large_loss_classifier \\
+    --mode features --target stop_loss_hit \\
+    --study-name slc_feat_v008 --n-trials 48 \\
+    --hp-params artifacts/optuna/slc_hp_v008_best_params.json
 
 Results persist in artifacts/optuna/<study-name>.db.
 Best params/features are written to artifacts/optuna/ after every trial.
@@ -50,22 +65,37 @@ from ml.models.feature_groups import ALWAYS_ON, CHAMPION_GROUPS, TOGGLEABLE
 DATASET_DEFAULT = (
     "artifacts/datasets/candidate_rows/"
     "dataset_version="
-    "candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k"
+    "candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k_dte21"
 )
 PYTHON = str(Path(sys.executable))
 
-# ── Baseline metrics (V006b) ──────────────────────────────────────────────────
-BASELINE = {
+# ── Operating thresholds ─────────────────────────────────────────────────────
+# Must match the veto thresholds in config.json / model_scanner.py.
+DEFAULT_THRESHOLD: dict[str, float] = {
+    "large_loss_label": 0.60,
+    "stop_loss_hit": 0.30,
+}
+
+# ── Baseline metrics (V006b defaults on DTE≤21 dataset, at operating threshold) ─
+BASELINE: dict[str, dict[str, float]] = {
     "large_loss_label": {
-        "test_auc": 0.847687,
-        "walk_forward_auc_mean": 0.848185,
-        "test_recall": 0.981661,
+        "test_auc": 0.838150,
+        "walk_forward_auc_mean": 0.844341,
+        "test_recall": 0.689003,
     },
     "stop_loss_hit": {
-        "test_auc": 0.804,
-        "walk_forward_auc_mean": 0.804,
-        "test_recall": 0.997,
+        "test_auc": 0.797349,
+        "walk_forward_auc_mean": 0.815971,
+        "test_recall": 0.951192,
     },
+}
+
+# Recall floor per target at operating threshold.
+# LLC@0.60: baseline recall ~0.69; floor at 0.60 gives ~9pp headroom for AUC improvement.
+# SLC@0.30: baseline recall ~0.95; floor at 0.92 gives ~3pp headroom.
+RECALL_FLOOR: dict[str, float] = {
+    "large_loss_label": 0.60,
+    "stop_loss_hit": 0.92,
 }
 
 # Default hyperparameters (V006b baseline)
@@ -88,6 +118,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--study-name", default=None,
                    help="Defaults to llc_hp_<target> or llc_feat_<target>.")
     p.add_argument("--n-trials", type=int, default=75)
+    p.add_argument("--threshold", type=float, default=None,
+                   help="Classification threshold for recall/precision metrics. "
+                        "Auto-resolves from --target if not set (0.60 for LLC, 0.30 for SLC).")
     p.add_argument("--storage-dir", default="artifacts/optuna")
     p.add_argument("--num-boost-round", type=int, default=500,
                    help="Max rounds (early stopping will usually terminate well before this).")
@@ -144,16 +177,15 @@ def _excluded_features(group_flags: dict[str, bool]) -> list[str]:
 def _score(metrics: dict, target: str) -> tuple[float, dict]:
     """
     Primary objective: walk_forward_auc_mean.
-    Penalty: 0.05 per unit recall drops below 0.97 at threshold 0.15.
-    This ensures the safety guarantee (catch almost all large-loss trades)
-    is preserved even while pushing for higher AUC.
+    Penalty: 0.05 per unit recall drops below the per-target recall floor
+    (evaluated at the operating threshold, not the old 0.15).
     """
     wf_auc = float(metrics.get("walk_forward_auc_mean") or 0.0)
     test_recall = float(metrics.get("test_recall") or 0.0)
     test_auc = float(metrics.get("test_auc") or 0.0)
 
     score = wf_auc
-    recall_floor = 0.97
+    recall_floor = RECALL_FLOOR.get(target, 0.80)
     score -= 0.05 * max(0.0, recall_floor - test_recall)
 
     baseline = BASELINE.get(target, {})
@@ -173,6 +205,7 @@ def _run_trial(
     num_boost_round: int,
     storage_dir: Path,
     excluded_features: list[str] | None = None,
+    threshold: float = 0.15,
 ) -> dict | None:
     trial_dir = storage_dir / "trials"
     trial_dir.mkdir(parents=True, exist_ok=True)
@@ -189,6 +222,7 @@ def _run_trial(
         "--val-fraction", "0.15",
         "--early-stopping-rounds", "20",
         "--embargo-days", "30",
+        "--threshold", str(threshold),
         "--eta", str(hp["eta"]),
         "--max-depth", str(int(hp["max_depth"])),
         "--min-child-weight", str(hp["min_child_weight"]),
@@ -231,6 +265,7 @@ def _hp_objective(
     target: str,
     num_boost_round: int,
     storage_dir: Path,
+    threshold: float = 0.15,
 ) -> float:
     hp = {
         "eta":              trial.suggest_float("eta", 0.005, 0.10, log=True),
@@ -245,7 +280,8 @@ def _hp_objective(
     }
 
     t0 = time.time()
-    metrics = _run_trial(trial.number, dataset, target, hp, num_boost_round, storage_dir)
+    metrics = _run_trial(trial.number, dataset, target, hp, num_boost_round, storage_dir,
+                         threshold=threshold)
     elapsed = time.time() - t0
 
     if metrics is None:
@@ -255,18 +291,19 @@ def _hp_objective(
     for k, v in diag.items():
         trial.set_user_attr(k, v)
     trial.set_user_attr("elapsed_s", round(elapsed))
+    trial.set_user_attr("threshold", threshold)
 
     baseline_wf = BASELINE.get(target, {}).get("walk_forward_auc_mean", 0)
     print(
         f"[hp {trial.number:03d}] score={score:.4f}  "
-        f"wf_auc={diag['wf_auc']:.4f} ({diag['vs_baseline_wf_auc']:+.4f} vs V006b={baseline_wf:.4f})  "
-        f"recall={diag['test_recall']:.4f}  ({elapsed:.0f}s)"
+        f"wf_auc={diag['wf_auc']:.4f} ({diag['vs_baseline_wf_auc']:+.4f} vs baseline={baseline_wf:.4f})  "
+        f"recall@{threshold}={diag['test_recall']:.4f}  ({elapsed:.0f}s)"
     )
     return score
 
 
 def _save_hp_best(study: optuna.Study, dataset: str, num_boost_round: int,
-                  target: str, storage_dir: Path) -> None:
+                  target: str, storage_dir: Path, threshold: float = 0.15) -> None:
     best = study.best_trial
     spw = best.params.get("scale_pos_weight", 0.0)
     hp_args = " \\\n  ".join(
@@ -276,8 +313,9 @@ def _save_hp_best(study: optuna.Study, dataset: str, num_boost_round: int,
     train_cmd = (
         f"PYTHONPATH=. .venv/bin/python -m ml.models.train_large_loss_classifier \\\n"
         f"  --input {dataset} \\\n"
-        f"  --output artifacts/models/{prefix}_v006c.json \\\n"
+        f"  --output artifacts/models/{prefix}_v008.json \\\n"
         f"  --target {target} --embargo-days 30 \\\n"
+        f"  --threshold {threshold} \\\n"
         f"  --num-boost-round {num_boost_round} \\\n"
         f"  {hp_args}"
     )
@@ -285,6 +323,7 @@ def _save_hp_best(study: optuna.Study, dataset: str, num_boost_round: int,
         "study_name": study.study_name,
         "best_trial": best.number,
         "score": best.value,
+        "threshold": threshold,
         "metrics": best.user_attrs,
         "params": best.params,
         "train_command": train_cmd,
@@ -302,13 +341,15 @@ def _feat_objective(
     hp: dict,
     num_boost_round: int,
     storage_dir: Path,
+    threshold: float = 0.15,
 ) -> float:
     group_flags = {g: trial.suggest_categorical(g, [True, False]) for g in TOGGLEABLE}
     excluded = _excluded_features(group_flags)
 
     t0 = time.time()
     metrics = _run_trial(trial.number, dataset, target, hp, num_boost_round, storage_dir,
-                         excluded_features=excluded if excluded else None)
+                         excluded_features=excluded if excluded else None,
+                         threshold=threshold)
     elapsed = time.time() - t0
 
     if metrics is None:
@@ -326,19 +367,20 @@ def _feat_objective(
     trial.set_user_attr("excluded_groups", [g for g, inc in group_flags.items() if not inc])
     trial.set_user_attr("n_features", n_features)
     trial.set_user_attr("elapsed_s", round(elapsed))
+    trial.set_user_attr("threshold", threshold)
 
     baseline_wf = BASELINE.get(target, {}).get("walk_forward_auc_mean", 0)
     print(
         f"[feat {trial.number:03d}] score={score:.4f}  "
-        f"wf_auc={diag['wf_auc']:.4f} ({diag['vs_baseline_wf_auc']:+.4f} vs V006b)  "
-        f"recall={diag['test_recall']:.4f}  "
+        f"wf_auc={diag['wf_auc']:.4f} ({diag['vs_baseline_wf_auc']:+.4f} vs baseline)  "
+        f"recall@{threshold}={diag['test_recall']:.4f}  "
         f"groups={n_included}/{len(TOGGLEABLE)}  feats={n_features}  ({elapsed:.0f}s)"
     )
     return score
 
 
 def _save_feat_best(study: optuna.Study, dataset: str, hp: dict, num_boost_round: int,
-                    target: str, storage_dir: Path) -> None:
+                    target: str, storage_dir: Path, threshold: float = 0.15) -> None:
     best = study.best_trial
     group_flags = {g: best.params[g] for g in TOGGLEABLE}
     excluded = _excluded_features(group_flags)
@@ -349,8 +391,9 @@ def _save_feat_best(study: optuna.Study, dataset: str, hp: dict, num_boost_round
     train_cmd = (
         f"PYTHONPATH=. .venv/bin/python -m ml.models.train_large_loss_classifier \\\n"
         f"  --input {dataset} \\\n"
-        f"  --output artifacts/models/{prefix}_v006c.json \\\n"
+        f"  --output artifacts/models/{prefix}_v008.json \\\n"
         f"  --target {target} --embargo-days 30 \\\n"
+        f"  --threshold {threshold} \\\n"
         f"  --num-boost-round {num_boost_round} \\\n"
         f"  {hp_args}"
     )
@@ -361,6 +404,7 @@ def _save_feat_best(study: optuna.Study, dataset: str, hp: dict, num_boost_round
         "study_name": study.study_name,
         "best_trial": best.number,
         "score": best.value,
+        "threshold": threshold,
         "metrics": best.user_attrs,
         "hyperparameters": hp,
         "group_flags": group_flags,
@@ -416,6 +460,7 @@ def main() -> None:
     db_path = storage_dir / f"{study_name}.db"
     storage_url = f"sqlite:///{db_path}"
     baseline = BASELINE.get(args.target, {})
+    threshold = args.threshold if args.threshold is not None else DEFAULT_THRESHOLD.get(args.target, 0.15)
 
     study = optuna.create_study(
         study_name=study_name,
@@ -426,15 +471,16 @@ def main() -> None:
     )
 
     completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-    print(f"Study: {study_name}  |  mode: {args.mode}  |  target: {args.target}")
+    print(f"Study: {study_name}  |  mode: {args.mode}  |  target: {args.target}  |  threshold: {threshold}")
     print(f"Storage: {db_path}")
-    print(f"V006b baseline: wf_auc={baseline.get('walk_forward_auc_mean', '?')}, "
-          f"recall={baseline.get('test_recall', '?')}")
+    print(f"Baseline: wf_auc={baseline.get('walk_forward_auc_mean', '?')}, "
+          f"recall@{threshold}={baseline.get('test_recall', '?')}")
+    print(f"Recall floor: {RECALL_FLOOR.get(args.target, '?')}")
     print(f"Running {args.n_trials} trial(s). Ctrl-C to stop early (progress is saved).\n")
 
     if args.mode == "hp":
         if not completed:
-            print("Seeding trial 0 with V006b defaults...")
+            print("Seeding trial 0 with defaults...")
             study.enqueue_trial({
                 "eta": DEFAULT_HP["eta"],
                 "max_depth": int(DEFAULT_HP["max_depth"]),
@@ -443,13 +489,14 @@ def main() -> None:
                 "colsample_bytree": DEFAULT_HP["colsample_bytree"],
                 "reg_lambda": DEFAULT_HP["reg_lambda"],
                 "reg_alpha": float(DEFAULT_HP["reg_alpha"]),
-                "scale_pos_weight": 8.41,  # V006b auto-computed value
+                "scale_pos_weight": 8.41,
             })
         else:
             print(f"Resuming with {len(completed)} completed trial(s) in storage.")
 
         objective = lambda trial: _hp_objective(
-            trial, args.input, args.target, args.num_boost_round, storage_dir
+            trial, args.input, args.target, args.num_boost_round, storage_dir,
+            threshold=threshold,
         )
         try:
             study.optimize(
@@ -458,7 +505,8 @@ def main() -> None:
                 show_progress_bar=False,
                 callbacks=[
                     lambda study, trial: _save_hp_best(
-                        study, args.input, args.num_boost_round, args.target, storage_dir
+                        study, args.input, args.num_boost_round, args.target, storage_dir,
+                        threshold=threshold,
                     ) if trial.state == optuna.trial.TrialState.COMPLETE else None
                 ],
             )
@@ -466,7 +514,8 @@ def main() -> None:
             print("\nInterrupted — saving best params so far.")
 
         _print_hp_summary(study, args.target)
-        _save_hp_best(study, args.input, args.num_boost_round, args.target, storage_dir)
+        _save_hp_best(study, args.input, args.num_boost_round, args.target, storage_dir,
+                      threshold=threshold)
         best_path = storage_dir / f"{study_name}_best_params.json"
         print(f"\nBest params saved to: {best_path}")
         out = json.loads(best_path.read_text())
@@ -474,8 +523,8 @@ def main() -> None:
         print(out["train_command"])
 
     elif args.mode == "features":
-        if args.mode == "features" and not args.hp_params:
-            print("WARNING: --hp-params not supplied. Using V006b defaults for hyperparameters.")
+        if not args.hp_params:
+            print("WARNING: --hp-params not supplied. Using defaults for hyperparameters.")
         hp = _load_hp(args)
 
         if not completed:
@@ -485,7 +534,8 @@ def main() -> None:
             print(f"Resuming with {len(completed)} completed trial(s) in storage.")
 
         objective = lambda trial: _feat_objective(
-            trial, args.input, args.target, hp, args.num_boost_round, storage_dir
+            trial, args.input, args.target, hp, args.num_boost_round, storage_dir,
+            threshold=threshold,
         )
         try:
             study.optimize(
@@ -494,7 +544,8 @@ def main() -> None:
                 show_progress_bar=False,
                 callbacks=[
                     lambda study, trial: _save_feat_best(
-                        study, args.input, hp, args.num_boost_round, args.target, storage_dir
+                        study, args.input, hp, args.num_boost_round, args.target, storage_dir,
+                        threshold=threshold,
                     ) if trial.state == optuna.trial.TrialState.COMPLETE else None
                 ],
             )
@@ -502,7 +553,8 @@ def main() -> None:
             print("\nInterrupted — saving best features so far.")
 
         _print_feat_summary(study, args.target)
-        _save_feat_best(study, args.input, hp, args.num_boost_round, args.target, storage_dir)
+        _save_feat_best(study, args.input, hp, args.num_boost_round, args.target, storage_dir,
+                        threshold=threshold)
         best_path = storage_dir / f"{study_name}_best_features.json"
         print(f"\nBest feature set saved to: {best_path}")
         out = json.loads(best_path.read_text())
