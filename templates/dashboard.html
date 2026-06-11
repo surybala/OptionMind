@@ -1072,7 +1072,8 @@ td { padding: 10px 12px; vertical-align: middle; white-space: nowrap; }
               <th title="How far the current mark is from the stop-loss trigger, as % of premium. Negative = already past stop-loss.">SL Distance</th>
               <th title="Total unrealized P&amp;L across all contracts">P&amp;L</th>
               <th title="Shared risk classification from PositionRiskService">Risk Level</th>
-              <th title="Exit trigger evaluation">Exit Signal</th>
+              <th title="ML exit-risk model score (0-1). Higher = more likely the position needs early exit.">ML Score</th>
+              <th title="Exit trigger evaluation — ML exit-risk model (primary) + stop-loss (fallback)">Exit Signal</th>
               <th>Action</th>
             </tr>
           </thead>
@@ -1087,17 +1088,17 @@ td { padding: 10px 12px; vertical-align: middle; white-space: nowrap; }
     <div style="margin-top:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 18px;">
       <div class="chart-title" style="margin-bottom:10px">Status Legend &amp; Trigger Logic</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;font-size:0.8rem;color:var(--text-muted)">
-        <div><span class="risk-badge risk-SAFE">SAFE</span> &nbsp; Risk service sees normal stop, profit, and gamma/theta conditions</div>
-        <div><span class="risk-badge risk-WATCH">WATCH</span> &nbsp; Incomplete data or early drift that deserves monitoring</div>
+        <div><span class="risk-badge risk-SAFE">SAFE</span> &nbsp; ML exit-risk score well below threshold</div>
+        <div><span class="risk-badge risk-WATCH">WATCH</span> &nbsp; ML score at 40-70% of trigger threshold — early drift</div>
         <div><span class="risk-badge risk-CAUTION">CAUTION</span> &nbsp; Elevated risk on stop proximity, profit capture, or gamma/theta</div>
         <div><span class="risk-badge risk-CRITICAL">CRITICAL</span> &nbsp; Highest shared risk classification before action logic</div>
-        <div><span class="risk-badge risk-TRIGGER">TRIGGER</span> &nbsp; Exit signal: gamma risk trigger would fire</div>
-        <div><span class="risk-badge risk-STOP_LOSS">STOP LOSS</span> &nbsp; Exit signal: stop-loss threshold exceeded</div>
+        <div><span class="risk-badge risk-TRIGGER">TRIGGER</span> &nbsp; ML exit-risk model fires — score exceeds threshold</div>
+        <div><span class="risk-badge risk-STOP_LOSS">STOP LOSS</span> &nbsp; Exit signal: deterministic stop-loss threshold exceeded</div>
       </div>
       <div style="margin-top:10px;font-size:0.78rem;color:var(--text-muted);line-height:1.6">
-        <strong style="color:var(--text)">Gamma risk trigger</strong> fires when:
-        γ/θ ratio ≥ threshold <em>AND</em> |short Δ| ≥ min-delta <em>AND</em>
-        (profit captured ≥ min% <em>OR</em> |short Δ| ≥ urgent-delta).
+        <strong style="color:var(--text)">ML exit-risk trigger</strong> fires when the champion
+        intraday risk monitor model scores a position above its operating threshold (default 0.08).
+        The model uses 45 features including position P&amp;L, Greeks, underlying price path, and market regime.
         <br>
         <strong style="color:var(--text)">γ/θ ratio</strong> colour: <span class="ratio-safe">■</span> &lt;0.8
         &nbsp;<span class="ratio-watch">■</span> 0.8–1.5
@@ -2378,6 +2379,24 @@ function renderRiskTable(positions) {
     const riskLevelBadgeHtml = riskBadge(p.risk_level);
     const triggerStatusBadgeHtml = riskBadge(p.trigger_status);
 
+    // ML exit-risk score cell
+    const mlScore = p.ml_exit_risk_score;
+    const mlThreshold = p.ml_exit_risk_threshold;
+    const mlGuard = p.ml_exit_risk_guard;
+    let mlScoreStr;
+    if (mlScore != null) {
+      const mlPct = (mlScore * 100).toFixed(1);
+      const mlColor = mlScore >= (mlThreshold || 0.08) ? 'var(--red)'
+                    : mlScore >= (mlThreshold || 0.08) * 0.70 ? 'var(--orange)'
+                    : mlScore >= (mlThreshold || 0.08) * 0.40 ? 'var(--yellow)'
+                    : 'var(--green)';
+      mlScoreStr = `<span style="color:${mlColor};font-weight:600" title="Threshold: ${((mlThreshold||0.08)*100).toFixed(0)}%">${mlPct}%</span>`;
+    } else if (mlGuard) {
+      mlScoreStr = `<span style="color:var(--text-muted);font-size:0.75rem" title="${mlGuard}">—</span>`;
+    } else {
+      mlScoreStr = '—';
+    }
+
     // ── error row (chain unavailable) ─────────────────────────────────────
     if (p.error) {
       return `<tr>
@@ -2387,6 +2406,7 @@ function renderRiskTable(positions) {
         <td>${dteStr}</td>
         <td colspan="8" style="color:var(--text-muted);font-size:0.78rem;font-style:italic">${p.error}</td>
         <td>${riskLevelBadgeHtml}</td>
+        <td>${mlScoreStr}</td>
         <td>${triggerStatusBadgeHtml}</td>
         <td></td>
       </tr>`;
@@ -2406,6 +2426,7 @@ function renderRiskTable(positions) {
       <td>${slDistStr}</td>
       <td>${upnlStr}</td>
       <td>${riskLevelBadgeHtml}</td>
+      <td>${mlScoreStr}</td>
       <td>${triggerStatusBadgeHtml}</td>
       <td onclick="event.stopPropagation()">
         <button class="btn"

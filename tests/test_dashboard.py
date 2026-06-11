@@ -348,7 +348,8 @@ def test_risk_monitor_reports_portfolio_gamma_summary(dashboard_client, monkeypa
     assert payload["regime"]["label"] == "GREEN"
     assert payload["regime"]["metrics"]["enabled"] is False
     assert payload["risk_level_counts"]["SAFE"] == 1
-    assert payload["status_counts"]["WATCH"] == 1
+    # With ML exit-risk model (inactive in tests), positions default to SAFE
+    assert payload["status_counts"]["SAFE"] == 1
     assert payload["at_risk_count"] == 0
     assert payload["exit_trigger_count"] == 0
     assert portfolio["daily_theta"] == pytest.approx(8.0)
@@ -437,7 +438,8 @@ def test_risk_monitor_counts_risk_levels_separately_from_exit_signals(dashboard_
     assert payload["risk_level_counts"]["CRITICAL"] == 1
     assert payload["risk_level_counts"]["CAUTION"] == 1
     assert payload["status_counts"]["STOP_LOSS"] == 1
-    assert payload["status_counts"]["WARNING"] == 1
+    # QQQ: no ML model active in test → SAFE (not WARNING from legacy gamma rules)
+    assert payload["status_counts"]["SAFE"] == 1
     assert payload["at_risk_count"] == 1
     assert payload["exit_trigger_count"] == 1
 

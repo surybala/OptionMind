@@ -38,6 +38,7 @@ from flask import Flask, jsonify, render_template, request
 from src.capital import capital_by_strategy, capital_for_position
 from src.portfolio_risk import PortfolioRiskService
 from src.regime import RegimeResult, RegimeService
+from src.risk_ml import MlExitRiskService
 
 app = Flask(__name__, template_folder="templates")
 DB_PATH: str = "data/trades.db"
@@ -845,7 +846,7 @@ def api_close_all_positions():
 @app.route("/api/risk-monitor")
 def api_risk_monitor():
     """
-    Return per-position risk data with live Greeks.
+    Return per-position risk data with live Greeks and ML exit-risk scoring.
 
     Delegates enrichment to :class:`~src.risk_service.PositionRiskService`,
     which is HFT-aware: uses Alpaca broker-supplied Greeks when
@@ -853,17 +854,25 @@ def api_risk_monitor():
     Black-Scholes.  This guarantees the dashboard shows the same Greek values
     as the position-monitor daemon.
 
+    Exit signals mirror the live daemon's trigger priority order:
+    1. Stop-loss (deterministic fallback)
+    2. ML exit-risk model (primary proactive exit via MlExitRiskService)
+    Score-based proximity bucketing for WATCH/WARNING states.
+
     Columns returned per position
     ------------------------------
-    short_delta         — |net delta of short legs|; rises as position moves ITM
-    gamma_theta_ratio   — |net_gamma| / |net_theta_per_day|; rising = dangerous
-    risk_score          — composite score = ratio × (1 + delta_penalty)
-    net_theta_per_day   — daily theta income per contract (×100); positive = earning
-    profit_captured_pct — % of entry premium already secured
-    sl_distance_pct     — how far (% of premium) the mark is from stop-loss trigger
-    has_broker_greeks   — true when Alpaca broker Greeks were used (hft_mode=true)
-    risk_level          — SAFE / WATCH / CAUTION / CRITICAL  (same as daemon)
-    trigger_status      — SAFE / WATCH / WARNING / TRIGGER / STOP_LOSS / UNKNOWN
+    short_delta           — |net delta of short legs|; rises as position moves ITM
+    gamma_theta_ratio     — |net_gamma| / |net_theta_per_day|; rising = dangerous
+    risk_score            — composite score = ratio × (1 + delta_penalty)
+    net_theta_per_day     — daily theta income per contract (×100); positive = earning
+    profit_captured_pct   — % of entry premium already secured
+    sl_distance_pct       — how far (% of premium) the mark is from stop-loss trigger
+    has_broker_greeks     — true when Alpaca broker Greeks were used (hft_mode=true)
+    risk_level            — SAFE / WATCH / CAUTION / CRITICAL  (same as daemon)
+    trigger_status        — SAFE / WATCH / WARNING / TRIGGER / STOP_LOSS / UNKNOWN
+    ml_exit_risk_score    — ML model probability of needing early exit (0-1)
+    ml_exit_risk_threshold — threshold at which TRIGGER fires
+    ml_exit_risk_guard    — guard reason if ML scoring was skipped (e.g. below_min_dte)
     """
     # ── Load risk thresholds from config ─────────────────────────────────────
     try:
@@ -885,6 +894,13 @@ def api_risk_monitor():
     symbol_stress_cap_pct    = float(pgr.get('max_symbol_stress_pct',  0.05))
     min_stress_loss_dollars  = float(pgr.get('min_stress_loss_dollars', 500.0) or 0.0)
     min_symbol_stress_dollars = float(pgr.get('min_symbol_stress_dollars', 250.0) or 0.0)
+
+    # ── ML exit-risk service (mirrors the live position-monitor daemon) ──────
+    try:
+        ml_exit_risk = MlExitRiskService(cfg)
+    except Exception as exc:
+        _log.warning("[dashboard] Failed to load MlExitRiskService: %s", exc)
+        ml_exit_risk = None
 
     # ── Fetch open positions ──────────────────────────────────────────────────
     today = datetime.today().date().isoformat()
@@ -947,23 +963,59 @@ def api_risk_monitor():
         else:
             sl_distance_pct = None
 
-        # ── Trigger status (dashboard-specific proximity bucketing) ───────────
-        loss       = -(pnl_per_share or 0.0)
-        urgent     = short_delta >= gr_urgent_delta
-        enough_pnl = profit_captured_frac >= gr_min_profit
+        # ── ML exit-risk scoring (mirrors live daemon trigger order) ──────────
+        ml_score = None
+        ml_should_trigger = False
+        ml_guard_reason = None
+
+        if ml_exit_risk is not None and ml_exit_risk.is_active():
+            # Build a risk dict from enriched Greeks for the ML model
+            risk_dict = {
+                'risk_score':          enriched.get('risk_score', 0.0),
+                'gamma_theta_ratio':   enriched.get('gamma_theta_ratio', 0.0),
+                'net_short_delta':     enriched.get('net_short_delta', 0.0),
+                'net_delta':           enriched.get('net_delta', 0.0),
+                'net_gamma':           enriched.get('net_gamma', 0.0),
+                'net_theta':           enriched.get('net_theta', 0.0),
+                'net_vega':            enriched.get('net_vega', 0.0),
+            }
+            try:
+                score_payload = ml_exit_risk.score_position(
+                    enriched,
+                    current_mark=current_mark,
+                    spot=spot,
+                    risk=risk_dict,
+                    chain=None,
+                )
+                if score_payload is not None:
+                    ml_score = score_payload.get('ml_exit_risk_score')
+                    ml_should_trigger = score_payload.get('ml_exit_risk_should_trigger', False)
+                    ml_guard_reason = score_payload.get('ml_exit_risk_guard_reason')
+            except Exception as exc:
+                _log.debug("[dashboard] ML score failed for pos %s: %s",
+                           pos.get('id'), exc)
+
+        # ── Trigger status (same priority as live daemon) ────────────────────
+        # 1. Stop-loss (deterministic fallback — always checked)
+        # 2. ML exit-risk (primary proactive exit)
+        # 3. Score-based proximity bucketing
+        loss = -(pnl_per_share or 0.0)
 
         if spot is None and current_mark is None:
             trigger_status = 'UNKNOWN'
         elif premium > 0 and loss > stop_loss_mult * premium:
             trigger_status = 'STOP_LOSS'
-        elif (ratio >= gr_ratio_thresh
-              and short_delta >= gr_min_delta
-              and (enough_pnl or urgent)):
+        elif ml_should_trigger:
             trigger_status = 'TRIGGER'
-        elif ratio >= gr_ratio_thresh * 0.70 or short_delta >= gr_min_delta * 0.70:
-            trigger_status = 'WARNING'
-        elif ratio >= gr_ratio_thresh * 0.40 or short_delta >= gr_min_delta * 0.40:
-            trigger_status = 'WATCH'
+        elif ml_score is not None and ml_guard_reason is None:
+            # Score-based proximity: bucket by how close to threshold
+            threshold = ml_exit_risk.threshold if ml_exit_risk else 0.08
+            if ml_score >= threshold * 0.70:
+                trigger_status = 'WARNING'
+            elif ml_score >= threshold * 0.40:
+                trigger_status = 'WATCH'
+            else:
+                trigger_status = 'SAFE'
         else:
             trigger_status = 'SAFE'
 
@@ -995,6 +1047,9 @@ def api_risk_monitor():
             'has_broker_greeks':   enriched.get('has_broker_greeks', False),
             'risk_level':          enriched.get('risk_level', 'WATCH'),
             'trigger_status':      trigger_status,
+            'ml_exit_risk_score':  round(ml_score, 4) if ml_score is not None else None,
+            'ml_exit_risk_threshold': ml_exit_risk.threshold if ml_exit_risk and ml_exit_risk.is_active() else None,
+            'ml_exit_risk_guard':  ml_guard_reason,
             'greeks_available':    has_greeks,
             'timestamp':           pos.get('timestamp'),
             'status':              pos.get('status'),
@@ -1041,10 +1096,9 @@ def api_risk_monitor():
         'avg_ratio':     avg_ratio,
         'thresholds': {
             'stop_loss_multiplier':        stop_loss_mult,
-            'gamma_theta_ratio_threshold': gr_ratio_thresh,
-            'min_delta_to_trigger':        gr_min_delta,
-            'urgent_delta_threshold':      gr_urgent_delta,
-            'min_profit_captured_pct':     gr_min_profit,
+            'ml_exit_risk_threshold':      ml_exit_risk.threshold if ml_exit_risk and ml_exit_risk.is_active() else None,
+            'ml_exit_risk_model_id':       ml_exit_risk.model_id if ml_exit_risk and ml_exit_risk.is_active() else None,
+            'ml_exit_risk_enabled':        ml_exit_risk is not None and ml_exit_risk.is_active(),
             'portfolio_stress_cap_pct':    portfolio_stress_cap_pct,
             'symbol_stress_cap_pct':       symbol_stress_cap_pct,
             'min_stress_loss_dollars':     min_stress_loss_dollars,
