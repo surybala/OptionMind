@@ -17,6 +17,7 @@ def _p(strategy: str, symbol: str, score: float) -> dict:
 def _cfg(
     mode: str = "model_ranked",
     ic_allocation_pct: float = 1.0,
+    max_per_ticker: int | None = None,
     strategy_caps: dict | None = None,
     regime_allocation: dict | None = None,
 ) -> dict:
@@ -26,6 +27,8 @@ def _cfg(
             "iron_condor": {"enabled": True, "ic_allocation_pct": ic_allocation_pct}
         },
     }
+    if max_per_ticker is not None:
+        cfg["max_picks_per_ticker"] = max_per_ticker
     if strategy_caps is not None:
         cfg["pick_selection"]["strategy_caps"] = strategy_caps
     if regime_allocation is not None:
@@ -130,23 +133,33 @@ class TestModelRankedICCap:
         assert pcs_count >= 1
 
 
-# ── Same-ticker ranking behavior in model_ranked ─────────────────────────────
+# ── Per-ticker cap in model_ranked ───────────────────────────────────────────
 
 
-class TestModelRankedTickerConcentration:
-    def test_same_ticker_can_fill_all_slots_when_scores_win(self):
-        picks = [_p("PCS", "SPY", float(i)) for i in range(15)]
-        result = select_top_picks_with_scanner_controls(picks, n=10, config=_cfg())
-        assert len(result) == 10
-        assert all(p["symbol"] == "SPY" for p in result)
+class TestModelRankedPerTickerCap:
+    def test_per_ticker_cap_respected(self):
+        picks = [_p("PCS", "SPY", 10.0 - i) for i in range(10)]
+        cfg = _cfg(max_per_ticker=3)
+        result = select_top_picks_with_scanner_controls(picks, n=10, config=cfg)
+        spy_count = sum(1 for p in result if p["symbol"] == "SPY")
+        assert spy_count <= 3
 
-    def test_second_symbol_does_not_force_diversity_when_scores_are_lower(self):
+    def test_cap_1_forces_symbol_diversity(self):
         picks = (
             [_p("PCS", "SPY", 9.0 - i * 0.1) for i in range(5)]
             + [_p("PCS", "AAPL", 5.0 - i * 0.1) for i in range(5)]
         )
-        result = select_top_picks_with_scanner_controls(picks, n=5, config=_cfg())
-        assert [pick["symbol"] for pick in result] == ["SPY"] * 5
+        cfg = _cfg(max_per_ticker=1)
+        result = select_top_picks_with_scanner_controls(picks, n=10, config=cfg)
+        symbols = [p["symbol"] for p in result]
+        assert symbols.count("SPY") <= 1
+        assert symbols.count("AAPL") <= 1
+
+    def test_no_cap_allows_same_ticker_to_fill_all_slots(self):
+        picks = [_p("PCS", "SPY", float(i)) for i in range(15)]
+        result = select_top_picks_with_scanner_controls(picks, n=10, config=_cfg())
+        assert len(result) == 10
+        assert all(p["symbol"] == "SPY" for p in result)
 
 
 # ── strategy_caps in model_ranked ─────────────────────────────────────────────

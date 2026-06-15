@@ -10,8 +10,8 @@ equal_diversity (default)
 
 model_ranked
     Pure top-N by model score with no per-strategy floors or regime-driven
-    side overrides. Only hard caps apply: IC allocation cap and optional
-    per-strategy caps from
+    side overrides. Only hard caps apply: IC allocation cap, per-ticker cap,
+    and optional per-strategy caps from
     ``config["pick_selection"]["strategy_caps"]``. Designed for the ML
     scanner where the ranker and loss models already encode directional trade
     quality.
@@ -29,7 +29,7 @@ def select_top_picks_with_scanner_controls(
     config: dict[str, Any] | None = None,
     regime_label: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Apply scanner diversity controls to ranked candidates."""
+    """Apply scanner diversity and per-symbol controls to ranked candidates."""
     if not candidates or n <= 0:
         return []
 
@@ -56,6 +56,7 @@ def select_top_picks_with_scanner_controls(
     )
     ic_pct = float(ic_cfg.get("ic_allocation_pct", 1.0))
     max_ic_slots = max(1, int(ic_pct * n))
+    max_per_ticker = cfg.get("max_picks_per_ticker")
     if mode == "model_ranked":
         raw_caps = (
             selection_cfg.get("strategy_caps", {})
@@ -71,6 +72,7 @@ def select_top_picks_with_scanner_controls(
             n,
             max_ic_slots=max_ic_slots,
             ic_pct=ic_pct,
+            max_per_ticker=max_per_ticker,
             strategy_caps=strategy_caps,
         )
 
@@ -79,6 +81,7 @@ def select_top_picks_with_scanner_controls(
         n,
         max_ic_slots=max_ic_slots,
         ic_pct=ic_pct,
+        max_per_ticker=max_per_ticker,
     )
 
 
@@ -88,11 +91,13 @@ def _model_ranked_selection(
     *,
     max_ic_slots: int,
     ic_pct: float,
+    max_per_ticker: int | None,
     strategy_caps: dict[str, int],
 ) -> list[dict[str, Any]]:
     """Greedy top-N by score with hard caps only."""
     selected: list[dict[str, Any]] = []
     strategy_ct: dict[str, int] = defaultdict(int)
+    ticker_ct: dict[str, int] = defaultdict(int)
 
     for pick in ranked:
         if len(selected) >= n:
@@ -100,6 +105,8 @@ def _model_ranked_selection(
         if not _model_ranked_can_select(
             pick,
             strategy_ct=strategy_ct,
+            ticker_ct=ticker_ct,
+            max_per_ticker=max_per_ticker,
             max_ic_slots=max_ic_slots,
             ic_pct=ic_pct,
             strategy_caps=strategy_caps,
@@ -107,7 +114,9 @@ def _model_ranked_selection(
             continue
         selected.append(pick)
         strat = str(pick.get("strategy") or "")
+        sym = str(pick.get("symbol") or "")
         strategy_ct[strat] += 1
+        ticker_ct[sym] += 1
 
     selected.sort(
         key=lambda x: x.get("score", x.get("model_score", 0.0)), reverse=True
@@ -119,11 +128,16 @@ def _model_ranked_can_select(
     pick: dict[str, Any],
     *,
     strategy_ct: dict[str, int],
+    ticker_ct: dict[str, int],
+    max_per_ticker: int | None,
     max_ic_slots: int,
     ic_pct: float,
     strategy_caps: dict[str, int],
 ) -> bool:
     strat = str(pick.get("strategy") or "")
+    sym = str(pick.get("symbol") or "")
+    if max_per_ticker is not None and ticker_ct[sym] >= int(max_per_ticker):
+        return False
     if strat == "IC" and ic_pct < 1.0 and strategy_ct["IC"] >= max_ic_slots:
         return False
     cap = strategy_caps.get(strat)
@@ -138,15 +152,21 @@ def _equal_diversity_selection(
     *,
     max_ic_slots: int,
     ic_pct: float,
+    max_per_ticker: int | None,
 ) -> list[dict[str, Any]]:
     """Equal-diversity selection: guaranteed per-strategy floor + IC cap."""
     pools: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    pool_ticker_ct: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for pick in ranked:
         strat = str(pick.get("strategy") or "")
+        sym = str(pick.get("symbol") or "")
         pool_quota = max_ic_slots if strat == "IC" and ic_pct < 1.0 else n
         if len(pools[strat]) >= pool_quota:
             continue
+        if max_per_ticker is not None and pool_ticker_ct[strat][sym] >= int(max_per_ticker):
+            continue
         pools[strat].append(pick)
+        pool_ticker_ct[strat][sym] += 1
 
     if not pools:
         return []
@@ -169,14 +189,21 @@ def _equal_diversity_selection(
         )
 
         ic_in_selected = sum(1 for p in selected if p.get("strategy") == "IC")
+        global_ticker_ct: dict[str, int] = defaultdict(int)
+        for pick in selected:
+            global_ticker_ct[str(pick.get("symbol") or "")] += 1
 
         for pick in extras:
             if remaining <= 0:
                 break
             strat = str(pick.get("strategy") or "")
+            sym = str(pick.get("symbol") or "")
+            if max_per_ticker is not None and global_ticker_ct[sym] >= int(max_per_ticker):
+                continue
             if strat == "IC" and ic_pct < 1.0 and ic_in_selected >= max_ic_slots:
                 continue
             selected.append(pick)
+            global_ticker_ct[sym] += 1
             if strat == "IC":
                 ic_in_selected += 1
             remaining -= 1

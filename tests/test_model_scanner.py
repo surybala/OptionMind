@@ -101,6 +101,31 @@ def test_model_scanner_prefers_full_ranked_candidates_before_top_n_selection():
     assert [pick["symbol"] for pick in picks] == ["SPY", "QQQ"]
 
 
+def test_model_scanner_respects_max_picks_per_ticker_in_model_ranked_mode():
+    class Provider:
+        def get_ranked_candidates(self, ticker_list):
+            return [
+                {"symbol": "QQQ", "strategy": "CCS", "model_score": 0.95},
+                {"symbol": "QQQ", "strategy": "CCS", "model_score": 0.94},
+                {"symbol": "QQQ", "strategy": "CCS", "model_score": 0.93},
+                {"symbol": "SPY", "strategy": "CCS", "model_score": 0.92},
+                {"symbol": "IWM", "strategy": "CCS", "model_score": 0.91},
+            ]
+
+    scanner = ModelScanner(
+        {
+            "ml_scanner": {"enabled": True},
+            "pick_selection": {"mode": "model_ranked"},
+            "max_picks_per_ticker": 1,
+        }
+    )
+    scanner.model_provider = Provider()
+
+    picks = scanner.get_top_picks(["QQQ", "SPY", "IWM"], n=3)
+
+    assert [pick["symbol"] for pick in picks] == ["QQQ", "SPY", "IWM"]
+
+
 class FakeLiveProvider:
     def __init__(self):
         self.now = datetime(2026, 5, 24, 16, 0, tzinfo=UTC)

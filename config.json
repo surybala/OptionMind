@@ -47,6 +47,7 @@
 
   "_legacy_scanner_note": "The following scanner/strategy settings are retained for legacy tests/reference and old risk/execution compatibility. They are not the north-star candidate-generation path.",
   "top_n_per_strategy": 5,
+  "max_picks_per_ticker": 1,
 
   "max_capital_per_period": 50000,
   "max_contracts_per_pick": 4,
