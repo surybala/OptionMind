@@ -227,10 +227,9 @@ def evaluate_regime_filter(
     )
     reason = '; '.join(result.reasons) if result.reasons else 'no reason supplied'
     log.info(
-        "Regime filter: %s — qty %.0f%%, top-N %.0f%% (%s)",
+        "Regime filter: %s — qty %.0f%% (%s)",
         result.label,
         result.quantity_multiplier * 100,
-        result.top_n_multiplier * 100,
         reason,
     )
     return result

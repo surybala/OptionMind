@@ -11,8 +11,6 @@ def _cfg(**overrides):
                 "fail_closed": False,
                 "yellow_quantity_multiplier": 0.65,
                 "orange_quantity_multiplier": 0.30,
-                "yellow_top_n_multiplier": 0.70,
-                "orange_top_n_multiplier": 0.35,
                 "vix": {
                     "green_below": 18,
                     "yellow_below": 25,
@@ -64,29 +62,29 @@ def test_yellow_and_orange_return_configured_throttles():
 
     assert yellow.label == "YELLOW"
     assert yellow.quantity_multiplier == 0.65
-    assert yellow.top_n_multiplier == 0.70
+    assert yellow.top_n_multiplier == 1.0
     assert yellow.pause_new_trades is False
 
     assert orange.label == "ORANGE"
     assert orange.quantity_multiplier == 0.30
-    assert orange.top_n_multiplier == 0.35
+    assert orange.top_n_multiplier == 1.0
     assert orange.pause_new_trades is False
 
 
-def test_red_pauses_new_trades():
+def test_red_is_informational_only_for_new_trade_selection():
     svc = RegimeService(_cfg())
     result = svc.evaluate(vix_current=35)
     assert result.label == "RED"
-    assert result.quantity_multiplier == 0.0
-    assert result.top_n_multiplier == 0.0
-    assert result.pause_new_trades is True
+    assert result.quantity_multiplier == 1.0
+    assert result.top_n_multiplier == 1.0
+    assert result.pause_new_trades is False
 
 
 def test_red_vix_one_day_spike_overrides_low_vix_level():
     svc = RegimeService(_cfg())
     result = svc.evaluate(vix_current=16, vix_history=[12, 16])
     assert result.label == "RED"
-    assert result.pause_new_trades is True
+    assert result.pause_new_trades is False
 
 
 def test_three_day_vix_spike_escalates_to_orange():
@@ -113,4 +111,4 @@ def test_missing_data_fail_open_or_fail_closed():
 
     fail_closed = RegimeService(_cfg(fail_closed=True)).evaluate()
     assert fail_closed.label == "RED"
-    assert fail_closed.pause_new_trades is True
+    assert fail_closed.pause_new_trades is False

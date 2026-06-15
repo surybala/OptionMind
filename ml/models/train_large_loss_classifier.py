@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -41,12 +42,14 @@ import pandas as pd
 from ml.datasets.audit_candidate_dataset import load_dataset
 from ml.models.train_baseline import (
     _artifact_metadata,
-    _embargo_rows_from_days,
+    _artifact_fingerprint,
+    _chronological_holdout_split,
     _engineer_features,
     _feature_importance,
+    _gap_days,
     _select_feature_columns,
     _split_index,
-    _walk_forward_splits,
+    _walk_forward_splits_by_timestamp,
 )
 
 try:
@@ -73,6 +76,11 @@ class LargeLossClassifierArtifact:
     test_rows: int
     train_positive_rate: float
     test_positive_rate: float
+    dataset: dict[str, Any]
+    training_command: str | None
+    data_fingerprint: str
+    data_quality_filters: dict[str, Any]
+    split_summary: dict[str, Any]
     params: dict[str, Any]
     feature_importance: dict[str, float]
     metrics: dict[str, Any]
@@ -153,6 +161,8 @@ def main() -> int:
     artifact = train_large_loss_classifier(
         df,
         model_output=model_output,
+        dataset_path=str(args.input),
+        training_command=" ".join(shlex.quote(part) for part in sys.argv),
         target_column=args.target,
         test_fraction=args.test_fraction,
         walk_forward_folds=args.walk_forward_folds,
@@ -184,6 +194,8 @@ def train_large_loss_classifier(
     df: pd.DataFrame,
     *,
     model_output: Path,
+    dataset_path: str | None = None,
+    training_command: str | None = None,
     target_column: str = TARGET_COLUMN,
     test_fraction: float = 0.25,
     min_rows: int = 20,
@@ -236,9 +248,13 @@ def train_large_loss_classifier(
     if not feature_columns:
         raise ValueError("No usable numeric feature columns found.")
 
-    split_index = _split_index(len(clean), test_fraction)
-    y_all = clean[target_column].to_numpy(dtype=float)
-    y_train, y_test = y_all[:split_index], y_all[split_index:]
+    train_df, test_df, split_summary = _chronological_holdout_split(
+        clean,
+        test_fraction=test_fraction,
+        embargo_days=embargo_days,
+    )
+    y_train = train_df[target_column].to_numpy(dtype=float)
+    y_test = test_df[target_column].to_numpy(dtype=float)
 
     # Auto-compute scale_pos_weight from training data if not provided.
     neg = float(np.sum(y_train == 0))
@@ -249,13 +265,14 @@ def train_large_loss_classifier(
     if params:
         model_params.update(params)
 
-    fill_values = _compute_fill_values(clean.iloc[:split_index], feature_columns)
-    val_split_index = _split_index(split_index, val_fraction) if val_fraction > 0 and split_index > 1 else split_index
+    fill_values = _compute_fill_values(train_df, feature_columns)
+    train_count = len(train_df)
+    val_split_index = _split_index(train_count, val_fraction) if val_fraction > 0 and train_count > 1 else train_count
 
-    x_train_sub = _build_dmatrix(clean.iloc[:val_split_index], feature_columns, fill_values, y_all[:val_split_index])
-    x_val = _build_dmatrix(clean.iloc[val_split_index:split_index], feature_columns, fill_values, y_all[val_split_index:split_index])
-    x_train_full = _build_dmatrix(clean.iloc[:split_index], feature_columns, fill_values, y_train)
-    x_test_frame = _transform_frame(clean.iloc[split_index:], feature_columns, fill_values)
+    x_train_sub = _build_dmatrix(train_df.iloc[:val_split_index], feature_columns, fill_values, y_train[:val_split_index])
+    x_val = _build_dmatrix(train_df.iloc[val_split_index:], feature_columns, fill_values, y_train[val_split_index:])
+    x_train_full = _build_dmatrix(train_df, feature_columns, fill_values, y_train)
+    x_test_frame = _transform_frame(test_df, feature_columns, fill_values)
 
     has_val = x_val.num_row() > 0 and early_stopping_rounds > 0
     booster = xgb.train(
@@ -268,7 +285,7 @@ def train_large_loss_classifier(
     )
     best_rounds = getattr(booster, "best_iteration", num_boost_round - 1) + 1
 
-    train_prob = _predict_prob(booster, _transform_frame(clean.iloc[:split_index], feature_columns, fill_values))
+    train_prob = _predict_prob(booster, _transform_frame(train_df, feature_columns, fill_values))
     test_prob = _predict_prob(booster, x_test_frame) if len(x_test_frame) > 0 else np.array([])
 
     metrics = _prefixed_clf_metrics("train", y_train, train_prob, threshold)
@@ -280,7 +297,7 @@ def train_large_loss_classifier(
         target_column=target_column,
         feature_columns=feature_columns,
         fold_count=walk_forward_folds,
-        min_train_rows=min_walk_forward_train_rows or max(min_rows, split_index),
+        min_train_rows=min_walk_forward_train_rows or max(min_rows, len(train_df)),
         params=model_params,
         num_boost_round=best_rounds,
         embargo_days=embargo_days,
@@ -292,6 +309,9 @@ def train_large_loss_classifier(
     booster.save_model(model_output)
 
     artifact_metadata = _artifact_metadata(clean)
+    dataset_info = dict(artifact_metadata["dataset"])
+    if dataset_path:
+        dataset_info["input_path"] = dataset_path
     return LargeLossClassifierArtifact(
         model_type="xgboost_binary_large_loss_v001" if target_column == TARGET_COLUMN else "xgboost_binary_risk_v001",
         created_at=datetime.now(UTC).isoformat(),
@@ -306,6 +326,17 @@ def train_large_loss_classifier(
         test_rows=int(len(y_test)),
         train_positive_rate=round(float(np.mean(y_train)), 6),
         test_positive_rate=round(float(np.mean(y_test)), 6) if len(y_test) else 0.0,
+        dataset=dataset_info,
+        training_command=training_command,
+        data_fingerprint=_artifact_fingerprint(
+            dataset=dataset_info,
+            target_column=target_column,
+            feature_columns=feature_columns,
+            data_quality_filters=artifact_metadata["data_quality_filters"],
+            split_summary=split_summary,
+        ),
+        data_quality_filters=artifact_metadata["data_quality_filters"],
+        split_summary=split_summary,
         params={**model_params, "num_boost_round": int(best_rounds)},
         feature_importance=_feature_importance(booster),
         metrics=metrics,
@@ -343,7 +374,8 @@ def _compute_fill_values(df: pd.DataFrame, feature_columns: list[str]) -> dict[s
 
 
 def _transform_frame(df: pd.DataFrame, feature_columns: list[str], fill_values: dict[str, float]) -> pd.DataFrame:
-    return df[feature_columns].apply(pd.to_numeric, errors="coerce").fillna(fill_values)
+    frame = df[feature_columns].apply(pd.to_numeric, errors="coerce").fillna(fill_values)
+    return frame.astype(float)
 
 
 def _build_dmatrix(df: pd.DataFrame, feature_columns: list[str], fill_values: dict[str, float], labels: np.ndarray):
@@ -403,13 +435,12 @@ def _walk_forward_clf(
 ) -> list[dict[str, Any]]:
     folds: list[dict[str, Any]] = []
     y_all = df[target_column].to_numpy(dtype=float)
-    embargo_rows = _embargo_rows_from_days(df, embargo_days)
 
-    for fold_number, train_start, train_end, test_start, test_end in _walk_forward_splits(
-        len(df),
+    for fold_number, train_start, train_end, test_start, test_end in _walk_forward_splits_by_timestamp(
+        df,
         fold_count=fold_count,
         min_train_rows=min_train_rows,
-        embargo_rows=embargo_rows,
+        embargo_days=embargo_days,
     ):
         train_df = df.iloc[train_start:train_end]
         test_df = df.iloc[test_start:test_end]
@@ -431,6 +462,7 @@ def _walk_forward_clf(
             "train_start": _row_timestamp(df, train_start),
             "train_end": _row_timestamp(df, train_end - 1),
             "embargo_rows": int(test_start - train_end),
+            "actual_gap_days": _gap_days(df, train_end - 1, test_start),
             "test_start": _row_timestamp(df, test_start),
             "test_end": _row_timestamp(df, test_end - 1),
             "train_rows": int(train_end - train_start),

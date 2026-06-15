@@ -1,6 +1,6 @@
 # ML Trade Pipeline
 
-Last updated: 2026-05-27
+Last updated: 2026-06-14
 
 This is the canonical offline evaluation funnel for ML-selected credit-spread trades. Training runs should be judged by this pipeline because it mirrors the intended live selection path.
 
@@ -8,10 +8,13 @@ This is the canonical offline evaluation funnel for ML-selected credit-spread tr
 
 1. Score candidate trades with the XGBoost ranker.
 2. Apply the large-loss classifier and eliminate candidates whose predicted tail-loss probability is above the configured cap.
-3. Apply portfolio gamma stress caps through the shared portfolio risk controls.
-4. Evaluate only trades that pass all gates.
+3. Apply the stop-loss classifier and eliminate candidates whose predicted stop-loss probability is above the configured cap.
+4. Apply portfolio and scanner controls through the shared portfolio risk controls when the goal is live-faithful execution evaluation.
+5. Evaluate only trades that pass all gates.
 
 The evaluator records this as `trade_pipeline_selection` in the JSON report. That is the final tradeable-selection metric block to compare across experiments.
+
+All train/test and walk-forward splits are now timestamp-based. `embargo_days` is enforced in calendar time for entry models and by grouped entry timestamp for intraday risk models, so the holdout gap reflects the actual forward horizon instead of an approximate row-count proxy.
 
 ## Current Champion: V006b
 
@@ -81,16 +84,18 @@ PYTHONPATH=. .venv/bin/python -m ml.models.evaluate_risk_adjusted_ranking \
   --input              artifacts/datasets/candidate_rows/dataset_version=<dataset_version> \
   --ranker-artifact    artifacts/models/xgboost_<version>.json \
   --large-loss-artifact artifacts/models/large_loss_classifier_<version>.json \
+  --stop-loss-artifact artifacts/models/stop_loss_classifier_<version>.json \
+  --runtime-config     config.json \
+  --apply-portfolio-risk-controls \
   --json-output        artifacts/models/risk_adjusted_<version>_eval.json
 ```
 
-Step 2 defaults to hard-filter mode: candidates with `p(large_loss) > 0.70` are vetoed outright.
-Portfolio controls are available via `--portfolio-risk-controls` for execution-layer simulation but
-are NOT part of training or exit-criteria evaluation — they collapse holdout rows to ~600 and destroy
-statistical power.
+Step 2 can now run in either mode:
 
-**Note:** `evaluate_risk_adjusted_ranking` does not accept a `--stop-loss-artifact` argument. The
-stop-loss classifier is a separate training artifact used for diagnostics only.
+- pure ML gates only: ranker -> large-loss gate -> stop-loss gate
+- live-faithful trade pipeline: ranker -> large-loss gate -> stop-loss gate -> portfolio controls
+
+Use the live-faithful mode when deciding whether a challenger is good enough to promote. Use the pure ML-gate mode when isolating model signal from portfolio allocation effects.
 
 ## Report Fields
 
@@ -99,9 +104,11 @@ Use these fields when deciding whether a model is improving:
 ```text
 raw_selection                 # XGBoost top-selection before gates
 large_loss_gate_selection     # after large-loss classifier threshold
-trade_pipeline_selection      # after large-loss gate and portfolio gamma stress caps
+stop_loss_gate_selection      # after stop-loss classifier threshold
+trade_pipeline_selection      # after both ML gates and optional portfolio controls
 trade_pipeline_deltas         # change from raw_selection to final pipeline
 trade_pipeline_eligible_rows  # number of rows that passed all gates
+trade_pipeline                # stage order, applied thresholds, account capital
 ```
 
 Older fields such as `risk_adjusted_selection` and `portfolio_risk_selection` remain for comparison, but they are not the canonical promotion metric unless explicitly chosen for an experiment.
@@ -117,3 +124,15 @@ Do not promote a model based only on ranker metrics. A candidate must:
 Register the model artifact with `ml.models.registry.register_model_artifact`, then call
 `ml.models.registry.promote_model` to make it the champion. The live scanner loads the champion
 automatically from `artifacts/model_registry.json`.
+
+## Provenance Expectations
+
+Every promoted artifact should now carry enough provenance to reconstruct the run:
+
+- dataset root path, manifest path, manifest hash, and dataset metadata
+- exact training command
+- applied data-quality filters and filter drop counts
+- split summary including requested and actual embargo gap
+- data fingerprint derived from dataset identity plus split metadata
+
+If an artifact is missing that metadata, treat it as incomplete for promotion purposes.

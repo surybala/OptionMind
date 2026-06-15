@@ -91,8 +91,6 @@ def _dashboard_regime(config: dict) -> dict:
     return {
         "label": result.label,
         "quantity_multiplier": result.quantity_multiplier,
-        "top_n_multiplier": result.top_n_multiplier,
-        "pause_new_trades": result.pause_new_trades,
         "reasons": result.reasons,
         "metrics": result.metrics,
     }

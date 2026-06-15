@@ -2239,16 +2239,11 @@ function renderRegime(regime) {
     subEl.textContent = 'filter disabled';
     return;
   }
-  if (regime.pause_new_trades) {
-    subEl.textContent = 'new trades paused';
-    return;
-  }
   const qty = Math.round((regime.quantity_multiplier ?? 1) * 100);
-  const topN = Math.round((regime.top_n_multiplier ?? 1) * 100);
   const reason = Array.isArray(regime.reasons) && regime.reasons.length
     ? ` · ${regime.reasons[0]}`
     : '';
-  subEl.textContent = `qty ${qty}% · top-N ${topN}%${reason}`;
+  subEl.textContent = `qty ${qty}%${reason}`;
 }
 
 function renderPortfolioRisk(summary) {

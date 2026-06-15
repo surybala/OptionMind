@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
+import sys
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,18 +16,20 @@ import pandas as pd
 from ml.datasets.audit_candidate_dataset import load_dataset
 from ml.models.train_baseline import (
     _artifact_metadata,
-    _embargo_rows_from_days,
+    _artifact_fingerprint,
+    _chronological_holdout_split,
     _empty_test_metrics,
     _engineer_features,
     _evaluation_metrics,
     _feature_importance,
+    _gap_days,
     _max_drawdown,
     _prefixed_metrics,
     _profit_factor,
     _row_timestamp,
     _select_feature_columns,
     _split_index,
-    _walk_forward_splits,
+    _walk_forward_splits_by_timestamp,
     _walk_forward_summary,
 )
 
@@ -62,6 +66,11 @@ class XGBoostModelArtifact:
     fill_values: dict[str, float]
     train_rows: int
     test_rows: int
+    dataset: dict[str, Any]
+    training_command: str | None
+    data_fingerprint: str
+    data_quality_filters: dict[str, Any]
+    split_summary: dict[str, Any]
     params: dict[str, Any]
     loss_config: dict[str, float]
     feature_importance: dict[str, float]
@@ -157,6 +166,8 @@ def main() -> int:
     artifact = train_xgboost(
         df,
         model_output=model_output,
+        dataset_path=str(args.input),
+        training_command=_argv_command(),
         target_column=args.target,
         test_fraction=args.test_fraction,
         min_rows=args.min_rows,
@@ -194,7 +205,9 @@ def train_xgboost(
     df: pd.DataFrame,
     *,
     model_output: Path,
-    target_column: str = "return_on_risk",
+    dataset_path: str | None = None,
+    training_command: str | None = None,
+    target_column: str = "expected_pnl",
     test_fraction: float = 0.25,
     min_rows: int = 20,
     walk_forward_folds: int = 3,
@@ -242,32 +255,37 @@ def train_xgboost(
     y_all = clean[target_column].to_numpy(dtype=float)
     loss = loss_config or AsymmetricLossConfig()
     y_model_all = _transform_target(y_all, loss)
-    split_index = _split_index(len(clean), test_fraction)
+    train_df, test_df, split_summary = _chronological_holdout_split(
+        clean,
+        test_fraction=test_fraction,
+        embargo_days=embargo_days,
+    )
 
     # Hold out the last val_fraction of training rows as a validation set for
     # early stopping. Fill values are always derived from the full training set.
-    _, fill_values = _fit_xgb_frame(clean.iloc[:split_index], feature_columns)
-    val_split_index = _split_index(split_index, val_fraction) if val_fraction > 0 and split_index > 1 else split_index
+    _, fill_values = _fit_xgb_frame(train_df, feature_columns)
+    train_count = len(train_df)
+    val_split_index = _split_index(train_count, val_fraction) if val_fraction > 0 and train_count > 1 else train_count
 
     # High-vol oversampling: replicate vix_regime >= 2 rows in the training split
     # only. The test split is never oversampled so evaluation reflects real distribution.
-    train_df_sub = clean.iloc[:val_split_index]
+    train_df_sub = train_df.iloc[:val_split_index]
     if high_vol_oversample_factor > 1:
         train_df_sub = _oversample_high_vol(train_df_sub, high_vol_oversample_factor)
     if high_vol_oversample_factor > 1:
         y_sub_oversampled = train_df_sub[target_column].to_numpy(dtype=float)
         y_train_sub = _transform_target(y_sub_oversampled, loss)
     else:
-        y_train_sub = y_model_all[:val_split_index]
+        y_train_sub = _transform_target(train_df.iloc[:val_split_index][target_column].to_numpy(dtype=float), loss)
 
     x_train_sub = _transform_xgb_frame(train_df_sub, feature_columns, fill_values)
-    x_val = _transform_xgb_frame(clean.iloc[val_split_index:split_index], feature_columns, fill_values)
-    x_train = _transform_xgb_frame(clean.iloc[:split_index], feature_columns, fill_values)
-    x_test = _transform_xgb_frame(clean.iloc[split_index:], feature_columns, fill_values)
+    x_val = _transform_xgb_frame(train_df.iloc[val_split_index:], feature_columns, fill_values)
+    x_train = _transform_xgb_frame(train_df, feature_columns, fill_values)
+    x_test = _transform_xgb_frame(test_df, feature_columns, fill_values)
 
-    y_val = y_model_all[val_split_index:split_index]
-    y_train = y_all[:split_index]
-    y_test = y_all[split_index:]
+    y_val = _transform_target(train_df.iloc[val_split_index:][target_column].to_numpy(dtype=float), loss)
+    y_train = train_df[target_column].to_numpy(dtype=float)
+    y_test = test_df[target_column].to_numpy(dtype=float)
 
     model_params = _default_params()
     if params:
@@ -283,11 +301,11 @@ def train_xgboost(
     test_pred = _inverse_transform_target(_predict_model(booster, x_test), loss) if len(x_test) else np.array([])
 
     train_metrics = _evaluation_metrics(y_train, train_pred)
-    train_metrics.update(_credit_spread_selection_metrics(clean.iloc[:split_index], train_pred))
+    train_metrics.update(_credit_spread_selection_metrics(train_df, train_pred))
     metrics = _prefixed_metrics("train", train_metrics)
     if len(x_test):
         test_metrics = _evaluation_metrics(y_test, test_pred)
-        test_metrics.update(_credit_spread_selection_metrics(clean.iloc[split_index:], test_pred))
+        test_metrics.update(_credit_spread_selection_metrics(test_df, test_pred))
         metrics.update(_prefixed_metrics("test", test_metrics))
     else:
         metrics.update(_empty_test_metrics("test"))
@@ -297,7 +315,7 @@ def train_xgboost(
         target_column=target_column,
         feature_columns=feature_columns,
         fold_count=walk_forward_folds,
-        min_train_rows=min_walk_forward_train_rows or max(min_rows, split_index),
+        min_train_rows=min_walk_forward_train_rows or max(min_rows, len(train_df)),
         params=model_params,
         num_boost_round=best_iteration,
         loss_config=loss,
@@ -308,6 +326,9 @@ def train_xgboost(
     model_output.parent.mkdir(parents=True, exist_ok=True)
     booster.save_model(model_output)
     artifact_metadata = _artifact_metadata(clean)
+    dataset_info = dict(artifact_metadata["dataset"])
+    if dataset_path:
+        dataset_info["input_path"] = dataset_path
     return XGBoostModelArtifact(
         model_type="xgboost_asymmetric_pseudohuber_v002",
         created_at=datetime.now(UTC).isoformat(),
@@ -320,6 +341,17 @@ def train_xgboost(
         fill_values=fill_values,
         train_rows=int(len(y_train)),
         test_rows=int(len(y_test)),
+        dataset=dataset_info,
+        training_command=training_command,
+        data_fingerprint=_artifact_fingerprint(
+            dataset=dataset_info,
+            target_column=target_column,
+            feature_columns=feature_columns,
+            data_quality_filters=artifact_metadata["data_quality_filters"],
+            split_summary=split_summary,
+        ),
+        data_quality_filters=artifact_metadata["data_quality_filters"],
+        split_summary=split_summary,
         params={**model_params, "num_boost_round": int(best_iteration)},
         loss_config=asdict(loss),
         feature_importance=_feature_importance(booster),
@@ -475,12 +507,11 @@ def _walk_forward_validation(
     folds: list[dict[str, Any]] = []
     y_all = df[target_column].to_numpy(dtype=float)
     y_model_all = _transform_target(y_all, loss_config)
-    embargo_rows = _embargo_rows_from_days(df, embargo_days)
-    for fold_number, train_start, train_end, test_start, test_end in _walk_forward_splits(
-        len(df),
+    for fold_number, train_start, train_end, test_start, test_end in _walk_forward_splits_by_timestamp(
+        df,
         fold_count=fold_count,
         min_train_rows=min_train_rows,
-        embargo_rows=embargo_rows,
+        embargo_days=embargo_days,
     ):
         x_train, fold_fill_values = _fit_xgb_frame(df.iloc[train_start:train_end], feature_columns)
         x_test = _transform_xgb_frame(df.iloc[test_start:test_end], feature_columns, fold_fill_values)
@@ -500,6 +531,7 @@ def _walk_forward_validation(
                 "train_start": _row_timestamp(df, train_start),
                 "train_end": _row_timestamp(df, train_end - 1),
                 "embargo_rows": int(test_start - train_end),
+                "actual_gap_days": _gap_days(df, train_end - 1, test_start),
                 "test_start": _row_timestamp(df, test_start),
                 "test_end": _row_timestamp(df, test_end - 1),
                 "train_rows": int(train_end - train_start),
@@ -617,6 +649,10 @@ def _oversample_high_vol(df: pd.DataFrame, factor: int) -> pd.DataFrame:
         flush=True,
     )
     return replicated
+
+
+def _argv_command() -> str:
+    return " ".join(shlex.quote(part) for part in sys.argv)
 
 if __name__ == "__main__":
     raise SystemExit(main())

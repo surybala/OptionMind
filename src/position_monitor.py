@@ -485,21 +485,7 @@ class PositionMonitor:
         )
 
         contracts = int(pos.get('contracts') or 1)
-        # Trigger 1: profit-take (happy-path exit — lock in captured premium)
-        pt_signal = self._profit_take_rule.evaluate(entry_premium, current_mark, pnl_per_share, spot, pos)
-        if pt_signal:
-            pnl_dollars  = round(pnl_per_share * 100 * contracts, 2)
-            captured_pct = round(pnl_per_share / entry_premium * 100, 1)
-            tag = "[DRY RUN]" if dry_run else "[LIVE]"
-            print(f"{status_str}  profit_captured={captured_pct}%  → PROFIT-TAKE TRIGGERED {tag}")
-            pos['entry_premium']      = entry_premium
-            pos['current_mark']       = current_mark
-            pos['pnl_per_share']      = pnl_per_share
-            pos['profit_captured_pct'] = captured_pct
-            pos['profit_take_pct']    = self._pt_pct
-            return self._execute_close(pos, current_mark, pnl_dollars, 'PROFIT_TAKE', dry_run)
-
-        # Trigger 2: ML exit-risk model (primary proactive drawdown guard)
+        # Trigger 1: ML exit-risk model (primary proactive drawdown guard)
         if self._ml_exit_risk.is_active():
             metrics = _load_metrics()
             risk = metrics[1] if metrics is not None else None
@@ -543,6 +529,20 @@ class PositionMonitor:
                             self._ml_exit_risk.reason_tag,
                             dry_run,
                         )
+
+        # Trigger 2: profit-take (happy-path exit — lock in captured premium)
+        pt_signal = self._profit_take_rule.evaluate(entry_premium, current_mark, pnl_per_share, spot, pos)
+        if pt_signal:
+            pnl_dollars  = round(pnl_per_share * 100 * contracts, 2)
+            captured_pct = round(pnl_per_share / entry_premium * 100, 1)
+            tag = "[DRY RUN]" if dry_run else "[LIVE]"
+            print(f"{status_str}  profit_captured={captured_pct}%  → PROFIT-TAKE TRIGGERED {tag}")
+            pos['entry_premium']      = entry_premium
+            pos['current_mark']       = current_mark
+            pos['pnl_per_share']      = pnl_per_share
+            pos['profit_captured_pct'] = captured_pct
+            pos['profit_take_pct']    = self._pt_pct
+            return self._execute_close(pos, current_mark, pnl_dollars, 'PROFIT_TAKE', dry_run)
 
         # Trigger 3: deterministic stop-loss fallback
         sl_signal = self._stop_loss_rule.evaluate(entry_premium, current_mark, pnl_per_share, spot, pos)

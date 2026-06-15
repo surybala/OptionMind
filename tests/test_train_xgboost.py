@@ -86,6 +86,22 @@ def test_train_xgboost_embargo_reflected_in_walk_forward(tmp_path):
     assert artifact.walk_forward[0]["embargo_rows"] == 0
 
 
+def test_train_xgboost_holdout_uses_timestamp_embargo(tmp_path):
+    artifact = train_xgboost(
+        _frame(),
+        model_output=tmp_path / "model.json",
+        min_rows=4,
+        test_fraction=0.25,
+        walk_forward_folds=1,
+        num_boost_round=5,
+        embargo_days=2,
+        val_fraction=0.0,
+    )
+
+    assert artifact.split_summary["actual_gap_days"] is not None
+    assert artifact.split_summary["actual_gap_days"] >= 2.0
+
+
 def test_train_xgboost_requires_labeled_rows(tmp_path):
     with pytest.raises(ValueError, match="Need at least"):
         train_xgboost(pd.DataFrame([{"dte": 1, "expected_pnl": None}]), model_output=tmp_path / "model.json")

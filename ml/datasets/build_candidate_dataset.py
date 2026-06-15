@@ -9,8 +9,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
+import pandas as pd
 
 from ml.datasets import CandidateDatasetConfig, HistoricalCandidateDatasetBuilder
+from ml.datasets.candidate_data_quality import (
+    CandidateQualityFilterConfig,
+    apply_candidate_quality_filters,
+)
 from ml.datasets.candidate_dataset import CandidateDatasetRow
 from ml.datasets.etf_universe import broad_etf_underlyings, stable_etf_underlyings
 from ml.providers import AlpacaProvider, FMPProvider, FREDProvider, MassiveProvider, ParquetMinuteBarProvider, YFinanceProvider
@@ -94,6 +99,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-forward-bars", type=int, default=5)
     parser.add_argument("--min-option-entry-price", type=float, default=0.05, help="Skip entry bars whose close is at or below this value (penny/junk option filter).")
     parser.add_argument("--min-option-entry-volume", type=int, default=1, help="Skip entry bars with volume below this threshold (zero-volume stale quote filter).")
+    parser.add_argument("--min-option-entry-trade-count", type=int, default=1, help="Skip entry bars with too few prints to trust the close as executable.")
+    parser.add_argument("--min-max-loss-dollars", type=float, default=25.0, help="Drop spread rows whose defined max loss is below this dollar threshold.")
+    parser.add_argument("--max-credit-to-width", type=float, default=0.90, help="Drop spread rows whose credit_to_width exceeds this cap.")
+    parser.add_argument("--min-short-leg-volume", type=float, default=5.0, help="Drop spread rows whose short-leg entry volume is below this threshold.")
+    parser.add_argument("--min-long-leg-volume", type=float, default=5.0, help="Drop spread rows whose long-leg entry volume is below this threshold.")
+    parser.add_argument("--min-short-leg-trade-count", type=int, default=2, help="Drop spread rows whose short-leg trade count is below this threshold.")
+    parser.add_argument("--min-long-leg-trade-count", type=int, default=2, help="Drop spread rows whose long-leg trade count is below this threshold.")
     parser.add_argument("--sample-every-n-bars", type=int, default=1)
     parser.add_argument("--stock-lookback-days", type=int, default=60)
     parser.add_argument(
@@ -236,10 +248,19 @@ def main() -> int:
         profit_take_pct=0.75,
         min_option_entry_price=args.min_option_entry_price,
         min_option_entry_volume=args.min_option_entry_volume,
+        min_option_entry_trade_count=args.min_option_entry_trade_count,
         max_workers=args.max_workers,
         build_window_days=args.build_window_days,
         stock_timeframe=args.stock_timeframe,
         option_timeframe=args.option_timeframe,
+    )
+    quality_filters = CandidateQualityFilterConfig(
+        min_max_loss_dollars=args.min_max_loss_dollars,
+        max_credit_to_width=args.max_credit_to_width,
+        min_short_leg_volume=args.min_short_leg_volume,
+        min_long_leg_volume=args.min_long_leg_volume,
+        min_short_leg_trade_count=args.min_short_leg_trade_count,
+        min_long_leg_trade_count=args.min_long_leg_trade_count,
     )
     rows = HistoricalCandidateDatasetBuilder(
         stock_provider,
@@ -250,6 +271,11 @@ def main() -> int:
         economic_provider=economic_provider,
         volatility_provider=volatility_provider,
     ).build(config)
+    filtered_rows, quality_stats = apply_candidate_quality_filters(
+        _rows_to_frame(rows),
+        quality_filters,
+    )
+    rows = [CandidateDatasetRow(**record) for record in filtered_rows.drop(columns=["entry_date"], errors="ignore").to_dict("records")]
     result = ParquetDatasetWriter(root_dir=args.output_dir).write(
         rows,
         dataset_version=args.dataset_version,
@@ -271,6 +297,7 @@ def main() -> int:
             "min_forward_bars": config.min_forward_bars,
             "min_option_entry_price": config.min_option_entry_price,
             "min_option_entry_volume": config.min_option_entry_volume,
+            "min_option_entry_trade_count": config.min_option_entry_trade_count,
             "profit_take_pct": config.profit_take_pct,
             "sample_every_n_bars": config.sample_every_n_bars,
             "stock_lookback_days": config.stock_lookback_days,
@@ -278,12 +305,14 @@ def main() -> int:
             "option_timeframe": config.option_timeframe,
             "market_regime_symbol": config.market_regime_symbol,
             "build_window_days": config.build_window_days,
-            "feature_set_version": "features_v005",
+            "feature_set_version": "features_v006",
             "label_version": config.label_version,
             "strategy_family": config.strategy_family,
             "strategy_types": list(config.strategy_types),
             "spread_widths": list(config.spread_widths),
             "spread_stop_loss_max_loss_pct": config.spread_stop_loss_max_loss_pct,
+            "data_quality_filters": quality_filters.to_metadata(),
+            "data_quality_filter_stats": quality_stats,
             "economic_calendar": args.economic_calendar,
             "event_provider": args.event_provider,
             "dividend_provider": args.dividend_provider,
@@ -317,6 +346,15 @@ def _write_jsonl(rows, output: Path) -> None:
     with output.open("w", encoding="utf-8") as fh:
         for row in rows:
             fh.write(json.dumps(asdict(row), default=str) + "\n")
+
+
+def _rows_to_frame(rows: list[CandidateDatasetRow]):
+    payload = []
+    for row in rows:
+        item = asdict(row)
+        item["entry_date"] = row.entry_timestamp.date().isoformat()
+        payload.append(item)
+    return pd.DataFrame(payload)
 
 
 def _underlyings_from_args(args: argparse.Namespace) -> list[str]:

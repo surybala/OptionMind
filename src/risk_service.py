@@ -11,9 +11,11 @@ HFT awareness
 -------------
 When ``hft_mode: true`` in config the DataAdapter returns
 ``chain.has_broker_greeks=True`` and broker-supplied delta/gamma/theta from
-Alpaca snapshots are used directly.  When ``hft_mode: false`` (default) Greek
-values are computed locally via Black-Scholes from the implied volatility in
-the yfinance/Alpaca option chain.
+Alpaca snapshots are used directly when available. Missing snapshot Greeks
+fall back to Black-Scholes estimates from snapshot implied volatility so the
+portfolio gamma gate can keep running outside fully-priced broker conditions.
+When ``hft_mode: false`` (default) Greek values are computed locally via
+Black-Scholes from the implied volatility in the yfinance/Alpaca option chain.
 
 Usage
 -----
@@ -237,13 +239,14 @@ class PositionRiskService:
 
             if chain.has_broker_greeks:
                 greeks_legs = self._build_greeks_legs_from_snapshots(
-                    pos, chain.leg_specs, chain.osi_map, chain.snapshots
+                    pos, chain.leg_specs, chain.osi_map, chain.snapshots, spot, dte
                 )
                 if not greeks_legs:
                     if self._gamma_risk_enabled:
                         _log.warning(
-                            "[HFT] pos %s (%s/%s): all legs missing broker greeks — "
-                            "gamma-risk check skipped; price-based stop-loss still active",
+                            "[HFT] pos %s (%s/%s): all legs missing broker Greeks and "
+                            "IV fallback inputs — gamma-risk check skipped; "
+                            "price-based stop-loss still active",
                             pos.get('id', '?'), pos.get('symbol', '?'), pos.get('type', '?'),
                         )
                     return None
@@ -305,14 +308,33 @@ class PositionRiskService:
         leg_specs: list,
         osi_map: dict,
         snapshots: dict,
+        spot: Optional[float],
+        dte: int,
     ) -> list[dict]:
         """
         Build ``legs_with_greeks`` from Alpaca snapshot rows (HFT path).
 
         Returns a list compatible with ``position_risk_score_from_greeks()``:
         ``[{'delta', 'gamma', 'theta', 'position'}, …]``.
-        Skips any leg whose snapshot lacks Greek data (logs a warning).
+        Uses broker Greeks when present, otherwise falls back to IV-based
+        Black-Scholes estimates from the snapshot row.
         """
+        from src.greeks import bs_greeks
+
+        def _estimate_from_snapshot(row: dict, strike: float, opt_type: str) -> Optional[dict]:
+            raw = (
+                row.get('impliedVolatility')
+                if hasattr(row, 'get')
+                else getattr(row, 'impliedVolatility', None)
+            )
+            try:
+                iv = float(raw) if raw is not None else 0.0
+            except (TypeError, ValueError):
+                iv = 0.0
+            if iv <= 0 or spot is None or spot <= 0 or dte <= 0:
+                return None
+            return bs_greeks(float(spot), float(strike), iv, float(dte), opt_type)
+
         legs = []
         for strike, opt_type, position_side in leg_specs:
             osi = osi_map.get((strike, opt_type))
@@ -333,23 +355,37 @@ class PositionRiskService:
             theta = row.get('theta')
             vega = row.get('vega')
 
-            if delta is None or gamma is None or theta is None:
-                if self._gamma_risk_enabled:
-                    _log.warning(
-                        "[HFT] broker greeks are None for %s (pos %s) — "
-                        "likely outside market hours or contract not priced by Alpaca; "
-                        "leg skipped from gamma check",
-                        osi, pos.get('id', '?'),
-                    )
+            if delta is not None and gamma is not None and theta is not None:
+                legs.append({
+                    'delta':    float(delta),
+                    'gamma':    float(gamma),
+                    'theta':    float(theta),
+                    'vega':     float(vega or 0.0),
+                    'position': position_side,
+                })
                 continue
 
-            legs.append({
-                'delta':    float(delta),
-                'gamma':    float(gamma),
-                'theta':    float(theta),
-                'vega':     float(vega or 0.0),
-                'position': position_side,
-            })
+            estimated = _estimate_from_snapshot(row, strike, opt_type)
+            if estimated is not None:
+                _log.debug(
+                    "[HFT] broker Greeks missing for %s (pos %s) — using IV-based estimate",
+                    osi, pos.get('id', '?'),
+                )
+                legs.append({
+                    'delta':    float(estimated['delta']),
+                    'gamma':    float(estimated['gamma']),
+                    'theta':    float(estimated['theta']),
+                    'vega':     float(estimated['vega']),
+                    'position': position_side,
+                })
+                continue
+
+            if self._gamma_risk_enabled:
+                _log.warning(
+                    "[HFT] broker Greeks missing and IV fallback unavailable for %s "
+                    "(pos %s) — leg skipped from gamma check",
+                    osi, pos.get('id', '?'),
+                )
         return legs
 
     # ── Risk classification ───────────────────────────────────────────────────

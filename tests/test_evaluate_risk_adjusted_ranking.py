@@ -8,11 +8,13 @@ Covers:
 """
 import numpy as np
 import pandas as pd
+from pathlib import Path
 
 from ml.models.evaluate_risk_adjusted_ranking import (
     RiskAdjustedConfig,
     apply_large_loss_gate,
     compute_sortino_score,
+    evaluate_risk_adjusted_ranking,
 )
 
 
@@ -192,3 +194,80 @@ class TestComputeSortinoScore:
 
         assert np.isfinite(result.iloc[0])
         assert result.iloc[0] > 0
+
+
+def test_evaluate_risk_adjusted_ranking_handles_dict_portfolio_diagnostics(monkeypatch, tmp_path):
+    frame = pd.DataFrame(
+        {
+            "prediction": [0.9, 0.5, 0.1],
+            "realized_pnl_per_contract": [100.0, -50.0, 25.0],
+            "return_on_risk": [0.2, -0.1, 0.05],
+            "large_loss_label": [0, 1, 0],
+            "stop_loss_hit": [0, 1, 0],
+            "entry_timestamp": [
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-02T00:00:00+00:00",
+                "2026-01-03T00:00:00+00:00",
+            ],
+            "strategy": ["PCS", "PCS", "CCS"],
+            "dte": [14, 14, 14],
+            "underlying_close": [500.0, 500.0, 500.0],
+            "short_strike": [495.0, 495.0, 505.0],
+            "long_strike": [490.0, 490.0, 510.0],
+            "entry_credit": [1.0, 1.0, 1.0],
+            "implied_volatility": [0.2, 0.2, 0.2],
+        }
+    )
+    artifact_path = tmp_path / "artifact.json"
+    artifact_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "ml.models.evaluate_risk_adjusted_ranking.load_dataset",
+        lambda path: frame.copy(),
+    )
+    monkeypatch.setattr(
+        "ml.models.evaluate_risk_adjusted_ranking._score_holdout",
+        lambda df, artifact: df.copy(),
+    )
+    monkeypatch.setattr(
+        "ml.models.evaluate_risk_adjusted_ranking._selection_metrics",
+        lambda df, score_column, cfg: {
+            "selected_rows": int(np.isfinite(pd.to_numeric(df[score_column], errors="coerce")).sum()),
+            "mean_pnl": round(float(df["realized_pnl_per_contract"].mean()), 6),
+            "profit_factor": 1.0,
+            "win_rate": 0.5,
+        },
+    )
+    monkeypatch.setattr(
+        "ml.models.evaluate_risk_adjusted_ranking._score_classifier",
+        lambda df, path: np.array([0.1, 0.8, 0.2]) if "large_loss" in str(path) else np.array([0.1, 0.2, 0.9]),
+    )
+    monkeypatch.setattr(
+        "ml.models.evaluate_risk_adjusted_ranking.load_config",
+        lambda path: {"ml_scanner": {"large_loss_veto_threshold": 0.6, "stop_loss_veto_threshold": 0.3}},
+    )
+
+    def _fake_controls(df, score_column, **kwargs):
+        diagnostics = {
+            "gate_stage": pd.Series(["selected", "portfolio_gamma", "selected"], index=df.index, dtype="string"),
+            "gate_reason": pd.Series([pd.NA, "gamma", pd.NA], index=df.index, dtype="string"),
+            "gate_stage_counts": {"selected": 2, "portfolio_gamma": 1},
+        }
+        return pd.to_numeric(df[score_column], errors="coerce").fillna(float("-inf")), diagnostics
+
+    monkeypatch.setattr(
+        "ml.models.evaluate_risk_adjusted_ranking.apply_portfolio_risk_controls",
+        _fake_controls,
+    )
+
+    report = evaluate_risk_adjusted_ranking(
+        Path("dummy"),
+        artifact_path,
+        large_loss_artifact=Path("large_loss.json"),
+        stop_loss_artifact=Path("stop_loss.json"),
+        runtime_config_path=Path("config.json"),
+        config=RiskAdjustedConfig(apply_portfolio_risk_controls=True),
+    )
+
+    assert report["trade_pipeline"]["portfolio_controls_applied"] is True
+    assert report["trade_pipeline"]["portfolio_diagnostics_summary"]["gate_stage_counts"]["selected"] == 2

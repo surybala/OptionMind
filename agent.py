@@ -67,11 +67,9 @@ from src.utils import get_logger, load_config
 
 # ── Extracted modules ────────────────────────────────────────────────────────
 from src.agent_risk import (
+    apply_ml_position_sizing,
+    apply_ml_quantity_overlays,
     capital_for_pick,
-    max_loss_multiple as max_loss_multiple_for_pick,
-    filter_max_loss_multiple,
-    apply_portfolio_gamma_risk,
-    apply_regime_quantity_multiplier,
 )
 from src.agent_audit import (
     mispricing_score as mispricing_score_for_pick,
@@ -94,6 +92,10 @@ from src.agent_market import (
     fetch_vix,
     evaluate_regime_filter,
     reconcile_positions_before_budget,
+)
+from src.pick_identity import (
+    pick_contract_signature,
+    position_contract_signature,
 )
 
 log = get_logger()
@@ -671,9 +673,8 @@ def _run_once(args, headless: bool = False) -> None:
     pending_close_positions = db.get_pending_close_positions()
     capital_positions = open_positions + pending_close_positions
 
-    # Keys used to deduplicate new picks: same symbol + strategy already held
-    open_keys: set[tuple[str, str]] = {
-        (p['symbol'], p['type']) for p in capital_positions
+    open_contract_signatures = {
+        position_contract_signature(p) for p in capital_positions
     }
 
     # Capital already committed to open positions — subtracted from budget
@@ -688,20 +689,6 @@ def _run_once(args, headless: bool = False) -> None:
     regime = evaluate_regime_filter(config, current_vix=current_vix)
     if hasattr(scanner, 'set_runtime_regime'):
         scanner.set_runtime_regime(regime)
-    if regime.pause_new_trades:
-        log.warning(
-            "Regime filter is RED — skipping new trades this run. Existing "
-            "positions were still monitored and reconciled."
-        )
-        return
-
-    scan_top_n = top_n
-    if regime.top_n_multiplier < 1.0:
-        scan_top_n = max(1, int(top_n * regime.top_n_multiplier))
-        log.info(
-            "Regime filter reduced candidate top-N from %d to %d.",
-            top_n, scan_top_n,
-        )
 
     # ── Load ticker universe ──────────────────────────────────────────────────
     tickers = _load_tickers(args, config)
@@ -712,9 +699,9 @@ def _run_once(args, headless: bool = False) -> None:
     # ── Candidate scoring ─────────────────────────────────────────────────────
     log.info(
         "Requesting up to %d ML-ranked candidates from %d tickers ...",
-        scan_top_n, len(tickers),
+        top_n, len(tickers),
     )
-    picks = scanner.get_top_picks(tickers, n=scan_top_n)
+    picks = scanner.get_top_picks(tickers, n=top_n)
     for _p in picks:
         _p.setdefault('source', 'ml_model')
     risk_rejected: list[dict] = []
@@ -729,28 +716,32 @@ def _run_once(args, headless: bool = False) -> None:
         write_scan_audit([], [], db=db)
         return
 
-    # ── Deduplicate against open positions ───────────────────────────────────
-    if open_keys:
+    # ── Reject exact duplicate contracts already in the open book ────────────
+    if capital_positions:
         kept_picks: list[dict] = []
-        skipped = 0
+        exact_skipped = 0
+        seen_contract_signatures = set(open_contract_signatures)
         for p in picks:
-            if (p['symbol'], p['strategy']) in open_keys:
+            contract_signature = pick_contract_signature(p)
+            if contract_signature in seen_contract_signatures:
                 item = dict(p)
                 item['filtered_stage'] = 'Open-position dedup'
-                item['reject_reason'] = 'Same symbol and strategy already held as an open or pending-close position'
+                item['reject_reason'] = 'Same symbol, strategy, expiry, and strikes already held as an open or pending-close position'
                 item['mispricing_score'] = mispricing_score_for_pick(item)
                 risk_rejected.append(item)
-                skipped += 1
-            else:
-                kept_picks.append(p)
+                exact_skipped += 1
+                continue
+            kept_picks.append(p)
+            seen_contract_signatures.add(contract_signature)
         picks = kept_picks
-        if skipped:
+        if exact_skipped:
             log.info(
-                f"Dedup: skipped {skipped} pick(s) already held as open positions."
+                "Open-position entry policy: skipped %d exact duplicate pick(s).",
+                exact_skipped,
             )
 
     if not picks:
-        log.info("All picks are already held as open positions — nothing new to trade.")
+        log.info("No picks survived the open-position entry policy — nothing new to trade.")
         write_scan_audit([], risk_rejected, db=db)
         return
 
@@ -764,23 +755,6 @@ def _run_once(args, headless: bool = False) -> None:
         risk_rejected.append(_pick)
     if not picks:
         log.info("No picks survived pre-flight contract validation — nothing to trade.")
-        write_scan_audit([], risk_rejected, db=db)
-        return
-
-    before_gate = list(picks)
-    picks = filter_max_loss_multiple(picks, config)
-    capture_rejections(
-        before_gate,
-        picks,
-        'Max-loss multiple',
-        lambda p: (
-            f"Max-loss multiple {p.get('max_loss_multiple', max_loss_multiple_for_pick(p)):.2f}x "
-            "exceeded configured limit"
-        ),
-        risk_rejected,
-    )
-    if not picks:
-        log.info("No picks survived max-loss multiple filtering — nothing to trade.")
         write_scan_audit([], risk_rejected, db=db)
         return
 
@@ -803,7 +777,6 @@ def _run_once(args, headless: bool = False) -> None:
                 risk_rejected.append(_item)
             write_scan_audit([], risk_rejected, db=db)
             return
-        max_contracts = int(config.get('max_contracts_per_pick', 50))
         picks_sorted  = sorted(picks, key=lambda x: x.get('score', 0.0), reverse=True)
         # Keep only picks we can afford at least 1 contract of
         affordable = [p for p in picks_sorted if capital_for_pick(p) <= remaining_budget]
@@ -818,50 +791,65 @@ def _run_once(args, headless: bool = False) -> None:
             log.info("No picks fit within the remaining capital budget.")
             write_scan_audit([], risk_rejected, db=db)
             return
-        # Equal-split remaining budget across affordable picks, then size each
-        per_pick_alloc = remaining_budget / len(affordable)
-        new_deployed   = 0.0
-        for p in affordable:
-            cap = capital_for_pick(p)
-            qty = max(1, int(per_pick_alloc // cap))
-            qty = min(qty, max_contracts)
-            p['quantity'] = qty
-            new_deployed += cap * qty
-        log.info(
-            f"Capital budget: {len(affordable)} picks, {sum(p['quantity'] for p in affordable)} "
-            f"total contracts — ${new_deployed:,.0f} of ${remaining_budget:,.0f} available deployed "
-            f"(max {max_contracts} contracts/pick)"
-        )
-        picks = affordable
 
-    picks = apply_regime_quantity_multiplier(picks, regime)
-    if not picks:
-        log.info("No picks survived regime quantity throttle — nothing to trade.")
-        write_scan_audit([], risk_rejected, db=db)
-        return
+        account_capital = config.get('account_capital') or capital_budget
+        affordable = apply_ml_position_sizing(
+            affordable,
+            config,
+            max_contracts=int(config.get('max_contracts_per_pick', 50) or 50),
+        )
+        picks, overlay_rejected = apply_ml_quantity_overlays(
+            affordable,
+            capital_positions,
+            config,
+            account_capital=account_capital,
+            available_capital=remaining_budget,
+            regime=regime,
+            max_contracts=int(config.get('max_contracts_per_pick', 50) or 50),
+        )
+        for item in overlay_rejected:
+            item['mispricing_score'] = mispricing_score_for_pick(item)
+            risk_rejected.append(item)
+        if not picks:
+            log.info("No picks survived ML-aligned quantity overlays.")
+            write_scan_audit([], risk_rejected, db=db)
+            return
+        new_deployed = sum(capital_for_pick(p) * int(p.get('quantity') or 1) for p in picks)
+        log.info(
+            f"Capital budget: {len(picks)} picks, {sum(p['quantity'] for p in picks)} "
+            f"total contracts — ${new_deployed:,.0f} of ${remaining_budget:,.0f} available deployed "
+            f"(score-ordered, max {int(config.get('max_contracts_per_pick', 50) or 50)} contracts/pick)"
+        )
+    else:
+        account_capital = config.get('account_capital')
+        picks = apply_ml_position_sizing(
+            picks,
+            config,
+            max_contracts=int(config.get('max_contracts_per_pick', 50) or 50),
+        )
+        picks, overlay_rejected = apply_ml_quantity_overlays(
+            picks,
+            capital_positions,
+            config,
+            account_capital=account_capital,
+            available_capital=None,
+            regime=regime,
+            max_contracts=int(config.get('max_contracts_per_pick', 50) or 50),
+        )
+        for item in overlay_rejected:
+            item['mispricing_score'] = mispricing_score_for_pick(item)
+            risk_rejected.append(item)
+        if not picks:
+            log.info("No picks survived ML-aligned quantity overlays.")
+            write_scan_audit([], risk_rejected, db=db)
+            return
+
     if regime.quantity_multiplier < 1.0:
         log.info(
             "Regime filter applied %.0f%% quantity throttle to %d pick(s).",
             regime.quantity_multiplier * 100,
             len(picks),
         )
-
-    account_capital = config.get('account_capital') or capital_budget
-    before_gate = list(picks)
-    picks = apply_portfolio_gamma_risk(
-        picks, capital_positions, config, account_capital, monitor,
-    )
-    capture_rejections(
-        before_gate,
-        picks,
-        'Portfolio gamma risk',
-        'Position would exceed portfolio stress/gamma concentration limits',
-        risk_rejected,
-    )
-    if not picks:
-        log.info("No picks survived portfolio gamma-risk controls — nothing to trade.")
-        write_scan_audit([], risk_rejected, db=db)
-        return
 
     annotate_mispricing_scores(picks)
     write_scan_audit(picks, risk_rejected, db=db)
@@ -966,19 +954,22 @@ def _run_once(args, headless: bool = False) -> None:
                 _p.setdefault('source', 'ml_model')
             annotate_mispricing_scores(new_picks)
             record_model_predictions(db, new_picks)
-            if open_keys:
-                new_picks = [p for p in new_picks
-                             if (p['symbol'], p['strategy']) not in open_keys]
+            if capital_positions:
+                filtered_replan: list[dict] = []
+                seen_contract_signatures = set(open_contract_signatures)
+                for p in new_picks:
+                    contract_signature = pick_contract_signature(p)
+                    if contract_signature in seen_contract_signatures:
+                        continue
+                    filtered_replan.append(p)
+                    seen_contract_signatures.add(contract_signature)
+                new_picks = filtered_replan
             if not new_picks:
-                log.info("[agent] All fresh model candidates already held as open positions — aborting.")
+                log.info("[agent] No fresh model candidates survived the open-position entry policy — aborting.")
                 return
             new_picks, _ = executor.preflight_check_picks(new_picks)
             if not new_picks:
                 log.info("[agent] No picks survived pre-flight after fresh model request — aborting.")
-                return
-            new_picks = filter_max_loss_multiple(new_picks, config)
-            if not new_picks:
-                log.info("[agent] No picks survived max-loss multiple filtering after fresh model request — aborting.")
                 return
             if capital_budget is not None:
                 remaining_budget = capital_budget - deployed_capital
@@ -997,11 +988,22 @@ def _run_once(args, headless: bool = False) -> None:
             if not new_picks:
                 log.info("[agent] No picks fit within capital budget after fresh model request — aborting.")
                 return
-            new_picks = apply_portfolio_gamma_risk(
-                new_picks, capital_positions, config, account_capital, monitor,
+            new_picks = apply_ml_position_sizing(
+                new_picks,
+                config,
+                max_contracts=int(config.get('max_contracts_per_pick', 50) or 50),
+            )
+            new_picks, _overlay_rejected = apply_ml_quantity_overlays(
+                new_picks,
+                capital_positions,
+                config,
+                account_capital=config.get('account_capital') or capital_budget,
+                available_capital=(capital_budget - deployed_capital) if capital_budget is not None else None,
+                regime=regime,
+                max_contracts=int(config.get('max_contracts_per_pick', 50) or 50),
             )
             if not new_picks:
-                log.info("[agent] No picks survived portfolio gamma-risk controls after fresh model request — aborting.")
+                log.info("[agent] No picks survived ML-aligned quantity overlays after fresh model request — aborting.")
                 return
 
             picks = new_picks

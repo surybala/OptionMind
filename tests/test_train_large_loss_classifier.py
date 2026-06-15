@@ -12,6 +12,7 @@ from ml.models.train_large_loss_classifier import (
     _auc_rank,
     _clf_metrics,
     _compute_fill_values,
+    _transform_frame,
     train_large_loss_classifier,
 )
 
@@ -174,3 +175,19 @@ def test_compute_fill_values_uses_median():
     fv = _compute_fill_values(df, ["a", "b"])
     assert fv["a"] == pytest.approx(2.0)
     assert fv["b"] == pytest.approx(10.0)
+
+
+def test_transform_frame_coerces_object_numeric_columns_to_float():
+    df = pd.DataFrame(
+        {
+            "a": pd.Series(["1.5", None, "3.0"], dtype="object"),
+            "b": pd.Series([2, "4", None], dtype="object"),
+        }
+    )
+
+    transformed = _transform_frame(df, ["a", "b"], {"a": 0.0, "b": 1.0})
+
+    assert transformed["a"].dtype == np.dtype("float64")
+    assert transformed["b"].dtype == np.dtype("float64")
+    assert transformed.iloc[1]["a"] == pytest.approx(0.0)
+    assert transformed.iloc[2]["b"] == pytest.approx(1.0)

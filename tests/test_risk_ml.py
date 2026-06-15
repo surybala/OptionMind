@@ -269,6 +269,40 @@ def test_position_monitor_uses_ml_before_stop_loss_fallback(tmp_path):
     assert monitor._execute_close.call_args.args[3] == "ML_RISK_EXIT"
 
 
+def test_position_monitor_uses_ml_before_profit_take(tmp_path):
+    cfg = {
+        "risk_parameters": {
+            "stop_loss_multiplier": 99.0,
+            "profit_take_enabled": True,
+            "profit_take_pct": 0.50,
+            "gamma_risk": {"enabled": False},
+            "ml_exit_risk": {
+                "enabled": True,
+                "artifact_path": str(_ml_exit_artifact(tmp_path)),
+                "threshold": 0.70,
+                "confirmations_required": 1,
+                "min_age_minutes": 0.0,
+            },
+        }
+    }
+    monitor = PositionMonitor(MagicMock(), MagicMock(), cfg)
+    monitor._execute_close = MagicMock(return_value={"closed": True})
+    pos = _base_position()
+
+    result = monitor._apply_triggers(
+        pos,
+        dry_run=True,
+        entry_premium=1.00,
+        current_mark=0.40,
+        spot=99.0,
+        gamma_risk_fn=lambda *_args: None,
+        metrics_fn=lambda: (9, {"risk_score": 0.91, "gamma_theta_ratio": 2.1, "net_short_delta": -0.28}),
+    )
+
+    assert result == {"closed": True}
+    assert monitor._execute_close.call_args.args[3] == "ML_RISK_EXIT"
+
+
 def test_get_risk_snapshot_includes_ml_exit_score(tmp_path):
     db = MagicMock()
     executor = MagicMock()

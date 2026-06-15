@@ -4,6 +4,7 @@ Tests for src.risk_service.PositionRiskService.
 Covers:
 - Non-HFT path: IV-based Black-Scholes Greeks via _build_greeks_legs
 - HFT path: broker-supplied Greeks via _build_greeks_legs_from_snapshots
+  with IV fallback when broker greeks are missing
 - Chain failure (RuntimeError): partial dict returned with risk_level
 - risk_level classification applied
 - has_broker_greeks field populated correctly
@@ -189,6 +190,46 @@ class TestHftPath:
         assert 'net_short_delta' in enriched
         assert 'risk_score' in enriched
 
+    def test_missing_broker_greeks_fall_back_to_snapshot_iv_estimates(self, caplog):
+        svc = _svc()
+        snap_short = {
+            'delta': None,
+            'gamma': None,
+            'theta': None,
+            'vega': None,
+            'bid': 1.10,
+            'ask': 1.30,
+            'impliedVolatility': 0.30,
+        }
+        snap_long = {
+            'delta': None,
+            'gamma': None,
+            'theta': None,
+            'vega': None,
+            'bid': 0.25,
+            'ask': 0.35,
+            'impliedVolatility': 0.32,
+        }
+        short_osi = 'AAPL991231P00190000'
+        long_osi = 'AAPL991231P00185000'
+        chain = _chain(
+            has_broker_greeks=True,
+            spot=195.0,
+            put_map={190.0: snap_short, 185.0: snap_long},
+            snapshots={short_osi: snap_short, long_osi: snap_long},
+            osi_map={(190.0, 'put'): short_osi, (185.0, 'put'): long_osi},
+            leg_specs=[(190.0, 'put', 'short'), (185.0, 'put', 'long')],
+        )
+        svc._data.get_position_chain.return_value = chain
+
+        with caplog.at_level(logging.WARNING):
+            enriched = svc.enrich_position(_pos())
+
+        assert enriched['has_broker_greeks'] is True
+        assert 'gamma_theta_ratio' in enriched
+        assert 'risk_score' in enriched
+        assert 'IV fallback unavailable' not in caplog.text
+
     def test_broker_greeks_none_skips_greeks_gracefully(self):
         """If all broker greeks are None (market closed), no crash — partial data OK."""
         svc = _svc()
@@ -232,7 +273,7 @@ class TestHftPath:
             enriched = svc.enrich_position(_pos())
 
         assert 'risk_level' in enriched
-        assert 'broker greeks are None' not in caplog.text
+        assert 'IV fallback unavailable' not in caplog.text
 
 
 # ── Chain failure (HFT RuntimeError) ─────────────────────────────────────────

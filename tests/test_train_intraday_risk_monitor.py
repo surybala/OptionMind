@@ -115,3 +115,20 @@ def test_train_intraday_risk_monitor_requires_target(tmp_path):
             val_fraction=0.0,
             early_stopping_rounds=0,
         )
+
+
+def test_train_intraday_risk_monitor_holdout_uses_timestamp_embargo(tmp_path):
+    artifact = train_intraday_risk_monitor(
+        _frame(entry_count=16),
+        model_output=tmp_path / "intraday_risk.json",
+        test_fraction=0.25,
+        walk_forward_folds=2,
+        min_walk_forward_train_groups=4,
+        embargo_days=1,
+        num_boost_round=10,
+        val_fraction=0.0,
+        early_stopping_rounds=0,
+    )
+
+    assert artifact.split_summary["actual_gap_days"] is not None
+    assert artifact.split_summary["actual_gap_days"] >= 1.0

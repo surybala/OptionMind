@@ -477,6 +477,4 @@ def test_risk_monitor_surfaces_regime_filter_state(dashboard_client, monkeypatch
     regime = res.get_json()["regime"]
     assert regime["label"] == "ORANGE"
     assert regime["quantity_multiplier"] == pytest.approx(0.30)
-    assert regime["top_n_multiplier"] == pytest.approx(0.35)
-    assert regime["pause_new_trades"] is False
     assert regime["reasons"][0].startswith("VIX 28.0")

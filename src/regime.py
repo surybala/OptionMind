@@ -191,24 +191,18 @@ class RegimeService:
     ) -> RegimeResult:
         label = label if label in _SEVERITY else "GREEN"
         q_mult = 1.0
-        n_mult = 1.0
         if label == "YELLOW":
             q_mult = float(self._cfg.get("yellow_quantity_multiplier", 0.65))
-            n_mult = float(self._cfg.get("yellow_top_n_multiplier", 0.70))
         elif label == "ORANGE":
             q_mult = float(self._cfg.get("orange_quantity_multiplier", 0.30))
-            n_mult = float(self._cfg.get("orange_top_n_multiplier", 0.35))
-        elif label == "RED":
-            q_mult = 0.0
-            n_mult = 0.0
 
         metrics = dict(metrics)
         metrics["enabled"] = True
         return RegimeResult(
             label=label,
             quantity_multiplier=max(0.0, min(1.0, q_mult)),
-            top_n_multiplier=max(0.0, min(1.0, n_mult)),
-            pause_new_trades=(label == "RED"),
+            top_n_multiplier=1.0,
+            pause_new_trades=False,
             reasons=reasons,
             metrics=metrics,
         )

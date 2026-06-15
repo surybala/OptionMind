@@ -46,8 +46,12 @@ class CandidateDatasetConfig:
     #   value — sub-nickel options are deep OTM noise or near-expiry junk.
     # min_option_entry_volume: skip bars with no real trading activity that day;
     #   zero-volume quotes are stale or synthetic and produce unreliable labels.
+    # min_option_entry_trade_count: skip bars with too few prints to trust the
+    #   close as executable. A single odd-lot print can fabricate a near-width
+    #   credit spread that looks amazing in training but was never tradable.
     min_option_entry_price: float = 0.05
     min_option_entry_volume: int = 1
+    min_option_entry_trade_count: int = 1
     strategy_family: str = "short_option"
     strategy_types: tuple[str, ...] = ("PCS", "CCS")
     spread_widths: tuple[float, ...] = (5.0, 10.0, 15.0, 20.0)
@@ -471,6 +475,8 @@ class HistoricalCandidateDatasetBuilder:
                     continue
                 if (entry_bar.volume is None or entry_bar.volume < config.min_option_entry_volume):
                     continue
+                if (entry_bar.trade_count is None or entry_bar.trade_count < config.min_option_entry_trade_count):
+                    continue
                 future_path = [
                     bar
                     for bar in path
@@ -604,9 +610,13 @@ class HistoricalCandidateDatasetBuilder:
                     continue
                 if (short_entry_bar.volume is None or short_entry_bar.volume < config.min_option_entry_volume):
                     continue
+                if (short_entry_bar.trade_count is None or short_entry_bar.trade_count < config.min_option_entry_trade_count):
+                    continue
                 if long_entry_bar.close < config.min_option_entry_price:
                     continue
                 if (long_entry_bar.volume is None or long_entry_bar.volume < config.min_option_entry_volume):
+                    continue
+                if (long_entry_bar.trade_count is None or long_entry_bar.trade_count < config.min_option_entry_trade_count):
                     continue
                 future_pairs = [
                     pair

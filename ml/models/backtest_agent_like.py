@@ -73,9 +73,6 @@ def run_backtest(
     large_loss_artifact_path: Path | None = None,
     stop_loss_artifact_path: Path | None = None,
 ) -> dict[str, Any]:
-    if xgb is None:
-        raise ImportError("xgboost is required for ML backtesting.")
-
     repo_root = config_path.parent.resolve()
     config = load_config(str(config_path))
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
@@ -316,6 +313,8 @@ def _filter_backtest_universe(df: pd.DataFrame, *, year: int, min_dte: int, max_
 
 
 def _load_scoring_artifact(strategy: str, path: Path) -> _ScoringArtifact:
+    if xgb is None:
+        raise ImportError("xgboost is required for ML backtesting.")
     artifact = json.loads(path.read_text(encoding="utf-8"))
     feature_columns = list(artifact["feature_columns"])
     fill_values = dict(artifact.get("fill_values") or {})
@@ -332,6 +331,8 @@ def _load_scoring_artifact(strategy: str, path: Path) -> _ScoringArtifact:
 
 
 def _score_rankers(df: pd.DataFrame, artifacts: dict[str, _ScoringArtifact]) -> pd.DataFrame:
+    if xgb is None:
+        raise ImportError("xgboost is required for ML backtesting.")
     engineered = _engineer_features(df.copy())
     engineered["prediction"] = np.nan
     engineered["ranker_strategy"] = "DEFAULT"

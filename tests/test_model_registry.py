@@ -10,7 +10,7 @@ from ml.models.registry import (
 )
 
 
-def _artifact(path, model_type="linear_least_squares_v001", test_mae=1.0):
+def _artifact(path, model_type="linear_least_squares_v001", test_mae=1.0, extra=None):
     path.write_text(
         json.dumps(
             {
@@ -25,6 +25,7 @@ def _artifact(path, model_type="linear_least_squares_v001", test_mae=1.0):
                 "intercept": 0.0,
                 "coefficients": {"dte": 1.0},
                 "metrics": {"test_mae": test_mae},
+                **(extra or {}),
             }
         )
         + "\n",
@@ -75,3 +76,26 @@ def test_model_registry_rollback_promotes_previous_champion(tmp_path):
 
     assert rolled_back.champion_model_id == "first"
     assert rolled_back.rollback_model_id == "second"
+
+
+def test_model_registry_captures_artifact_provenance_metadata(tmp_path):
+    artifact = _artifact(
+        tmp_path / "artifact.json",
+        extra={
+            "dataset": {"input_path": "artifacts/datasets/candidate_rows/example"},
+            "training_command": "PYTHONPATH=. .venv/bin/python -m ml.models.train_xgboost ...",
+            "data_fingerprint": "abc123",
+            "data_quality_filters": {"max_credit_to_width": 0.9},
+            "split_summary": {"embargo_days": 30, "actual_gap_days": 31.0},
+        },
+    )
+
+    registry = register_model_artifact(load_registry(tmp_path / "registry.json"), artifact, model_id="m1")
+    entry = registry.get("m1")
+
+    assert entry is not None
+    assert entry.metadata["dataset"]["input_path"].endswith("candidate_rows/example")
+    assert entry.metadata["training_command"].startswith("PYTHONPATH=")
+    assert entry.metadata["data_fingerprint"] == "abc123"
+    assert entry.metadata["data_quality_filters"]["max_credit_to_width"] == 0.9
+    assert entry.metadata["split_summary"]["actual_gap_days"] == 31.0

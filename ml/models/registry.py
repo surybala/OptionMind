@@ -102,6 +102,11 @@ def register_model_artifact(
 ) -> ModelRegistry:
     path = Path(artifact_path)
     artifact = _load_artifact(path)
+    artifact_metadata = {
+        key: artifact.get(key)
+        for key in ("dataset", "training_command", "data_fingerprint", "data_quality_filters", "split_summary")
+        if artifact.get(key) is not None
+    }
     entry = ModelRegistryEntry(
         model_id=model_id or _default_model_id(path, artifact),
         artifact_manifest=ModelArtifactManifest.from_artifact(path, artifact),
@@ -111,7 +116,7 @@ def register_model_artifact(
         metrics=dict(artifact.get("metrics") or {}),
         promotion_status=promotion_status,
         notes=notes,
-        metadata=metadata or {},
+        metadata={**artifact_metadata, **(metadata or {})},
     )
     models = [existing for existing in registry.models if existing.model_id != entry.model_id]
     models.append(entry)

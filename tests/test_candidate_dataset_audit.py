@@ -73,10 +73,23 @@ def test_audit_loads_parquet_directory(tmp_path):
     part_dir = dataset_dir / "source=fake"
     part_dir.mkdir(parents=True)
     pd.DataFrame(_rows()).to_parquet(part_dir / "part-00000.parquet")
+    (dataset_dir / "_manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset_version": "candidate_rows_example",
+                "metadata": {"feature_set_version": "features_v006"},
+                "files": ["source=fake/part-00000.parquet"],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     df = load_dataset(dataset_dir)
 
     assert len(df) == 2
+    assert df.attrs["dataset_manifest"]["dataset_version"] == "candidate_rows_example"
+    assert df.attrs["dataset_manifest"]["file_count"] == 1
+    assert "files" not in df.attrs["dataset_manifest"]
 
 
 def test_audit_loads_empty_jsonl(tmp_path):

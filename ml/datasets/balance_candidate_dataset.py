@@ -11,6 +11,10 @@ import numpy as np
 import pandas as pd
 
 from ml.datasets.audit_candidate_dataset import load_dataset
+from ml.datasets.candidate_data_quality import (
+    CandidateQualityFilterConfig,
+    apply_candidate_quality_filters,
+)
 from ml.storage import ParquetDatasetWriter
 
 
@@ -38,6 +42,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-oversample-factor", type=float, default=BalanceConfig.max_oversample_factor)
     parser.add_argument("--random-seed", type=int, default=BalanceConfig.random_seed)
     parser.add_argument("--max-dte", type=int, default=None, help="Maximum DTE filter: drop rows where dte > this value before balancing.")
+    parser.add_argument("--min-max-loss-dollars", type=float, default=25.0)
+    parser.add_argument("--max-credit-to-width", type=float, default=0.90)
+    parser.add_argument("--min-short-leg-volume", type=float, default=5.0)
+    parser.add_argument("--min-long-leg-volume", type=float, default=5.0)
+    parser.add_argument("--min-short-leg-trade-count", type=int, default=2)
+    parser.add_argument("--min-long-leg-trade-count", type=int, default=2)
     return parser.parse_args()
 
 
@@ -57,6 +67,19 @@ def main() -> int:
         pre_filter = len(df)
         df = df[dte_col <= args.max_dte].reset_index(drop=True)
         print(f"DTE filter: {pre_filter:,} → {len(df):,} rows (max_dte={args.max_dte})")
+    quality_filters = CandidateQualityFilterConfig(
+        min_max_loss_dollars=args.min_max_loss_dollars,
+        max_credit_to_width=args.max_credit_to_width,
+        min_short_leg_volume=args.min_short_leg_volume,
+        min_long_leg_volume=args.min_long_leg_volume,
+        min_short_leg_trade_count=args.min_short_leg_trade_count,
+        min_long_leg_trade_count=args.min_long_leg_trade_count,
+    )
+    df, quality_stats = apply_candidate_quality_filters(df, quality_filters)
+    print(
+        f"Quality filter: {quality_stats['input_rows']:,} → {quality_stats['output_rows']:,} rows "
+        f"({quality_stats['dropped_rows']:,} dropped)."
+    )
     balanced = balance_candidate_frame(df, cfg)
     manifest = df.attrs.get("dataset_manifest") if hasattr(df, "attrs") else None
     source_metadata = dict((manifest or {}).get("metadata") or {})
@@ -69,8 +92,10 @@ def main() -> int:
         "balance_max_underlying_share": cfg.max_underlying_share,
         "balance_max_oversample_factor": cfg.max_oversample_factor,
         "balance_random_seed": cfg.random_seed,
-        "feature_set_version": source_metadata.get("feature_set_version", "features_v005"),
+        "feature_set_version": _feature_set_version(df, source_metadata),
         "label_version": source_metadata.get("label_version", _mode_value(df, "label_version")),
+        "data_quality_filters": quality_filters.to_metadata(),
+        "data_quality_filter_stats": quality_stats,
     }
     result = ParquetDatasetWriter(root_dir=args.output_dir).write(
         balanced.to_dict("records"),
@@ -259,6 +284,13 @@ def _mode_value(df: pd.DataFrame, column: str) -> str | None:
     if values.empty:
         return None
     return str(values.mode().iloc[0])
+
+
+def _feature_set_version(df: pd.DataFrame, source_metadata: dict[str, Any]) -> str:
+    quant_columns = {"vrp_5d", "vrp_20d", "gamma_theta_ratio", "sigma_buffer", "vega_margin_ratio"}
+    if quant_columns.issubset(set(df.columns)):
+        return "features_v006"
+    return str(source_metadata.get("feature_set_version") or "features_v006")
 
 
 def _next_seed(rng: np.random.Generator) -> int:

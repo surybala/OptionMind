@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -77,37 +78,64 @@ def main() -> int:
 
 def load_dataset(path: Path) -> pd.DataFrame:
     manifest = _load_manifest(path)
+    manifest_path = _manifest_path(path)
     if path.is_dir():
         files = sorted(path.rglob("part-*.parquet"))
         if not files:
             raise FileNotFoundError(f"No part-*.parquet files found under {path}")
         frames = [pd.read_parquet(file) for file in files]
         df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-        if manifest:
-            df.attrs["dataset_manifest"] = manifest
-        return df
+        return _attach_dataset_attrs(df, path, manifest, manifest_path)
     if path.suffix == ".jsonl":
         if path.stat().st_size == 0:
             df = pd.DataFrame()
         else:
             df = pd.read_json(path, lines=True)
-        if manifest:
-            df.attrs["dataset_manifest"] = manifest
-        return df
+        return _attach_dataset_attrs(df, path, manifest, manifest_path)
     if path.suffix == ".parquet":
         df = pd.read_parquet(path)
-        if manifest:
-            df.attrs["dataset_manifest"] = manifest
-        return df
+        return _attach_dataset_attrs(df, path, manifest, manifest_path)
     raise ValueError(f"Unsupported dataset input: {path}")
 
 
 def _load_manifest(path: Path) -> dict[str, Any] | None:
-    candidates = [path / "_manifest.json"] if path.is_dir() else [path.with_name("_manifest.json")]
+    candidates = [_manifest_path(path)]
     for candidate in candidates:
         if candidate.exists():
             return json.loads(candidate.read_text(encoding="utf-8"))
     return None
+
+
+def _manifest_path(path: Path) -> Path:
+    return path / "_manifest.json" if path.is_dir() else path.with_name("_manifest.json")
+
+
+def _attach_dataset_attrs(
+    df: pd.DataFrame,
+    path: Path,
+    manifest: dict[str, Any] | None,
+    manifest_path: Path,
+) -> pd.DataFrame:
+    df.attrs["dataset_path"] = str(path)
+    if manifest:
+        df.attrs["dataset_manifest"] = _compact_manifest(manifest)
+        df.attrs["dataset_manifest_path"] = str(manifest_path)
+        if manifest_path.exists():
+            df.attrs["dataset_manifest_sha256"] = hashlib.sha256(
+                manifest_path.read_bytes()
+            ).hexdigest()
+    return df
+
+
+def _compact_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    compact = {
+        key: value
+        for key, value in manifest.items()
+        if key != "files"
+    }
+    if "files" in manifest:
+        compact["file_count"] = len(manifest.get("files") or [])
+    return compact
 
 
 def summarize_candidate_dataset(df: pd.DataFrame) -> dict[str, Any]:

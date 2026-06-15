@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
+import sys
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,7 +20,11 @@ import numpy as np
 import pandas as pd
 
 from ml.datasets.audit_candidate_dataset import load_dataset
-from ml.models.train_baseline import _artifact_metadata, _feature_importance
+from ml.models.train_baseline import (
+    _artifact_fingerprint,
+    _artifact_metadata,
+    _feature_importance,
+)
 
 try:
     import xgboost as xgb
@@ -104,6 +110,11 @@ class IntradayRiskMonitorArtifact:
     train_entries: int
     test_entries: int
     recommended_close_threshold: float
+    dataset: dict[str, Any]
+    training_command: str | None
+    data_fingerprint: str
+    data_quality_filters: dict[str, Any]
+    split_summary: dict[str, Any]
     params: dict[str, Any]
     feature_importance: dict[str, float]
     metrics: dict[str, Any]
@@ -119,7 +130,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-output", default=None, help="XGBoost model output path.")
     parser.add_argument("--target", default="stop_loss_hit_30m", choices=list(TARGET_CHOICES))
     parser.add_argument("--test-fraction", type=float, default=0.25)
-    parser.add_argument("--min-rows", type=int, default=200)
+    parser.add_argument("--min-rows", type=int, default=20)
     parser.add_argument("--walk-forward-folds", type=int, default=4)
     parser.add_argument("--min-walk-forward-train-groups", type=int, default=None)
     parser.add_argument("--embargo-days", type=int, default=1)
@@ -184,6 +195,8 @@ def main() -> int:
     artifact = train_intraday_risk_monitor(
         df,
         model_output=model_output,
+        dataset_path=str(args.input),
+        training_command=" ".join(shlex.quote(part) for part in sys.argv),
         target_column=args.target,
         test_fraction=args.test_fraction,
         min_rows=args.min_rows,
@@ -220,9 +233,11 @@ def train_intraday_risk_monitor(
     df: pd.DataFrame,
     *,
     model_output: Path,
+    dataset_path: str | None = None,
+    training_command: str | None = None,
     target_column: str = "stop_loss_hit_30m",
     test_fraction: float = 0.25,
-    min_rows: int = 200,
+    min_rows: int = 20,
     walk_forward_folds: int = 4,
     min_walk_forward_train_groups: int | None = None,
     embargo_days: int = 1,
@@ -257,12 +272,16 @@ def train_intraday_risk_monitor(
         raise ValueError("No usable numeric feature columns found.")
 
     clean, groups = _group_index(clean)
-    split_group_index = _split_index(len(groups), test_fraction)
-    if split_group_index <= 0 or split_group_index >= len(groups):
+    train_groups_df, test_groups_df, split_summary = _group_holdout_split(
+        groups,
+        test_fraction=test_fraction,
+        embargo_days=embargo_days,
+    )
+    if train_groups_df.empty or test_groups_df.empty:
         raise ValueError("Not enough grouped entries to create a chronological holdout split.")
 
-    train_groups = set(groups.iloc[:split_group_index]["group_key"])
-    test_groups = set(groups.iloc[split_group_index:]["group_key"])
+    train_groups = set(train_groups_df["group_key"])
+    test_groups = set(test_groups_df["group_key"])
     train_df = clean[clean["_group_key"].isin(train_groups)].copy()
     test_df = clean[clean["_group_key"].isin(test_groups)].copy()
 
@@ -276,14 +295,14 @@ def train_intraday_risk_monitor(
     if params:
         model_params.update(params)
 
-    train_group_count = len(groups.iloc[:split_group_index])
+    train_group_count = len(train_groups_df)
     val_group_index = (
         _split_index(train_group_count, val_fraction)
         if val_fraction > 0 and train_group_count > 1
         else train_group_count
     )
-    train_sub_groups = set(groups.iloc[:val_group_index]["group_key"])
-    val_groups = set(groups.iloc[val_group_index:split_group_index]["group_key"])
+    train_sub_groups = set(train_groups_df.iloc[:val_group_index]["group_key"])
+    val_groups = set(train_groups_df.iloc[val_group_index:]["group_key"])
 
     train_sub_df = clean[clean["_group_key"].isin(train_sub_groups)].copy()
     val_df = clean[clean["_group_key"].isin(val_groups)].copy()
@@ -334,7 +353,7 @@ def train_intraday_risk_monitor(
         target_column=target_column,
         feature_columns=feature_columns,
         fold_count=walk_forward_folds,
-        min_train_groups=min_walk_forward_train_groups or max(25, split_group_index),
+        min_train_groups=min_walk_forward_train_groups or max(25, len(train_groups_df)),
         params=model_params,
         num_boost_round=best_rounds,
         embargo_days=embargo_days,
@@ -351,6 +370,9 @@ def train_intraday_risk_monitor(
     booster.save_model(model_output)
 
     metadata = _artifact_metadata(clean)
+    dataset_info = dict(metadata["dataset"])
+    if dataset_path:
+        dataset_info["input_path"] = dataset_path
     return IntradayRiskMonitorArtifact(
         model_type="xgboost_intraday_risk_monitor_v001",
         created_at=datetime.now(UTC).isoformat(),
@@ -368,6 +390,17 @@ def train_intraday_risk_monitor(
         train_entries=int(len(train_groups)),
         test_entries=int(len(test_groups)),
         recommended_close_threshold=round(float(recommended_threshold), 6),
+        dataset=dataset_info,
+        training_command=training_command,
+        data_fingerprint=_artifact_fingerprint(
+            dataset=dataset_info,
+            target_column=target_column,
+            feature_columns=feature_columns,
+            data_quality_filters=metadata["data_quality_filters"],
+            split_summary=split_summary,
+        ),
+        data_quality_filters=metadata["data_quality_filters"],
+        split_summary=split_summary,
         params={**model_params, "num_boost_round": int(best_rounds)},
         feature_importance=_feature_importance(booster),
         metrics=metrics,
@@ -514,6 +547,56 @@ def _trade_group_key(row: pd.Series) -> str:
 def _split_index(count: int, fraction: float) -> int:
     test_rows = max(1, int(round(count * fraction))) if count > 1 else 0
     return max(1, count - test_rows)
+
+
+def _group_holdout_split(
+    groups: pd.DataFrame,
+    *,
+    test_fraction: float,
+    embargo_days: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    split_group_index = _split_index(len(groups), test_fraction)
+    raw_test_groups = groups.iloc[split_group_index:].copy()
+    train_groups = groups.iloc[:split_group_index].copy()
+    if embargo_days > 0 and not raw_test_groups.empty:
+        test_start_ts = pd.to_datetime(raw_test_groups["entry_timestamp"], utc=True, errors="coerce").iloc[0]
+        cutoff = test_start_ts - pd.Timedelta(days=embargo_days)
+        train_ts = pd.to_datetime(train_groups["entry_timestamp"], utc=True, errors="coerce")
+        train_groups = train_groups.loc[train_ts < cutoff].copy()
+    return train_groups, raw_test_groups, _group_split_summary(train_groups, raw_test_groups, embargo_days=embargo_days)
+
+
+def _group_split_summary(
+    train_groups: pd.DataFrame,
+    test_groups: pd.DataFrame,
+    *,
+    embargo_days: int,
+) -> dict[str, Any]:
+    train_start = _group_timestamp(train_groups, 0)
+    train_end = _group_timestamp(train_groups, len(train_groups) - 1)
+    test_start = _group_timestamp(test_groups, 0)
+    test_end = _group_timestamp(test_groups, len(test_groups) - 1)
+    gap_days = None
+    if train_end is not None and test_start is not None:
+        gap_days = round((pd.Timestamp(test_start) - pd.Timestamp(train_end)).total_seconds() / 86400.0, 6)
+    return {
+        "strategy": "grouped_chronological_timestamp_embargo",
+        "embargo_days": int(embargo_days),
+        "train_groups": int(len(train_groups)),
+        "test_groups": int(len(test_groups)),
+        "train_start": train_start,
+        "train_end": train_end,
+        "test_start": test_start,
+        "test_end": test_end,
+        "actual_gap_days": gap_days,
+    }
+
+
+def _group_timestamp(groups: pd.DataFrame, index: int) -> str | None:
+    if groups.empty or index < 0 or index >= len(groups):
+        return None
+    ts = pd.to_datetime(groups.iloc[index]["entry_timestamp"], utc=True, errors="coerce")
+    return ts.isoformat() if pd.notna(ts) else None
 
 
 def _default_params(scale_pos_weight: float = 1.0) -> dict[str, Any]:
@@ -701,12 +784,12 @@ def _walk_forward_grouped(
     max_threshold_false_close_rate: float | None,
 ) -> list[dict[str, Any]]:
     folds: list[dict[str, Any]] = []
-    embargo_groups = _group_embargo_from_days(groups, embargo_days)
-    for fold_number, train_start, train_end, test_start, test_end in _group_walk_forward_splits(
+    for fold_number, train_start, train_end, test_start, test_end in _group_walk_forward_splits_by_timestamp(
+        groups,
         len(groups),
         fold_count=fold_count,
         min_train_groups=min_train_groups,
-        embargo_groups=embargo_groups,
+        embargo_days=embargo_days,
     ):
         train_group_keys = set(groups.iloc[train_start:train_end]["group_key"])
         test_group_keys = set(groups.iloc[test_start:test_end]["group_key"])
@@ -770,6 +853,7 @@ def _walk_forward_grouped(
                 "train_start": groups.iloc[train_start]["entry_timestamp"].isoformat(),
                 "train_end": groups.iloc[train_end - 1]["entry_timestamp"].isoformat(),
                 "embargo_groups": int(test_start - train_end),
+                "actual_gap_days": _group_gap_days(groups, train_end - 1, test_start),
                 "test_start": groups.iloc[test_start]["entry_timestamp"].isoformat(),
                 "test_end": groups.iloc[test_end - 1]["entry_timestamp"].isoformat(),
                 "train_groups": int(train_end - train_start),
@@ -809,6 +893,49 @@ def _group_walk_forward_splits(
     return splits
 
 
+def _group_walk_forward_splits_by_timestamp(
+    groups: pd.DataFrame,
+    group_count: int,
+    *,
+    fold_count: int,
+    min_train_groups: int,
+    embargo_days: int = 0,
+) -> list[tuple[int, int, int, int, int]]:
+    if fold_count <= 0 or group_count <= min_train_groups:
+        return []
+    test_indices = np.array_split(
+        np.arange(min_train_groups, group_count),
+        min(fold_count, group_count - min_train_groups),
+    )
+    if embargo_days <= 0:
+        return _group_walk_forward_splits(
+            group_count,
+            fold_count=fold_count,
+            min_train_groups=min_train_groups,
+            embargo_groups=0,
+        )
+    timestamps = pd.to_datetime(groups["entry_timestamp"], utc=True, errors="coerce")
+    splits: list[tuple[int, int, int, int, int]] = []
+    for fold_number, chunk in enumerate(test_indices, start=1):
+        if len(chunk) == 0:
+            continue
+        test_start = int(chunk[0])
+        test_end = int(chunk[-1]) + 1
+        cutoff = timestamps.iloc[test_start] - pd.Timedelta(days=embargo_days)
+        train_end = test_start
+        for idx in range(test_start - 1, -1, -1):
+            ts = timestamps.iloc[idx]
+            if pd.notna(ts) and ts < cutoff:
+                train_end = idx + 1
+                break
+        else:
+            train_end = 0
+        if train_end < min_train_groups:
+            continue
+        splits.append((fold_number, 0, train_end, test_start, test_end))
+    return splits
+
+
 def _group_embargo_from_days(groups: pd.DataFrame, embargo_days: int) -> int:
     if embargo_days <= 0 or len(groups) < 2:
         return 0
@@ -818,6 +945,19 @@ def _group_embargo_from_days(groups: pd.DataFrame, embargo_days: int) -> int:
     total_days = max(1.0, (timestamps.iloc[-1] - timestamps.iloc[0]).total_seconds() / 86400.0)
     groups_per_day = len(timestamps) / total_days
     return max(0, int(np.ceil(groups_per_day * embargo_days)))
+
+
+def _group_gap_days(groups: pd.DataFrame, train_end_idx: int, test_start_idx: int) -> float | None:
+    if train_end_idx < 0 or test_start_idx < 0:
+        return None
+    timestamps = pd.to_datetime(groups["entry_timestamp"], utc=True, errors="coerce")
+    if train_end_idx >= len(timestamps) or test_start_idx >= len(timestamps):
+        return None
+    train_end = timestamps.iloc[train_end_idx]
+    test_start = timestamps.iloc[test_start_idx]
+    if pd.isna(train_end) or pd.isna(test_start):
+        return None
+    return round((test_start - train_end).total_seconds() / 86400.0, 6)
 
 
 def _walk_forward_summary(folds: list[dict[str, Any]]) -> dict[str, Any]:

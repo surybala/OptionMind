@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 from dataclasses import asdict, dataclass
@@ -108,8 +109,15 @@ DEFAULT_FEATURE_COLUMNS = [
     "vega_margin_ratio",
 ]
 
-DEFAULT_FEATURE_VERSION = "features_v005"
+DEFAULT_FEATURE_VERSION = "features_v006"
 DEFAULT_LABEL_VERSION = "short_option_labels_v002"
+QUANT_STRUCTURAL_COLUMNS = {
+    "vrp_5d",
+    "vrp_20d",
+    "gamma_theta_ratio",
+    "sigma_buffer",
+    "vega_margin_ratio",
+}
 
 
 @dataclass(frozen=True)
@@ -126,6 +134,11 @@ class BaselineModelArtifact:
     fill_values: dict[str, float]
     train_rows: int
     test_rows: int
+    dataset: dict[str, Any]
+    training_command: str | None
+    data_fingerprint: str
+    data_quality_filters: dict[str, Any]
+    split_summary: dict[str, Any]
     metrics: dict[str, Any]
     walk_forward: list[dict[str, Any]]
 
@@ -191,9 +204,15 @@ def train_baseline(
     y_all = clean[target_column].to_numpy(dtype=float)
     split_index = _split_index(len(clean), test_fraction)
 
-    y_train, y_test = y_all[:split_index], y_all[split_index:]
-    x_train, fill_values = _fit_feature_matrix(clean.iloc[:split_index], feature_columns)
-    x_test = _transform_feature_matrix(clean.iloc[split_index:], feature_columns, fill_values)
+    train_df, test_df, split_summary = _chronological_holdout_split(
+        clean,
+        test_fraction=test_fraction,
+        embargo_days=embargo_days,
+    )
+    y_train = train_df[target_column].to_numpy(dtype=float)
+    y_test = test_df[target_column].to_numpy(dtype=float)
+    x_train, fill_values = _fit_feature_matrix(train_df, feature_columns)
+    x_test = _transform_feature_matrix(test_df, feature_columns, fill_values)
     weights = _fit_linear_regression(x_train, y_train)
     train_pred = _predict(x_train, weights)
     test_pred = _predict(x_test, weights) if len(x_test) else np.array([])
@@ -231,6 +250,17 @@ def train_baseline(
         fill_values=fill_values,
         train_rows=int(len(y_train)),
         test_rows=int(len(y_test)),
+        dataset=artifact_metadata["dataset"],
+        training_command=None,
+        data_fingerprint=_artifact_fingerprint(
+            dataset=artifact_metadata["dataset"],
+            target_column=target_column,
+            feature_columns=feature_columns,
+            data_quality_filters=artifact_metadata["data_quality_filters"],
+            split_summary=split_summary,
+        ),
+        data_quality_filters=artifact_metadata["data_quality_filters"],
+        split_summary=split_summary,
         metrics=metrics,
         walk_forward=walk_forward,
     )
@@ -240,10 +270,104 @@ def _artifact_metadata(df: pd.DataFrame) -> dict[str, Any]:
     manifest = df.attrs.get("dataset_manifest") if hasattr(df, "attrs") else None
     manifest_metadata = dict((manifest or {}).get("metadata") or {})
     return {
-        "feature_version": str(manifest_metadata.get("feature_set_version") or DEFAULT_FEATURE_VERSION),
+        "feature_version": _feature_version(df, manifest_metadata),
         "label_version": str(manifest_metadata.get("label_version") or _mode_value(df, "label_version") or DEFAULT_LABEL_VERSION),
         "data_range": _data_range(df, manifest_metadata),
+        "dataset": {
+            "input_path": df.attrs.get("dataset_path") if hasattr(df, "attrs") else None,
+            "dataset_type": (manifest or {}).get("dataset_type"),
+            "dataset_version": (manifest or {}).get("dataset_version"),
+            "root_path": (manifest or {}).get("root_path"),
+            "manifest_path": df.attrs.get("dataset_manifest_path") if hasattr(df, "attrs") else None,
+            "manifest_sha256": df.attrs.get("dataset_manifest_sha256") if hasattr(df, "attrs") else None,
+            "manifest_created_at": (manifest or {}).get("created_at"),
+            "manifest_row_count": (manifest or {}).get("row_count"),
+            "metadata": manifest_metadata,
+        },
+        "data_quality_filters": dict(manifest_metadata.get("data_quality_filters") or {}),
     }
+
+
+def _feature_version(df: pd.DataFrame, manifest_metadata: dict[str, Any]) -> str:
+    if QUANT_STRUCTURAL_COLUMNS.issubset(set(df.columns)):
+        return "features_v006"
+    return str(manifest_metadata.get("feature_set_version") or DEFAULT_FEATURE_VERSION)
+
+
+def _artifact_fingerprint(
+    *,
+    dataset: dict[str, Any],
+    target_column: str,
+    feature_columns: list[str],
+    data_quality_filters: dict[str, Any],
+    split_summary: dict[str, Any],
+) -> str:
+    payload = {
+        "dataset": dataset,
+        "target_column": target_column,
+        "feature_columns": feature_columns,
+        "data_quality_filters": data_quality_filters,
+        "split_summary": split_summary,
+    }
+    encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _chronological_holdout_split(
+    df: pd.DataFrame,
+    *,
+    test_fraction: float,
+    embargo_days: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    split_index = _split_index(len(df), test_fraction)
+    test_df = df.iloc[split_index:].copy()
+    train_df = df.iloc[:split_index].copy()
+    if embargo_days > 0 and "entry_timestamp" in df.columns and not test_df.empty:
+        test_start_ts = pd.to_datetime(test_df["entry_timestamp"], errors="coerce").iloc[0]
+        cutoff = test_start_ts - pd.Timedelta(days=embargo_days)
+        train_ts = pd.to_datetime(train_df["entry_timestamp"], errors="coerce")
+        train_df = train_df.loc[train_ts < cutoff].copy()
+    return train_df, test_df, _split_summary(train_df, test_df, embargo_days=embargo_days)
+
+
+def _split_summary(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    *,
+    embargo_days: int,
+) -> dict[str, Any]:
+    train_start = _first_timestamp(train_df)
+    train_end = _last_timestamp(train_df)
+    test_start = _first_timestamp(test_df)
+    test_end = _last_timestamp(test_df)
+    gap_days = None
+    if train_end is not None and test_start is not None:
+        gap_days = round((pd.Timestamp(test_start) - pd.Timestamp(train_end)).total_seconds() / 86400.0, 6)
+    return {
+        "strategy": "chronological_timestamp_embargo",
+        "embargo_days": int(embargo_days),
+        "train_rows": int(len(train_df)),
+        "test_rows": int(len(test_df)),
+        "train_start": train_start,
+        "train_end": train_end,
+        "test_start": test_start,
+        "test_end": test_end,
+        "actual_gap_days": gap_days,
+    }
+
+
+def _first_timestamp(df: pd.DataFrame) -> str | None:
+    if df.empty or "entry_timestamp" not in df.columns:
+        return None
+    ts = pd.to_datetime(df["entry_timestamp"], errors="coerce").dropna()
+    return ts.iloc[0].isoformat() if not ts.empty else None
+
+
+def _last_timestamp(df: pd.DataFrame) -> str | None:
+    if df.empty or "entry_timestamp" not in df.columns:
+        return None
+    ts = pd.to_datetime(df["entry_timestamp"], errors="coerce").dropna()
+    return ts.iloc[-1].isoformat() if not ts.empty else None
 
 
 def _mode_value(df: pd.DataFrame, column: str) -> Any | None:
@@ -501,12 +625,11 @@ def _walk_forward_validation(
 ) -> list[dict[str, Any]]:
     folds: list[dict[str, Any]] = []
     y_all = df[target_column].to_numpy(dtype=float)
-    embargo_rows = _embargo_rows_from_days(df, embargo_days)
-    for fold_number, train_start, train_end, test_start, test_end in _walk_forward_splits(
-        len(df),
+    for fold_number, train_start, train_end, test_start, test_end in _walk_forward_splits_by_timestamp(
+        df,
         fold_count=fold_count,
         min_train_rows=min_train_rows,
-        embargo_rows=embargo_rows,
+        embargo_days=embargo_days,
     ):
         train_df = df.iloc[train_start:train_end]
         test_df = df.iloc[test_start:test_end]
@@ -521,6 +644,7 @@ def _walk_forward_validation(
                 "train_start": _row_timestamp(df, train_start),
                 "train_end": _row_timestamp(df, train_end - 1),
                 "embargo_rows": int(test_start - train_end),
+                "actual_gap_days": _gap_days(df, train_end - 1, test_start),
                 "test_start": _row_timestamp(df, test_start),
                 "test_end": _row_timestamp(df, test_end - 1),
                 "train_rows": int(train_end - train_start),
@@ -554,6 +678,49 @@ def _walk_forward_splits(
     return splits
 
 
+def _walk_forward_splits_by_timestamp(
+    df: pd.DataFrame,
+    *,
+    fold_count: int,
+    min_train_rows: int,
+    embargo_days: int = 0,
+) -> list[tuple[int, int, int, int, int]]:
+    row_count = len(df)
+    if fold_count <= 0 or row_count <= min_train_rows:
+        return []
+    test_indices = np.array_split(
+        np.arange(min_train_rows, row_count),
+        min(fold_count, row_count - min_train_rows),
+    )
+    if "entry_timestamp" not in df.columns or embargo_days <= 0:
+        return _walk_forward_splits(
+            row_count,
+            fold_count=fold_count,
+            min_train_rows=min_train_rows,
+            embargo_rows=0,
+        )
+    timestamps = pd.to_datetime(df["entry_timestamp"], errors="coerce")
+    splits: list[tuple[int, int, int, int, int]] = []
+    for fold_number, chunk in enumerate(test_indices, start=1):
+        if len(chunk) == 0:
+            continue
+        test_start = int(chunk[0])
+        test_end = int(chunk[-1]) + 1
+        cutoff = timestamps.iloc[test_start] - pd.Timedelta(days=embargo_days)
+        train_end = test_start
+        for idx in range(test_start - 1, -1, -1):
+            ts = timestamps.iloc[idx]
+            if pd.notna(ts) and ts < cutoff:
+                train_end = idx + 1
+                break
+        else:
+            train_end = 0
+        if train_end < min_train_rows:
+            continue
+        splits.append((fold_number, 0, train_end, test_start, test_end))
+    return splits
+
+
 def _embargo_rows_from_days(df: pd.DataFrame, embargo_days: int) -> int:
     """Estimate how many rows correspond to embargo_days of calendar time."""
     if embargo_days <= 0 or "entry_timestamp" not in df.columns:
@@ -564,6 +731,19 @@ def _embargo_rows_from_days(df: pd.DataFrame, embargo_days: int) -> int:
     total_days = max(1.0, (ts.iloc[-1] - ts.iloc[0]).total_seconds() / 86400)
     rows_per_day = len(ts) / total_days
     return max(0, int(np.ceil(rows_per_day * embargo_days)))
+
+
+def _gap_days(df: pd.DataFrame, train_end_idx: int, test_start_idx: int) -> float | None:
+    if "entry_timestamp" not in df.columns or train_end_idx < 0 or test_start_idx < 0:
+        return None
+    ts = pd.to_datetime(df["entry_timestamp"], errors="coerce")
+    if train_end_idx >= len(ts) or test_start_idx >= len(ts):
+        return None
+    train_end = ts.iloc[train_end_idx]
+    test_start = ts.iloc[test_start_idx]
+    if pd.isna(train_end) or pd.isna(test_start):
+        return None
+    return round((test_start - train_end).total_seconds() / 86400.0, 6)
 
 
 def _evaluation_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float | int | None]:

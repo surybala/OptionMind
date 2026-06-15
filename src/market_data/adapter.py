@@ -222,11 +222,17 @@ class DataAdapter:
         if client is not None:
             try:
                 from datetime import date as _date
-                from alpaca.data.requests import StockBarsRequest
-                from alpaca.data.timeframe import TimeFrame
+                from types import SimpleNamespace
+                try:
+                    from alpaca.data.requests import StockBarsRequest
+                    from alpaca.data.timeframe import TimeFrame
+                    timeframe = TimeFrame.Day
+                except Exception:
+                    StockBarsRequest = SimpleNamespace
+                    timeframe = "1Day"
                 req = StockBarsRequest(
                     symbol_or_symbols=[symbol],
-                    timeframe=TimeFrame.Day,
+                    timeframe=timeframe,
                     start=_date.fromisoformat(start_date),
                     end=_date.fromisoformat(end_date),
                 )
@@ -552,10 +558,11 @@ class DataAdapter:
                 missing_spots,
             )
 
-        # Warn once if every snapshot came back with None greeks — this typically
+        # Warn once if broker greeks are missing from snapshots — this typically
         # means the market is closed or Alpaca hasn't priced these contracts yet.
-        # Gamma-risk checks will be skipped for all positions this cycle; stop-loss
-        # (price-based) remains active.
+        # PositionRiskService can fall back to IV-based estimates when snapshot
+        # IV is present, but positions missing both broker greeks and IV will
+        # still have partial gamma-risk coverage.
         if snapshots:
             no_greeks_count = sum(
                 1 for row in snapshots.values()
@@ -565,13 +572,13 @@ class DataAdapter:
                 _log.warning(
                     "[HFT] batch prefetch: ALL %d snapshots have no broker greeks "
                     "(market closed or Alpaca algo-trader tier required) — "
-                    "gamma-risk checks disabled this cycle; stop-loss still active",
+                    "using IV-based Greek estimates where available",
                     len(snapshots),
                 )
             elif no_greeks_count > 0:
                 _log.warning(
                     "[HFT] batch prefetch: %d/%d snapshots have no broker greeks — "
-                    "gamma-risk check will be partial this cycle",
+                    "using IV-based Greek estimates for affected contracts where available",
                     no_greeks_count, len(snapshots),
                 )
 
