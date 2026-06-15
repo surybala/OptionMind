@@ -9,6 +9,7 @@ Extracted from agent.py to keep the orchestrator thin.
 """
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from src.capital import capital_for_position
@@ -83,6 +84,14 @@ def max_loss_multiple(pick: dict) -> float:
     if credit <= 0:
         return float('inf')
     return round(max_loss_per_contract(pick) / credit, 4)
+
+
+def overlay_exposure_per_contract(pick: dict) -> float:
+    """Overlay budgets use max loss when available, not gross width."""
+    max_loss = max_loss_per_contract(pick)
+    if max_loss > 0:
+        return max_loss
+    return capital_for_pick(pick)
 
 
 # ── Risk filters ─────────────────────────────────────────────────────────────
@@ -225,6 +234,7 @@ def apply_ml_quantity_overlays(
     for raw_pick in ranked:
         pick = dict(raw_pick)
         per_contract_risk = capital_for_pick(pick)
+        per_contract_overlay_risk = overlay_exposure_per_contract(pick)
         if per_contract_risk <= 0:
             item = dict(pick)
             item['filtered_stage'] = 'Capital budget'
@@ -242,14 +252,14 @@ def apply_ml_quantity_overlays(
             requested_qty=requested_qty,
             used_sides=used_sides,
             side_limits=side_limits,
-            per_contract_risk=per_contract_risk,
+            per_contract_risk=per_contract_overlay_risk,
         )
         cluster_qty, cluster_reason, cluster_keys = _cluster_quantity_cap(
             pick,
             requested_qty=requested_qty,
             used_clusters=used_clusters,
             cluster_limits=cluster_limits,
-            per_contract_risk=per_contract_risk,
+            per_contract_risk=per_contract_overlay_risk,
         )
         regime_qty = requested_qty
         if regime is not None and getattr(regime, 'quantity_multiplier', 1.0) < 1.0:
@@ -291,8 +301,8 @@ def apply_ml_quantity_overlays(
 
         if remaining_capital is not None:
             remaining_capital -= per_contract_risk * final_qty
-        _consume_side_exposure(used_sides, pick, final_qty, per_contract_risk)
-        _consume_cluster_exposure(used_clusters, cluster_keys, per_contract_risk * final_qty)
+        _consume_side_exposure(used_sides, pick, final_qty, per_contract_overlay_risk)
+        _consume_cluster_exposure(used_clusters, cluster_keys, per_contract_overlay_risk * final_qty)
         accepted.append(pick)
 
     return accepted, rejected
@@ -379,7 +389,7 @@ def _used_side_exposure(capital_positions: list[dict]) -> dict[str, float]:
         sides = _strategy_sides(position.get('type') or position.get('strategy') or '')
         if not sides:
             continue
-        total_risk = capital_for_position(position)
+        total_risk = _position_overlay_exposure(position)
         if total_risk <= 0:
             continue
         per_side = total_risk / len(sides)
@@ -398,7 +408,7 @@ def _used_cluster_exposure(capital_positions: list[dict], config: dict) -> dict[
         symbol = str(position.get('symbol') or position.get('underlying') or '').upper()
         if not symbol:
             continue
-        total_risk = capital_for_position(position)
+        total_risk = _position_overlay_exposure(position)
         if total_risk <= 0:
             continue
         for name, members in clusters.items():
@@ -458,6 +468,48 @@ def _cluster_quantity_cap(
                 f"{name} cluster risk budget ${max(remaining, 0.0):,.0f} remaining vs ${per_contract_risk:,.0f} per contract"
             )
     return qty_cap, '; '.join(reasons) if reasons else None, cluster_keys
+
+
+def _position_overlay_exposure(position: dict) -> float:
+    max_loss = position.get('max_loss_dollars')
+    try:
+        if max_loss is not None:
+            return max(0.0, float(max_loss))
+    except (TypeError, ValueError):
+        pass
+
+    strat = str(position.get('type') or position.get('strategy') or '').upper()
+    if strat not in {'PCS', 'CCS', 'IC', 'IFLY'}:
+        return capital_for_position(position)
+
+    contracts = max(1, int(position.get('contracts') or position.get('quantity') or 1))
+    premium = max(0.0, float(position.get('premium') or 0.0))
+    width = 0.0
+    legs = position.get('legs') or {}
+    if isinstance(legs, str):
+        try:
+            legs = json.loads(legs) or {}
+        except Exception:
+            legs = {}
+    if not isinstance(legs, dict):
+        legs = {}
+
+    if strat in {'PCS', 'CCS'}:
+        ss = legs.get('short_strike') or legs.get('short_put') or legs.get('short_call') or position.get('strike') or 0.0
+        ls = legs.get('long_strike') or legs.get('long_put') or legs.get('long_call') or 0.0
+        width = abs(float(ss or 0.0) - float(ls or 0.0))
+    else:
+        sp = float(legs.get('short_put') or 0.0)
+        lp = float(legs.get('long_put') or 0.0)
+        sc = float(legs.get('short_call') or 0.0)
+        lc = float(legs.get('long_call') or 0.0)
+        put_wing = float(position.get('put_wing') or abs(sp - lp))
+        call_wing = float(position.get('call_wing') or abs(lc - sc))
+        width = max(put_wing, call_wing)
+
+    if width <= 0:
+        return capital_for_position(position)
+    return max(0.0, round((width - premium) * 100 * contracts, 2))
 
 
 def _consume_side_exposure(

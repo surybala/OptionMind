@@ -117,14 +117,14 @@
     },
     "directional_exposure_caps": {
       "enabled": true,
-      "put": 0.08,
-      "call": 0.08,
+      "put": 0.25,
+      "call": 0.25,
       "min_side_cap_dollars": 2500,
-      "_note": "Light ML-aligned side budget. Preserves score order and shrinks quantity when one side of the book is getting too heavy; only rejects when even one contract no longer fits."
+      "_note": "Light ML-aligned side budget. Preserves score order and shrinks quantity when one side of the book is getting too heavy; only rejects when even one contract no longer fits. Side-budget usage is measured on spread max loss when available, not raw width."
     },
     "correlated_cluster_caps": {
       "enabled": true,
-      "max_cluster_pct": 0.04,
+      "max_cluster_pct": 0.10,
       "min_cluster_cap_dollars": 2000,
       "clusters": {
         "SEMIS": ["SMH", "SOXX"],

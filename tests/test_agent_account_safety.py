@@ -83,6 +83,30 @@ def test_directional_exposure_cap_shrinks_quantity():
     assert accepted[0]['quantity'] == 1
 
 
+def test_directional_exposure_cap_uses_max_loss_not_gross_width():
+    pick = _pcs_pick(quantity=2, premium=0.50)
+    accepted, rejected = apply_ml_quantity_overlays(
+        [pick],
+        [],
+        {
+            'risk_parameters': {
+                'directional_exposure_caps': {
+                    'enabled': True,
+                    'put': 0.09,
+                    'call': 0.09,
+                    'min_side_cap_dollars': 0.0,
+                }
+            }
+        },
+        account_capital=10_000,
+        available_capital=10_000,
+        max_contracts=2,
+    )
+
+    assert rejected == []
+    assert accepted[0]['quantity'] == 2
+
+
 def test_ml_position_sizing_uses_rank_tiers_before_overlays():
     picks = [
         _pcs_pick(symbol='SPY', quantity=1),
@@ -141,6 +165,100 @@ def test_correlated_cluster_cap_shrinks_quantity():
     assert rejected == []
     assert accepted[0]['quantity'] == 2
     assert accepted[0]['correlated_clusters'] == ['SEMIS']
+
+
+def test_correlated_cluster_cap_uses_max_loss_not_gross_width():
+    pick = _pcs_pick(symbol='SMH', quantity=2, premium=0.50)
+    accepted, rejected = apply_ml_quantity_overlays(
+        [pick],
+        [],
+        {
+            'risk_parameters': {
+                'correlated_cluster_caps': {
+                    'enabled': True,
+                    'max_cluster_pct': 0.09,
+                    'min_cluster_cap_dollars': 0.0,
+                    'clusters': {'SEMIS': ['SMH', 'SOXX']},
+                }
+            }
+        },
+        account_capital=10_000,
+        available_capital=10_000,
+        max_contracts=2,
+    )
+
+    assert rejected == []
+    assert accepted[0]['quantity'] == 2
+
+
+def test_directional_exposure_tracks_open_positions_on_max_loss_basis():
+    pick = _pcs_pick(quantity=1, premium=0.50)
+    capital_positions = [
+        {
+            'type': 'PCS',
+            'status': 'EXECUTED',
+            'symbol': 'QQQ',
+            'premium': 0.50,
+            'max_loss_dollars': 450.0,
+            'legs': {'short_strike': 500.0, 'long_strike': 495.0},
+            'contracts': 1,
+        }
+    ]
+    accepted, rejected = apply_ml_quantity_overlays(
+        [pick],
+        capital_positions,
+        {
+            'risk_parameters': {
+                'directional_exposure_caps': {
+                    'enabled': True,
+                    'put': 0.09,
+                    'call': 0.09,
+                    'min_side_cap_dollars': 0.0,
+                }
+            }
+        },
+        account_capital=10_000,
+        available_capital=10_000,
+        max_contracts=1,
+    )
+
+    assert rejected == []
+    assert accepted[0]['quantity'] == 1
+
+
+def test_correlated_cluster_tracks_open_positions_on_max_loss_basis():
+    pick = _pcs_pick(symbol='SOXX', quantity=1, premium=0.50)
+    capital_positions = [
+        {
+            'type': 'PCS',
+            'status': 'EXECUTED',
+            'symbol': 'SMH',
+            'premium': 0.50,
+            'max_loss_dollars': 450.0,
+            'legs': {'short_strike': 500.0, 'long_strike': 495.0},
+            'contracts': 1,
+        }
+    ]
+    accepted, rejected = apply_ml_quantity_overlays(
+        [pick],
+        capital_positions,
+        {
+            'risk_parameters': {
+                'correlated_cluster_caps': {
+                    'enabled': True,
+                    'max_cluster_pct': 0.09,
+                    'min_cluster_cap_dollars': 0.0,
+                    'clusters': {'SEMIS': ['SMH', 'SOXX']},
+                }
+            }
+        },
+        account_capital=10_000,
+        available_capital=10_000,
+        max_contracts=1,
+    )
+
+    assert rejected == []
+    assert accepted[0]['quantity'] == 1
 
 
 def test_regime_quantity_throttle_shrinks_quantity():
