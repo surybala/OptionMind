@@ -38,7 +38,7 @@ from flask import Flask, jsonify, render_template, request
 from src.capital import capital_by_strategy, capital_for_position
 from src.portfolio_risk import PortfolioRiskService
 from src.regime import RegimeResult, RegimeService
-from src.risk_ml import MlExitRiskService
+from src.risk_ml import MlExitRiskService, classify_ml_exit_risk_level
 
 app = Flask(__name__, template_folder="templates")
 DB_PATH: str = "data/trades.db"
@@ -852,7 +852,9 @@ def api_risk_monitor():
     Black-Scholes.  This guarantees the dashboard shows the same Greek values
     as the position-monitor daemon.
 
-    Exit signals mirror the live daemon's trigger priority order:
+    Risk severity and exit signals are now both ML-first:
+    risk_level is derived purely from ML exit-risk score proximity, while
+    trigger_status mirrors the live daemon's trigger priority order:
     1. Stop-loss (deterministic fallback)
     2. ML exit-risk model (primary proactive exit via MlExitRiskService)
     Score-based proximity bucketing for WATCH/WARNING states.
@@ -866,11 +868,11 @@ def api_risk_monitor():
     profit_captured_pct   — % of entry premium already secured
     sl_distance_pct       — how far (% of premium) the mark is from stop-loss trigger
     has_broker_greeks     — true when Alpaca broker Greeks were used (hft_mode=true)
-    risk_level            — SAFE / WATCH / CAUTION / CRITICAL  (same as daemon)
+    risk_level            — SAFE / WATCH / CAUTION / CRITICAL  (ML exit-risk only)
     trigger_status        — SAFE / WATCH / WARNING / TRIGGER / STOP_LOSS / UNKNOWN
     ml_exit_risk_score    — ML model probability of needing early exit (0-1)
     ml_exit_risk_threshold — threshold at which TRIGGER fires
-    ml_exit_risk_guard    — guard reason if ML scoring was skipped (e.g. below_min_dte)
+    ml_exit_risk_guard_reason — guard reason if ML scoring was skipped (e.g. below_min_dte)
     """
     # ── Load risk thresholds from config ─────────────────────────────────────
     try:
@@ -993,6 +995,17 @@ def api_risk_monitor():
                 _log.debug("[dashboard] ML score failed for pos %s: %s",
                            pos.get('id'), exc)
 
+        ml_threshold = (
+            ml_exit_risk.threshold
+            if ml_exit_risk is not None and ml_exit_risk.is_active()
+            else None
+        )
+        risk_level = classify_ml_exit_risk_level(
+            ml_score,
+            ml_threshold,
+            guard_reason=ml_guard_reason,
+        )
+
         # ── Trigger status (same priority as live daemon) ────────────────────
         # 1. Stop-loss (deterministic fallback — always checked)
         # 2. ML exit-risk (primary proactive exit)
@@ -1043,11 +1056,11 @@ def api_risk_monitor():
             'net_gamma':           round(enriched.get('net_gamma', 0.0), 8),
             'net_vega':            round(enriched.get('net_vega', 0.0), 6),
             'has_broker_greeks':   enriched.get('has_broker_greeks', False),
-            'risk_level':          enriched.get('risk_level', 'WATCH'),
+            'risk_level':          risk_level,
             'trigger_status':      trigger_status,
             'ml_exit_risk_score':  round(ml_score, 4) if ml_score is not None else None,
-            'ml_exit_risk_threshold': ml_exit_risk.threshold if ml_exit_risk and ml_exit_risk.is_active() else None,
-            'ml_exit_risk_guard':  ml_guard_reason,
+            'ml_exit_risk_threshold': ml_threshold,
+            'ml_exit_risk_guard_reason': ml_guard_reason,
             'greeks_available':    has_greeks,
             'timestamp':           pos.get('timestamp'),
             'status':              pos.get('status'),

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 from ml.models.registry import ModelRegistry, register_model_artifact, save_registry
 from src.position_monitor import PositionMonitor
-from src.risk_ml import MlExitRiskService
+from src.risk_ml import MlExitRiskService, classify_ml_exit_risk_level
 
 
 def _ml_exit_artifact(tmp_path, filename: str = "ml_exit_linear.json"):
@@ -192,6 +192,14 @@ def test_ml_exit_risk_service_still_scores_without_greek_risk_payload(tmp_path):
     assert payload["ml_exit_risk_model_id"] is not None
 
 
+def test_classify_ml_exit_risk_level_bands():
+    assert classify_ml_exit_risk_level(0.02, 0.08) == "SAFE"
+    assert classify_ml_exit_risk_level(0.04, 0.08) == "WATCH"
+    assert classify_ml_exit_risk_level(0.06, 0.08) == "CAUTION"
+    assert classify_ml_exit_risk_level(0.08, 0.08) == "CRITICAL"
+    assert classify_ml_exit_risk_level(None, 0.08, guard_reason="below_min_age_minutes") == "WATCH"
+
+
 def test_position_monitor_ml_exit_requires_confirmations(tmp_path):
     monitor = PositionMonitor(MagicMock(), MagicMock(), _monitor_config(tmp_path, confirmations_required=2))
     monitor._execute_close = MagicMock(return_value={"closed": True})
@@ -325,5 +333,6 @@ def test_get_risk_snapshot_includes_ml_exit_score(tmp_path):
     snapshot = monitor.get_risk_snapshot()
 
     assert len(snapshot) == 1
+    assert snapshot[0]["risk_level"] == "CRITICAL"
     assert snapshot[0]["ml_exit_risk_score"] == 0.88
     assert snapshot[0]["ml_exit_risk_should_trigger"] is True

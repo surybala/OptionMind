@@ -241,6 +241,50 @@ main { padding: 20px 24px 40px; max-width: 1600px; margin: 0 auto; width: 100%; 
 .btn-primary { background: var(--accent); color: #0d1117; }
 .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
 
+.inline-status {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.inline-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.inline-toggle input {
+  accent-color: var(--accent);
+}
+
+.live-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text-muted);
+  font-size: 0.74rem;
+}
+
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 0 rgba(63,185,80,0.5);
+  animation: live-pulse 1.8s ease-out infinite;
+}
+
+@keyframes live-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(63,185,80,0.45); }
+  70% { box-shadow: 0 0 0 8px rgba(63,185,80,0); }
+  100% { box-shadow: 0 0 0 0 rgba(63,185,80,0); }
+}
+
 /* ── Table ─────────────────────────────────────────────────────────────── */
 .table-card {
   background: var(--surface);
@@ -665,12 +709,20 @@ td { padding: 10px 12px; vertical-align: middle; white-space: nowrap; }
       <button class="btn btn-primary" id="posRefreshBtn" onclick="loadPositions()">
         ⟳ Refresh live marks
       </button>
+      <label class="inline-toggle" for="posAutoRefreshToggle">
+        <input type="checkbox" id="posAutoRefreshToggle" checked />
+        Auto-refresh
+      </label>
+      <span class="live-pill" id="posAutoRefreshPill">
+        <span class="live-dot"></span>
+        <span id="posAutoRefreshLabel">Live every 15s</span>
+      </span>
       <button class="btn" id="closeAllBtn"
               style="background:var(--red);color:#fff;border-color:var(--red)"
               onclick="closeAllPositions()">
         ✕ Close All Positions
       </button>
-      <span id="posLoadMsg" style="color:var(--text-muted);font-size:0.8rem"></span>
+      <span id="posLoadMsg" class="inline-status"></span>
     </div>
 
     <!-- Positions table -->
@@ -1088,10 +1140,10 @@ td { padding: 10px 12px; vertical-align: middle; white-space: nowrap; }
     <div style="margin-top:14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 18px;">
       <div class="chart-title" style="margin-bottom:10px">Status Legend &amp; Trigger Logic</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;font-size:0.8rem;color:var(--text-muted)">
-        <div><span class="risk-badge risk-SAFE">SAFE</span> &nbsp; ML exit-risk score well below threshold</div>
-        <div><span class="risk-badge risk-WATCH">WATCH</span> &nbsp; ML score at 40-70% of trigger threshold — early drift</div>
-        <div><span class="risk-badge risk-CAUTION">CAUTION</span> &nbsp; Elevated risk on stop proximity, profit capture, or gamma/theta</div>
-        <div><span class="risk-badge risk-CRITICAL">CRITICAL</span> &nbsp; Highest shared risk classification before action logic</div>
+        <div><span class="risk-badge risk-SAFE">SAFE</span> &nbsp; ML exit-risk score below 40% of trigger threshold</div>
+        <div><span class="risk-badge risk-WATCH">WATCH</span> &nbsp; ML score at 40-70% of trigger threshold, or scoring is temporarily guarded</div>
+        <div><span class="risk-badge risk-CAUTION">CAUTION</span> &nbsp; ML score at 70-100% of trigger threshold</div>
+        <div><span class="risk-badge risk-CRITICAL">CRITICAL</span> &nbsp; ML exit-risk score at or above trigger threshold</div>
         <div><span class="risk-badge risk-TRIGGER">TRIGGER</span> &nbsp; ML exit-risk model fires — score exceeds threshold</div>
         <div><span class="risk-badge risk-STOP_LOSS">STOP LOSS</span> &nbsp; Exit signal: deterministic stop-loss threshold exceeded</div>
       </div>
@@ -1129,6 +1181,9 @@ let analyticsData = null;
 let analyticsPeriod = 'weekly';
 let _positionsData  = [];   // last-loaded open positions
 let _legDetailCache = {};   // trade_id → fetched detail payload
+let _positionsRefreshPromise = null;
+let _positionsRefreshTimer = null;
+const POSITIONS_AUTO_REFRESH_MS = 15000;
 let scannerLoaded = false;
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
@@ -1226,11 +1281,58 @@ function switchTab(name, btn) {
     positionsLoaded = true;
     loadPositions();
   }
+  if (name === 'positions') startPositionsAutoRefresh();
+  else stopPositionsAutoRefresh();
   // Auto-load risk data the first time the risk tab is opened
   if (name === 'risk' && !riskLoaded) {
     riskLoaded = true;
     loadRisk();
   }
+}
+
+function positionsTabActive() {
+  const panel = $('tab-positions');
+  return !!(panel && panel.classList.contains('active'));
+}
+
+function positionsAutoRefreshEnabled() {
+  const toggle = $('posAutoRefreshToggle');
+  return !toggle || !!toggle.checked;
+}
+
+function setPositionsAutoRefreshLabel(text, active = true) {
+  const label = $('posAutoRefreshLabel');
+  const pill = $('posAutoRefreshPill');
+  if (label) label.textContent = text;
+  if (pill) {
+    pill.style.opacity = active ? '1' : '0.65';
+    pill.style.borderColor = active ? 'var(--border)' : 'rgba(48,54,61,0.55)';
+  }
+}
+
+function stopPositionsAutoRefresh() {
+  if (_positionsRefreshTimer) {
+    clearTimeout(_positionsRefreshTimer);
+    _positionsRefreshTimer = null;
+  }
+}
+
+function schedulePositionsAutoRefresh() {
+  stopPositionsAutoRefresh();
+  if (!positionsTabActive() || document.hidden || !positionsAutoRefreshEnabled()) {
+    if (!positionsAutoRefreshEnabled()) {
+      setPositionsAutoRefreshLabel('Auto-refresh off', false);
+    }
+    return;
+  }
+  setPositionsAutoRefreshLabel(`Live every ${Math.round(POSITIONS_AUTO_REFRESH_MS / 1000)}s`, true);
+  _positionsRefreshTimer = window.setTimeout(() => {
+    loadPositions({ silent: true, source: 'auto' });
+  }, POSITIONS_AUTO_REFRESH_MS);
+}
+
+function startPositionsAutoRefresh() {
+  schedulePositionsAutoRefresh();
 }
 
 // ── Stats ──────────────────────────────────────────────────────────────────────
@@ -2099,48 +2201,74 @@ async function closeAllPositions() {
   }
 }
 
-async function loadPositions() {
+async function loadPositions(options = {}) {
+  if (_positionsRefreshPromise) return _positionsRefreshPromise;
+
+  const { silent = false, source = 'manual' } = options;
   const btn = $('posRefreshBtn');
   const msg = $('posLoadMsg');
-  if (btn) btn.disabled = true;
-  if (msg) msg.textContent = 'Fetching live option chain data… (may take a moment)';
-  $('posTbody').innerHTML = '<tr><td colspan="15" class="loading">Loading live marks from yfinance…</td></tr>';
 
-  try {
-    const data = await fetchJSON('/api/open-positions');
-    const positions = data.positions || [];
-
-    // Update stat cards
-    const priced = positions.filter(p => p.current_mark != null).length;
-    const avgDte  = positions.length > 0
-      ? Math.round(positions.filter(p => p.dte != null).reduce((s, p) => s + p.dte, 0)
-          / Math.max(1, positions.filter(p => p.dte != null).length))
-      : null;
-
-    setText('ps-count',  positions.length, 'acc');
-    const upnl = parseFloat(data.total_unrealized_pnl) || 0;
-    setText('ps-upnl',   fmtMoney(upnl), 'stat-value ' + colorClass(upnl));
-    setText('ps-priced', `${priced} / ${positions.length}`, 'acc');
-    setText('ps-dte',    avgDte != null ? avgDte + 'd' : '—', 'acc');
-
-    // Tab badge
-    const badge = $('posTabBadge');
-    if (badge && positions.length > 0) {
-      badge.textContent = positions.length;
-      badge.style.display = 'inline';
+  _positionsRefreshPromise = (async () => {
+    if (btn) btn.disabled = true;
+    if (msg) {
+      msg.textContent = silent
+        ? 'Refreshing live prices…'
+        : 'Fetching live option chain data… (may take a moment)';
+    }
+    if (!silent) {
+      $('posTbody').innerHTML = '<tr><td colspan="15" class="loading">Loading live marks from market data…</td></tr>';
     }
 
-    $('posTableCount').textContent = `${positions.length} position${positions.length !== 1 ? 's' : ''}`;
-    renderPositionsTable(positions);
+    try {
+      const data = await fetchJSON('/api/open-positions');
+      const positions = data.positions || [];
 
-    const now = new Date().toLocaleTimeString();
-    if (msg) msg.textContent = `Live marks loaded at ${now}`;
-  } catch(e) {
-    $('posTbody').innerHTML = `<tr><td colspan="15" class="loading">Error loading positions: ${e.message}</td></tr>`;
-    if (msg) msg.textContent = 'Failed to load — check that yfinance is installed.';
-  } finally {
-    if (btn) btn.disabled = false;
-  }
+      // Update stat cards
+      const priced = positions.filter(p => p.current_mark != null).length;
+      const avgDte  = positions.length > 0
+        ? Math.round(positions.filter(p => p.dte != null).reduce((s, p) => s + p.dte, 0)
+            / Math.max(1, positions.filter(p => p.dte != null).length))
+        : null;
+
+      setText('ps-count',  positions.length, 'acc');
+      const upnl = parseFloat(data.total_unrealized_pnl) || 0;
+      setText('ps-upnl',   fmtMoney(upnl), 'stat-value ' + colorClass(upnl));
+      setText('ps-priced', `${priced} / ${positions.length}`, 'acc');
+      setText('ps-dte',    avgDte != null ? avgDte + 'd' : '—', 'acc');
+
+      // Tab badge
+      const badge = $('posTabBadge');
+      if (badge) {
+        if (positions.length > 0) {
+          badge.textContent = positions.length;
+          badge.style.display = 'inline';
+        } else {
+          badge.style.display = 'none';
+        }
+      }
+
+      $('posTableCount').textContent = `${positions.length} position${positions.length !== 1 ? 's' : ''}`;
+      renderPositionsTable(positions);
+
+      const now = new Date().toLocaleTimeString();
+      if (msg) {
+        msg.textContent = source === 'auto'
+          ? `Live prices auto-updated at ${now}`
+          : `Live marks loaded at ${now}`;
+      }
+    } catch(e) {
+      if (!silent) {
+        $('posTbody').innerHTML = `<tr><td colspan="15" class="loading">Error loading positions: ${e.message}</td></tr>`;
+      }
+      if (msg) msg.textContent = 'Failed to load live prices — check Flask logs.';
+    } finally {
+      if (btn) btn.disabled = false;
+      _positionsRefreshPromise = null;
+      schedulePositionsAutoRefresh();
+    }
+  })();
+
+  return _positionsRefreshPromise;
 }
 
 // ── Risk Monitor ──────────────────────────────────────────────────────────────
@@ -2377,7 +2505,7 @@ function renderRiskTable(positions) {
     // ML exit-risk score cell
     const mlScore = p.ml_exit_risk_score;
     const mlThreshold = p.ml_exit_risk_threshold;
-    const mlGuard = p.ml_exit_risk_guard;
+    const mlGuard = p.ml_exit_risk_guard_reason;
     let mlScoreStr;
     if (mlScore != null) {
       const mlPct = (mlScore * 100).toFixed(1);
@@ -2504,6 +2632,9 @@ function refreshAll() {
   $('lastUpdated').textContent = 'Updated ' + now;
   loadStats();
   loadTrades();
+  if (positionsTabActive()) {
+    loadPositions({ silent: true, source: 'manual' });
+  }
   if ($('tab-analytics') && $('tab-analytics').classList.contains('active')) {
     loadAnalytics();
   }
@@ -2511,6 +2642,23 @@ function refreshAll() {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 (async function init() {
+  const posToggle = $('posAutoRefreshToggle');
+  if (posToggle) {
+    posToggle.addEventListener('change', () => {
+      if (positionsAutoRefreshEnabled()) {
+        setPositionsAutoRefreshLabel(`Live every ${Math.round(POSITIONS_AUTO_REFRESH_MS / 1000)}s`, true);
+        if (positionsTabActive()) loadPositions({ silent: true, source: 'auto' });
+      } else {
+        stopPositionsAutoRefresh();
+        setPositionsAutoRefreshLabel('Auto-refresh off', false);
+      }
+    });
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopPositionsAutoRefresh();
+    else if (positionsTabActive()) schedulePositionsAutoRefresh();
+  });
+  setPositionsAutoRefreshLabel(`Live every ${Math.round(POSITIONS_AUTO_REFRESH_MS / 1000)}s`, true);
   await loadFilters();
   await loadStats();
   await loadTrades();

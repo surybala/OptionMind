@@ -11,6 +11,26 @@ from ml.models.registry import ModelRegistryEntry, load_registry
 _log = logging.getLogger("optionwheel")
 
 
+def classify_ml_exit_risk_level(
+    score: float | None,
+    threshold: float | None,
+    *,
+    guard_reason: str | None = None,
+) -> str:
+    """Map ML exit-risk score proximity into dashboard/monitor risk levels."""
+    if threshold is None or threshold <= 0:
+        return "SAFE"
+    if score is None:
+        return "WATCH" if guard_reason else "SAFE"
+    if score >= threshold:
+        return "CRITICAL"
+    if score >= threshold * 0.70:
+        return "CAUTION"
+    if score >= threshold * 0.40:
+        return "WATCH"
+    return "SAFE"
+
+
 class MlExitRiskService:
     """Loads and scores an optional ML early-exit model for open positions."""
 

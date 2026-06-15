@@ -429,7 +429,27 @@ def test_risk_monitor_counts_risk_levels_separately_from_exit_signals(dashboard_
                 "risk_level": "CAUTION",
             }
 
+    class FakeMlExitRiskService:
+        threshold = 0.50
+        model_id = "fake-exit-risk"
+
+        def __init__(self, cfg):
+            self.cfg = cfg
+
+        def is_active(self):
+            return True
+
+        def score_position(self, pos, **kwargs):
+            score = 0.90 if pos["symbol"] == "SPY" else 0.40
+            return {
+                "ml_exit_risk_score": score,
+                "ml_exit_risk_threshold": self.threshold,
+                "ml_exit_risk_should_trigger": score >= self.threshold,
+                "ml_exit_risk_guard_reason": None,
+            }
+
     monkeypatch.setattr(dashboard, "_get_risk_service", lambda: FakeRiskService())
+    monkeypatch.setattr(dashboard, "MlExitRiskService", FakeMlExitRiskService)
 
     res = client.get("/api/risk-monitor")
 
@@ -438,8 +458,7 @@ def test_risk_monitor_counts_risk_levels_separately_from_exit_signals(dashboard_
     assert payload["risk_level_counts"]["CRITICAL"] == 1
     assert payload["risk_level_counts"]["CAUTION"] == 1
     assert payload["status_counts"]["STOP_LOSS"] == 1
-    # QQQ: no ML model active in test → SAFE (not WARNING from legacy gamma rules)
-    assert payload["status_counts"]["SAFE"] == 1
+    assert payload["status_counts"]["WARNING"] == 1
     assert payload["at_risk_count"] == 1
     assert payload["exit_trigger_count"] == 1
 

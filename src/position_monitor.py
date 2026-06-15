@@ -866,6 +866,8 @@ class PositionMonitor:
         Alpaca snapshots using broker-supplied greeks.  Failures are logged
         at WARNING and the position is still included with partial data.
         """
+        from src.risk_ml import classify_ml_exit_risk_level
+
         open_positions = self.db.get_open_positions()
         results        = []
 
@@ -873,6 +875,11 @@ class PositionMonitor:
             try:
                 enriched = self._risk_service.enrich_position(dict(pos))
                 self._ml_exit_risk.annotate_position(enriched)
+                enriched['risk_level'] = classify_ml_exit_risk_level(
+                    enriched.get('ml_exit_risk_score'),
+                    enriched.get('ml_exit_risk_threshold'),
+                    guard_reason=enriched.get('ml_exit_risk_guard_reason'),
+                )
                 results.append(enriched)
             except RuntimeError as exc:
                 _log.warning(
@@ -881,7 +888,7 @@ class PositionMonitor:
                 )
                 p = dict(pos)
                 p['spot']      = None
-                p['risk_level'] = _classify_risk_level(p, self.stop_loss_multiplier)
+                p['risk_level'] = 'WATCH' if self._ml_exit_risk.is_active() else 'SAFE'
                 results.append(p)
 
         _order = {'CRITICAL': 0, 'CAUTION': 1, 'WATCH': 2, 'SAFE': 3}
