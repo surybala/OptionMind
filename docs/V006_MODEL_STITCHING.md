@@ -6,7 +6,10 @@ This note stitches together the v006 dataset family, rankers, binary risk classi
 
 ---
 
-## V006b: Current Champion (Promoted 2026-05-27)
+## V006b: Former Champion (Promoted 2026-05-27)
+
+This document is historical. The current live champions are tracked in `README.md`,
+`CLAUDE.md`, `docs/ML_TRADE_PIPELINE.md`, and the registries under `artifacts/`.
 
 The v006b models are trained on the balanced 500K-row dataset derived from v006 via sqrt-frequency hierarchical sampling (max 12% per underlying). This resolves the SMH/SOXX concentration problem that blocked v006 promotion.
 
@@ -21,7 +24,7 @@ artifacts/datasets/candidate_rows/dataset_version=candidate_rows_massive_broad_e
 Artifacts:
 
 ```text
-artifacts/models/xgboost_v006b_500r_dp25.json         # RoR ranker — CHAMPION (registered in model_registry.json)
+artifacts/models/xgboost_v006b_500r_dp25.json         # RoR ranker — former champion at the time of promotion
 artifacts/models/large_loss_classifier_v006b.json      # p(large_loss_label)
 artifacts/models/stop_loss_classifier_v006b.json       # p(stop_loss_hit)
 ```

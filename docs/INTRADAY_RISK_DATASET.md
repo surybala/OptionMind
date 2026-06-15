@@ -1,12 +1,16 @@
 # Intraday Risk Dataset
 
-Last updated: 2026-06-01
+Last updated: 2026-06-15
 
 This dataset is the first training corpus for the live risk-monitoring model.
 It is intentionally separate from `candidate_rows`:
 
 - `candidate_rows` trains entry selection.
 - `intraday_risk_rows` trains exit hazard and volatility-spike detection.
+
+Current live champion: `intraday_risk_monitor_stop30m_v004` in `artifacts/risk_model_registry.json`
+with `operating_threshold = 0.08`, `confirmations_required = 2` in `config.json`, and target
+`stop_loss_hit_30m`.
 
 ## Design
 
@@ -170,8 +174,8 @@ PYTHONPATH=. .venv/bin/python -m ml.models.optimize_intraday_risk_monitor \
   --feature-config artifacts/optuna/intraday_risk_monitor_feat_fullraw_v001_best_features.json \
   --max-threshold-close-rate 0.12 \
   --max-threshold-false-close-rate 0.10 \
-  --output-artifact artifacts/models/intraday_risk_monitor_stop30m_fullraw_v003.json \
-  --model-output artifacts/models/intraday_risk_monitor_stop30m_fullraw_v003.xgboost.json
+  --output-artifact artifacts/models/intraday_risk_monitor_stop30m_v004.json \
+  --model-output artifacts/models/intraday_risk_monitor_stop30m_v004.xgboost.json
 ```
 
 For spread seeding, keep `--max-contracts` high enough to preserve adjacent

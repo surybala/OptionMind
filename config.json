@@ -184,11 +184,11 @@
       "artifact_path": "",
       "registry_path": "artifacts/risk_model_registry.json",
       "threshold": 0.08,
-      "confirmations_required": 1,
+      "confirmations_required": 2,
       "min_age_minutes": 10,
       "min_dte": 0,
       "max_dte": 21,
-      "_note": "Primary proactive exit model for open positions. Loads the champion from artifacts/risk_model_registry.json and closes when score >= threshold. Aggressive mode uses one confirmation so ML can exit on the first validated risk signal; deterministic stop-loss remains active as the final fallback; gamma-risk manual close is disabled in live config."
+      "_note": "Primary proactive exit model for open positions. Loads the champion from artifacts/risk_model_registry.json and closes when score >= threshold for the configured number of consecutive confirmations. Current live config requires 2 confirmations; deterministic stop-loss remains active as the final fallback; gamma-risk manual close is disabled in live config."
     },
     "vix_filter": {
       "enabled": true,

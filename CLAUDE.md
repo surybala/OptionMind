@@ -70,8 +70,8 @@ PYTHONPATH=. .venv/bin/python -m ml.models.evaluate_risk_adjusted_ranking \
 
 Note: `--stop-loss-artifact` is not a recognised argument for `evaluate_risk_adjusted_ranking`; omit it.
 
-Step 2 defaults to hard-filter mode: classifiers with `p > 0.70` veto a trade outright;
-no soft penalty is applied. Portfolio controls are available via `--portfolio-risk-controls`
+Step 2 defaults to hard-filter mode: classifiers with the live runtime thresholds (`p(large_loss) > 0.60`, `p(stop_loss_hit) > 0.30`) veto a trade outright;
+no soft penalty is applied. Portfolio controls are available via `--apply-portfolio-risk-controls`
 for final execution-layer simulation but are NOT part of training or exit-criteria evaluation.
 
 ## Architecture Decisions
@@ -85,10 +85,10 @@ for final execution-layer simulation but are NOT part of training or exit-criter
 - Exit criteria gates are calibrated in dollar PnL terms
 
 **Execution** (`evaluate_risk_adjusted_ranking`, live agent):  
-- Classifiers hard-filter high-risk trades (`p(large_loss) > 0.70`, `p(stop_loss) > 0.70`)
+- Classifiers hard-filter high-risk trades (`p(large_loss) > 0.60`, `p(stop_loss_hit) > 0.30`)
 - Ranker scores the surviving candidates by predicted RoR
 - Portfolio controls (gamma stress, concentration limits) applied last
-- `portfolio_controls.py` is the single canonical implementation shared by both layers
+- `portfolio_risk.py` is the single canonical implementation shared by both layers
 
 ### Dollar PnL metrics are always in dollars
 
@@ -97,104 +97,51 @@ DataFrame to report top-decile dollar metrics (`top_decile_actual_mean`, `top_de
 etc.) regardless of training target. This keeps all exit criteria thresholds calibrated in dollars
 even when training on `return_on_risk`.
 
-### Golden dataset
+### Golden datasets
 
 Base dataset: `candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_20wide_enriched`  
-1.44M rows, 39 ETF underlyings, features_v005, labels_v002.
+1.44M rows, 39 ETF underlyings, `features_v005`, `credit_spread_labels_v002`.
 
-Champion training dataset (balanced): `candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k`  
-500K rows, derived from base via sqrt-frequency hierarchical sampling (max 12% per underlying).  
+Current live entry-training dataset: `candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k_dte21`  
+500K rows, DTE<=21, derived via sqrt-frequency hierarchical sampling (max 12% per underlying).  
 Located at: `artifacts/datasets/candidate_rows/dataset_version=<name>`
 
-## Current model artifacts (V006c ranker + V006e classifier — champions)
+## Current live model artifacts
 
-V006c ranker and V006e large-loss classifier are registered champions in `artifacts/model_registry.json`
-and are loaded by the live agent automatically.
+The live entry stack is loaded from `artifacts/model_registry.json`. The live open-position exit model is loaded from `artifacts/risk_model_registry.json`.
 
-| Artifact | File | Notes |
-|----------|------|-------|
-| XGBoost ranker (champion) | `xgboost_v006c_500r_dp28.json` | PF 2.47 (+26%), RoR 0.167 (+10%), WR 78.6%; 39 features |
-| Large-loss classifier (champion) | `large_loss_classifier_v006e.json` | WF AUC 0.8502, WF recall 98.85%, holdout recall 98.8% (best), FN 190 (best); 61 features |
-| Stop-loss classifier | `stop_loss_classifier_v006b.json` | AUC 0.804, recall 99.7% (not yet re-optimised) |
+| Layer | Artifact | File | Notes |
+|------|----------|------|-------|
+| Entry ranker (champion) | `xgboost_v007b_dte21_quant` | `artifacts/models/xgboost_v007b_dte21_quant.json` | Holdout RoR `0.4717`, PF `1.733`, WR `68.9%`, mean PnL `$46.39`, WF PF min `1.874`; 43 features including 5 quant-structural features |
+| Entry veto 1 | `large_loss_classifier_v008` | `artifacts/models/large_loss_classifier_v008.json` | Threshold `0.60`; holdout AUC `0.843878`, recall `0.910883`, precision `0.38261`; 34 features |
+| Entry veto 2 | `stop_loss_classifier_v008` | `artifacts/models/stop_loss_classifier_v008.json` | Threshold `0.30`; holdout AUC `0.800183`, recall `0.995387`, precision `0.365765`; 41 features |
+| Exit-risk monitor (champion) | `intraday_risk_monitor_stop30m_v004` | `artifacts/models/intraday_risk_monitor_stop30m_v004.json` | Threshold `0.08`; holdout AUC `0.930315`, recall `0.691576`, close rate `0.063957`, false-close rate `0.061815`; 45 realtime features |
 
-### V006c ranker details
+### Live runtime parameters
 
-Trained via 2-pass Optuna (100 HP trials + 64 feature trials). Passes all 33 exit criteria (V006b: 16/33).
+- Entry ranker champion: `xgboost_v007b_dte21_quant`
+- Entry rollback ranker: `xgboost_v006c_500r_dp28`
+- `ml_scanner.large_loss_veto_threshold = 0.60`
+- `ml_scanner.stop_loss_veto_threshold = 0.30`
+- `risk_parameters.ml_exit_risk.threshold = 0.08`
+- `risk_parameters.ml_exit_risk.confirmations_required = 2`
+- `risk_parameters.ml_exit_risk.min_age_minutes = 10`
+- Dashboard open-position `risk_level` is now derived purely from ML exit-risk score proximity, not the old heuristic `critical/caution` labelling
 
-Key HP vs V006b: `reg_lambda` 10→37.5 (heavy L2), `colsample_bytree` 0.85→0.42 (aggressive dropout),
-`eta` 0.05→0.020, `downside_penalty` 2.5→2.83, `huber_delta` 1.0→2.20.
+### Entry stack notes
 
-Drops 23 features (5 groups): `underlying_price` (directional bias), `market_regime` (SPY confounds
-ETF ranking), `vix_features` (macro fear hurts option quality assessment), `vol_momentum` (redundant),
-`credit_efficiency` (credit_to_width already captures this).
+- The current ranker is a DTE<=21 regime-matched `return_on_risk` model tuned for the live scanner rather than a generic broad-DTE ranking benchmark.
+- `large_loss_classifier_v008` is intentionally stricter than the previous champion family on threshold calibration and feature pruning; it keeps only the feature groups that held up best in Optuna search.
+- `stop_loss_classifier_v008` remains a high-recall veto layer. It is designed to reject likely stop-loss candidates, not to maximize precision.
 
-**NOTE on loss design**: `downside_scale=1000.0` (effectively symmetric Huber) is the correct default for
-the ranker. Symmetric loss gives the cleanest RoR ranking signal; downside protection is the LLC's job.
-Optuna HP search (ror_v007, 101 trials) independently confirmed this — TPE converged to scale=4–10
-(near-symmetric) even when given freedom to search from 0.5. V006d ranker (scale=0.10, 7.8× asymmetric
-gradient) was rejected: mean PnL $11 vs $66, RoR 0.013 vs 0.167. Do not reduce `downside_scale` below
-the default 1000.0 for the ranker.
+### Exit-risk stack notes
 
-Canonical retrain command (V006c ranker — `--downside-scale` and `--error-scale` omitted since 1000.0 is now the default):
-```
-PYTHONPATH=. .venv/bin/python -m ml.models.train_xgboost \
-  --input  artifacts/datasets/candidate_rows/candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k \
-  --output artifacts/models/xgboost_v006c_500r_dp28.json \
-  --target return_on_risk --target-scale 0.10 --target-clip 5.0 \
-  --num-boost-round 500 --val-fraction 0.0 --early-stopping-rounds 0 --embargo-days 30 \
-  --eta 0.02033541341546644 --max-depth 3 --min-child-weight 5.467924645206163 \
-  --subsample 0.6688247220130267 --colsample-bytree 0.41677825864481716 \
-  --reg-lambda 37.4687664351599 --reg-alpha 0.1564206251204104 \
-  --downside-penalty 2.829276302091746 --huber-delta 2.2027261783930134 \
-  --exclude-features underlying_close,underlying_return_1d,underlying_return_3d,underlying_return_5d,underlying_return_20d,underlying_range_pct,underlying_sma_20_distance_pct,underlying_above_sma_20,underlying_volume,underlying_volatility_ratio_5d_20d,underlying_vol_vs_market,vol_acceleration,market_return_5d,market_return_20d,market_realized_vol_5d,market_realized_vol_20d,market_sma_20_distance_pct,market_above_sma_20,market_volatility_ratio_5d_20d,vix_regime,vix_return_5d,vix_realized_vol_5d,credit_per_day_per_risk
-```
+- The current open-position model predicts `stop_loss_hit_30m`, not eventual trade profitability.
+- Runtime order in `src/position_monitor.py` is: ML exit-risk gate, then profit-take, then deterministic stop-loss fallback.
+- A live close requires `2` consecutive ML confirmations above the `0.08` threshold.
 
-Rollback (ranker): `xgboost_v006b_500r_dp25.json` (PF 1.96, passes 16/33 exit criteria).
+### Historical references
 
-### V006e large-loss classifier details
-
-Same trained model as V006d (identical `model_sha256 = 21e40d9a...`). Only difference: the WF
-evaluation now uses the optimized `scale_pos_weight=12.19` in every fold instead of a per-fold
-recomputed natural ratio (~7.0). This makes WF metrics production-accurate.
-
-Trained via full 2-pass Optuna (75 HP trials + 11 feature trials). **Key lever: `reg_alpha=3.86`**
-(L1 regularisation — V006b had 0.0). L1 eliminates spurious correlations internally, making manual
-feature group exclusion unnecessary — all 11 toggleable groups included.
-
-| Metric | V006b | V006c | V006d | V006e |
-|--------|-------|-------|-------|-------|
-| WF AUC | 0.8482 | 0.8519 | 0.8502* | **0.8502** |
-| WF Recall | 98.0% | 97.8% | 98.00%* | **98.85%** |
-| Holdout Recall | 98.2% | 97.6% | **98.8%** | **98.8%** |
-| FN | 280 | 371 | **190** | **190** |
-| mean_prob_positive | 0.695 | 0.702 | **0.755** | **0.755** |
-| Features | 60 | 33 | 61 | 61 |
-
-*V006d WF metrics were computed with SPW≈7.0 per fold (bug), not the deployed 12.19. V006e fixes this.
-
-Canonical retrain command (V006e large-loss classifier):
-```
-PYTHONPATH=. .venv/bin/python -m ml.models.train_large_loss_classifier \
-  --input  artifacts/datasets/candidate_rows/candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k \
-  --output artifacts/models/large_loss_classifier_v006e.json \
-  --target large_loss_label --embargo-days 30 \
-  --num-boost-round 500 \
-  --eta 0.045008498955439846 \
-  --max-depth 4 \
-  --min-child-weight 22.655215632674313 \
-  --subsample 0.5668613673345367 \
-  --colsample-bytree 0.8032706228748546 \
-  --reg-lambda 17.76545691458812 \
-  --reg-alpha 3.8622802600545603 \
-  --scale-pos-weight 12.18600024160314
-```
-
-Rollback (classifier): `large_loss_classifier_v006d.json` (same model, WF recall 98.00% with SPW bug).
-
-Previous artifacts (V006, trained on full 1.44M enriched dataset — kept as reference):
-
-| Artifact | File |
-|----------|------|
-| XGBoost ranker | `xgboost_v006_500r_dp25.json` |
-| Large-loss classifier | `large_loss_classifier_v006.json` |
-| Stop-loss classifier | `stop_loss_classifier_v006.json` |
+- `docs/V006_MODEL_STITCHING.md` is now a historical promotion record for the older `v006`/`v006b` family.
+- `docs/ML_TRADE_PIPELINE.md` is the canonical entry-funnel evaluation contract.
+- `docs/INTRADAY_RISK_DATASET.md` documents the separate training flow for the open-position risk monitor.

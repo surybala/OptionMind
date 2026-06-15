@@ -20,10 +20,10 @@ Market candidates
 [1] XGBoost ranker          — scores each spread by predicted return-on-risk
       │
       ▼
-[2] Large-loss classifier   — vetoes spreads where p(large_loss) > 0.70
+[2] Large-loss classifier   — vetoes spreads where p(large_loss) > 0.60
       │
       ▼
-[3] Stop-loss classifier    — vetoes spreads where p(stop_loss_hit) > 0.15
+[3] Stop-loss classifier    — vetoes spreads where p(stop_loss_hit) > 0.30
       │
       ▼
 [4] Portfolio risk controls — gamma stress cap, concentration limits
@@ -38,24 +38,24 @@ The ranker champion is registered in [artifacts/model_registry.json](/Users/sury
 
 | Artifact | File | Key Metric |
 |----------|------|------------|
-| Champion RoR ranker | `artifacts/models/xgboost_v006c_500r_dp28.json` | Holdout top-decile PF `2.471`, win rate `78.6%`, mean RoR `16.7%`, large-loss rate `3.5%`, stop-loss rate `9.9%` |
-| Large-loss classifier | `artifacts/models/large_loss_classifier_v006e.json` | Holdout AUC `0.8476`, recall `98.8%`, walk-forward AUC `0.8502`, walk-forward recall `98.9%` |
-| Stop-loss classifier | `artifacts/models/stop_loss_classifier_v006c.json` | Holdout AUC `0.8110`, recall `99.8%`, walk-forward AUC `0.8163`, walk-forward recall `99.8%` |
+| Champion RoR ranker | `artifacts/models/xgboost_v007b_dte21_quant.json` | Holdout RoR `0.4717`, PF `1.733`, win rate `68.9%`, mean PnL `$46.39`, WF PF min `1.874` |
+| Large-loss classifier | `artifacts/models/large_loss_classifier_v008.json` | Holdout AUC `0.8439`, recall `91.1%` at `0.60`, precision `38.3%`, WF AUC `0.8521` |
+| Stop-loss classifier | `artifacts/models/stop_loss_classifier_v008.json` | Holdout AUC `0.8002`, recall `99.5%` at `0.30`, precision `36.6%`, WF AUC `0.8230` |
 
-Training dataset: `candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k`
-(500K rows, sqrt-frequency hierarchical sampling across 39 ETF underlyings, max 12% per underlying)
+Training dataset: `candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k_dte21`
+(500K rows, DTE<=21, sqrt-frequency hierarchical sampling across 39 ETF underlyings, max 12% per underlying)
 
-The current champion ranker (`v006c`) is a 2-pass Optuna-optimized return-on-risk model:
+The current champion ranker (`xgboost_v007b_dte21_quant`) is a DTE-matched return-on-risk model promoted for the live entry funnel:
 
 - Target: `return_on_risk`
-- Feature set: `39` engineered features from `features_v005`
-- Training workflow: `100` hyperparameter trials plus `64` feature-group trials
-- Promotion status: passes all `33/33` documented exit criteria gates
+- Feature set: `43` engineered features from `features_v006`, including `vrp_5d`, `vrp_20d`, `gamma_theta_ratio`, `sigma_buffer`, and `vega_margin_ratio`
+- Training workflow: `100` Optuna hyperparameter trials on the DTE<=21 live-matched dataset
+- Promotion status: current live champion in `artifacts/model_registry.json` with rollback target `xgboost_v006c_500r_dp28`
 
 The two entry-time classifiers serve different purposes:
 
-- `large_loss_classifier_v006e` catches tail-risk setups that are likely to become outsized losers.
-- `stop_loss_classifier_v006c` catches trades that are likely to trip deterministic stop-loss logic even if they are not full large-loss tails.
+- `large_loss_classifier_v008` catches tail-risk setups that are likely to become outsized losers and vetoes them at `p(large_loss) > 0.60`.
+- `stop_loss_classifier_v008` catches trades that are likely to trip deterministic stop-loss logic and vetoes them at `p(stop_loss_hit) > 0.30`.
 
 ## Open-Position ML Risk Monitor
 
@@ -65,14 +65,16 @@ Once a spread is open, a separate intraday model monitors the live position stat
 Open position
       │
       ▼
-[1] Profit-take rule            — lock in winners first
+[1] ML risk-exit model          — proactive close on rising short-horizon stop risk
       │
       ▼
-[2] ML risk-exit model          — proactive close on rising short-horizon stop risk
+[2] Profit-take rule            — lock in captured premium when no ML close fires
       │
       ▼
 [3] Deterministic stop-loss     — final fallback catch-all
 ```
+
+The live monitor currently evaluates the ML exit-risk gate before profit-take. A close only fires after the configured number of consecutive confirmations.
 
 This model is registered separately in [artifacts/risk_model_registry.json](/Users/surya/IdeaProjects/OptionMind/artifacts/risk_model_registry.json).
 
@@ -80,8 +82,8 @@ This model is registered separately in [artifacts/risk_model_registry.json](/Use
 
 | Artifact | File | Role | Key Metric |
 |----------|------|------|------------|
-| Champion risk monitor | `artifacts/models/intraday_risk_monitor_stop30m_fullraw_v003.json` | Active live proactive exit model | Holdout AUC `0.9458`, recall `71.6%`, close rate `5.48%`, false-close rate `5.34%` |
-| Rollback risk monitor | `artifacts/models/intraday_risk_monitor_stop30m_fullraw_v002.json` | Safer rollback baseline | Holdout AUC `0.9440`, recall `61.8%`, close rate `3.27%`, false-close rate `3.15%` |
+| Champion risk monitor | `artifacts/models/intraday_risk_monitor_stop30m_v004.json` | Active live proactive exit model | Holdout AUC `0.9303`, recall `69.2%`, close rate `6.40%`, false-close rate `6.18%` |
+| Rollback risk monitor | `artifacts/models/intraday_risk_monitor_stop30m_fullraw_v003.json` | Previous champion / rollback target | Holdout AUC `0.9458`, recall `71.6%`, close rate `5.48%`, false-close rate `5.34%` |
 
 Risk-monitor training corpus:
 
@@ -90,7 +92,7 @@ Risk-monitor training corpus:
 - Feature set: live-compatible intraday spread-state features, realized vol, and option-leg mark structure
 - Current live feature version: `intraday_risk_live_monitor_features_v001`
 
-The active champion (`v003`) is intentionally more aggressive than the rollback model because the goal is to reduce drawdowns from bad short-vol trades, even if that slightly reduces premium harvest on some winners.
+The active champion (`intraday_risk_monitor_stop30m_v004`) runs at a higher operating threshold (`0.08` instead of `0.05`) and requires two consecutive confirmations before closing. The promotion notes record it as the winning challenger over `v003` at matched thresholds, while the live runtime uses the stricter `0.08` operating point to reduce single-minute churn.
 
 ### How The Risk Model Prevents Losses
 
@@ -120,10 +122,10 @@ Important operational details:
   "ml_scanner": {
     "enabled": true,
     "registry_path": "artifacts/model_registry.json",
-    "large_loss_classifier_path": "artifacts/models/large_loss_classifier_v006e.json",
-    "large_loss_veto_threshold": 0.70,
-    "stop_loss_classifier_path": "artifacts/models/stop_loss_classifier_v006c.json",
-    "stop_loss_veto_threshold": 0.15,
+    "large_loss_classifier_path": "artifacts/models/large_loss_classifier_v008.json",
+    "large_loss_veto_threshold": 0.60,
+    "stop_loss_classifier_path": "artifacts/models/stop_loss_classifier_v008.json",
+    "stop_loss_veto_threshold": 0.30,
     "min_dte": 7,
     "max_dte": 21
   },
@@ -131,7 +133,7 @@ Important operational details:
     "ml_exit_risk": {
       "enabled": true,
       "registry_path": "artifacts/risk_model_registry.json",
-      "threshold": 0.05,
+      "threshold": 0.08,
       "confirmations_required": 2,
       "min_age_minutes": 10
     }
@@ -142,9 +144,10 @@ Important operational details:
 Notes:
 
 - `universe: "etf"` now means the curated stable ETF preset, not every listed ETF.
-- `ml_exit_risk.threshold = 0.05` is the risk-score trigger cutoff.
+- `ml_exit_risk.threshold = 0.08` is the risk-score trigger cutoff.
 - `confirmations_required = 2` avoids closing on a single noisy minute.
 - `min_age_minutes = 10` prevents immediate post-entry churn.
+- Dashboard open-position severity badges are now driven purely by ML exit-risk score proximity (`SAFE` / `WATCH` / `CAUTION` / `CRITICAL`), not the legacy heuristic stop/gamma labels.
 
 ## ML Documentation
 
@@ -174,7 +177,7 @@ Notes:
 | `ml/models/evaluate_risk_adjusted_ranking.py` | Combined ranker + classifier evaluation |
 | `ml/models/registry.py` | Model registry: register, promote, load champion |
 | `src/risk_ml.py` | Live ML risk-exit model loading and scoring for open positions |
-| `src/portfolio_controls.py` | Portfolio risk service: gamma stress caps, concentration limits |
+| `src/portfolio_risk.py` | Portfolio risk service: gamma stress caps, concentration limits |
 | `src/position_monitor.py` | Open-position monitor: profit-take, ML risk exit, deterministic stop-loss fallback |
 | `agent.py` | Main agent loop |
 

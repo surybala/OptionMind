@@ -1,6 +1,6 @@
 # ML Trade Pipeline
 
-Last updated: 2026-06-14
+Last updated: 2026-06-15
 
 This is the canonical offline evaluation funnel for ML-selected credit-spread trades. Training runs should be judged by this pipeline because it mirrors the intended live selection path.
 
@@ -16,21 +16,26 @@ The evaluator records this as `trade_pipeline_selection` in the JSON report. Tha
 
 All train/test and walk-forward splits are now timestamp-based. `embargo_days` is enforced in calendar time for entry models and by grouped entry timestamp for intraday risk models, so the holdout gap reflects the actual forward horizon instead of an approximate row-count proxy.
 
-## Current Champion: V006b
+## Current Live Entry Stack
 
-All three artifacts trained on the balanced 500K-row dataset (`v006_balanced_cap12_500k`):
+All three entry artifacts are trained on the balanced 500K-row DTE<=21 dataset (`v006_balanced_cap12_500k_dte21`):
 
 | Artifact | File |
 |----------|------|
-| Ranker (champion) | `artifacts/models/xgboost_v006b_500r_dp25.json` |
-| Large-loss classifier | `artifacts/models/large_loss_classifier_v006b.json` |
-| Stop-loss classifier | `artifacts/models/stop_loss_classifier_v006b.json` |
+| Ranker (champion) | `artifacts/models/xgboost_v007b_dte21_quant.json` |
+| Large-loss classifier | `artifacts/models/large_loss_classifier_v008.json` |
+| Stop-loss classifier | `artifacts/models/stop_loss_classifier_v008.json` |
 
-Champion ranker holdout (top-10% selection, 12,636 trades):
-- PF: 1.96 | Win rate: 75.6% | Mean PnL: $56 | Mean RoR: 15.2%
-- p05 PnL: -$314 | p01 PnL: -$935 | Worst: -$1,710
-- Large-loss rate: 4.7% | Stop-loss rate: 11.5%
-- SMH share: 21.5% | Top-5 share: 51.2%
+Current live metrics from the registries:
+- Ranker `xgboost_v007b_dte21_quant`: holdout RoR `0.4717`, PF `1.733`, win rate `68.9%`, mean PnL `$46.39`, walk-forward PF min `1.874`, walk-forward PF avg `2.604`
+- Large-loss classifier `large_loss_classifier_v008`: holdout AUC `0.843878`, recall `0.910883`, precision `0.38261`, walk-forward AUC `0.852065`
+- Stop-loss classifier `stop_loss_classifier_v008`: holdout AUC `0.800183`, recall `0.995387`, precision `0.365765`, walk-forward AUC `0.822999`
+
+Current live thresholds from `config.json`:
+- `ml_scanner.large_loss_veto_threshold = 0.60`
+- `ml_scanner.stop_loss_veto_threshold = 0.30`
+
+The entry evaluator in this document covers the new-trade funnel only. Open-position exits are handled by the separate `intraday_risk_monitor_stop30m_v004` model in `artifacts/risk_model_registry.json`, currently configured at `threshold = 0.08` with `confirmations_required = 2`.
 
 ## Training Commands
 
@@ -38,7 +43,7 @@ Champion ranker holdout (top-10% selection, 12,636 trades):
 
 ```bash
 PYTHONPATH=. .venv/bin/python -m ml.models.train_xgboost \
-  --input  artifacts/datasets/candidate_rows/dataset_version=candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k \
+  --input  artifacts/datasets/candidate_rows/dataset_version=candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k_dte21 \
   --output artifacts/models/xgboost_<version>.json \
   --target return_on_risk \
   --target-scale 0.10 --target-clip 5.0 \
@@ -53,13 +58,13 @@ PYTHONPATH=. .venv/bin/python -m ml.models.train_xgboost \
 ```bash
 # Large-loss classifier
 PYTHONPATH=. .venv/bin/python -m ml.models.train_large_loss_classifier \
-  --input  artifacts/datasets/candidate_rows/dataset_version=candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k \
+  --input  artifacts/datasets/candidate_rows/dataset_version=candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k_dte21 \
   --output artifacts/models/large_loss_classifier_<version>.json \
   --target large_loss_label --embargo-days 30 --num-boost-round 300
 
 # Stop-loss classifier
 PYTHONPATH=. .venv/bin/python -m ml.models.train_large_loss_classifier \
-  --input  artifacts/datasets/candidate_rows/dataset_version=candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k \
+  --input  artifacts/datasets/candidate_rows/dataset_version=candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k_dte21 \
   --output artifacts/models/stop_loss_classifier_<version>.json \
   --target stop_loss_hit --embargo-days 30 --num-boost-round 300
 ```

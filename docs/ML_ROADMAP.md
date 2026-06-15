@@ -1,11 +1,11 @@
 # OptionMind ML Roadmap
 
-Last updated: 2026-05-27
+Last updated: 2026-06-15
 
 This roadmap turns the north-star spec into buildable milestones.
 
-**Current status: Phase 6 active (paper/shadow inference running with v006b champion).**
-Phases 0–6 are complete. Phase 7 (limited live deployment) is the next milestone.
+**Current status: the live runtime stack is wired around `xgboost_v007b_dte21_quant` + `large_loss_classifier_v008` + `stop_loss_classifier_v008`, with `intraday_risk_monitor_stop30m_v004` guarding open positions.**
+Phases 0–6 are complete. Current work is rollout hardening and keeping offline evaluation aligned with the live stack.
 
 ---
 
@@ -58,8 +58,8 @@ Leakage rule: no feature may use data from after the candidate decision timestam
 Current golden dataset: `candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_20wide_enriched`
 1.44M rows, 39 ETF underlyings, features_v005, labels_v002.
 
-Balanced training dataset: `candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k`
-500K rows, sqrt-frequency hierarchical sampling, max 12% per underlying.
+Balanced training dataset: `candidate_rows_massive_broad_etfs_pcs_ccs_20220526_20260425_v006_balanced_cap12_500k_dte21`
+500K rows, DTE<=21, sqrt-frequency hierarchical sampling, max 12% per underlying.
 
 ---
 
@@ -97,11 +97,13 @@ Implemented:
 - `ml/models/train_large_loss_classifier.py` — binary classifier for `large_loss_label` and `stop_loss_hit`.
 - `ml/models/evaluate_exit_criteria.py` — hard quality gates for the ranker.
 - `ml/models/evaluate_risk_adjusted_ranking.py` — combined ranker + classifier evaluation.
+- `ml/models/train_intraday_risk_monitor.py` — dedicated open-position exit-risk model for `stop_loss_hit_30m`.
 
-Current champion v006b metrics (top-10% holdout, 12,636 trades):
-- PF: 1.96 | Win rate: 75.6% | Mean PnL: $56 | Mean RoR: 15.2%
-- Large-loss classifier: AUC 0.848, recall 98.2%
-- Stop-loss classifier: AUC 0.804, recall 99.7%
+Current live stack metrics:
+- Ranker `xgboost_v007b_dte21_quant`: holdout RoR `0.4717`, PF `1.733`, win rate `68.9%`, mean PnL `$46.39`, walk-forward PF min `1.874`
+- Large-loss classifier `large_loss_classifier_v008`: AUC `0.843878`, recall `0.910883`, precision `0.38261`, walk-forward AUC `0.852065`
+- Stop-loss classifier `stop_loss_classifier_v008`: AUC `0.800183`, recall `0.995387`, precision `0.365765`, walk-forward AUC `0.822999`
+- Open-position risk monitor `intraday_risk_monitor_stop30m_v004`: AUC `0.930315`, recall `0.691576`, close rate `0.063957`, false-close rate `0.061815`
 
 ---
 
@@ -111,16 +113,17 @@ Goal: create a repeatable model lifecycle.
 
 Implemented:
 
-- `ml/models/registry.py` — register, promote, load champion.
-- `artifacts/model_registry.json` — single source of truth for the champion ranker.
-- v006b XGBoost ranker promoted as champion (2026-05-27).
+- `ml/models/registry.py` — register, promote, load champion entry artifacts.
+- `artifacts/model_registry.json` — single source of truth for the live entry stack.
+- `artifacts/risk_model_registry.json` — single source of truth for the live open-position exit model.
+- Current champions: `xgboost_v007b_dte21_quant` (2026-06-04), `large_loss_classifier_v008` and `stop_loss_classifier_v008` (2026-06-10), `intraday_risk_monitor_stop30m_v004` (2026-06-10).
 
 Each model version records: training data range, feature set version, label definition,
 model type and parameters, validation metrics, backtest metrics, promotion decision.
 
 ---
 
-## Phase 6: Paper And Shadow Inference ✓ (Active)
+## Phase 6: Paper And Shadow Inference ✓
 
 Goal: score real market candidates without risking capital first.
 
@@ -128,17 +131,18 @@ Implemented flow:
 
 1. `LivePaperInferenceProvider` in `src/model_scanner.py` generates PCS/CCS spread candidates from live option chains.
 2. Champion ranker scores candidates by predicted return-on-risk.
-3. Large-loss classifier vetoes candidates with `p(large_loss) > 0.70`.
-4. `PortfolioRiskService.filter_picks()` applies gamma stress caps and concentration limits.
-5. Trade picks are logged and executed as paper trades via Alpaca.
-6. Realized outcomes feed back into the dataset pipeline.
+3. Large-loss classifier vetoes candidates with `p(large_loss) > 0.60`.
+4. Stop-loss classifier vetoes candidates with `p(stop_loss_hit) > 0.30`.
+5. `PortfolioRiskService.filter_picks()` applies gamma stress caps and concentration limits.
+6. Trade picks are logged and executed via the runtime mode configured for the agent.
+7. Realized outcomes feed back into the dataset pipeline.
 
-The champion artifact is loaded automatically from `artifacts/model_registry.json`.
-The large-loss classifier path is configured in `config.json` under `ml_scanner.large_loss_classifier_path`.
+The entry artifacts are loaded automatically from `artifacts/model_registry.json`.
+The large-loss and stop-loss classifier paths are configured in `config.json` under `ml_scanner.*`.
 
 ---
 
-## Phase 7: Limited Live Deployment
+## Phase 7: Limited Live Deployment (Hardening In Progress)
 
 Goal: carefully introduce live trades with deterministic controls still active.
 
@@ -149,7 +153,7 @@ Controls required before going live:
 - Max daily loss
 - Max position size
 - Max concentration
-- Stop-loss monitor
+- Realtime stop-loss / exit-risk monitor
 - Kill switch
 - Rollback to previous champion
 
@@ -162,12 +166,8 @@ Prerequisites:
 
 ---
 
-## Immediate Next Task
+## Immediate Next Tasks
 
-Complete the paper/shadow gate (Phase 6) by accumulating ≥ 30 days or 200 paper trades and
-verifying profit factor ≥ 1.25 and large-loss rate ≤ 15% before considering Phase 7 rollout.
-
-Parallel build now underway: an `intraday_risk_rows` training corpus seeded
-from `candidate_rows` and backfilled with Massive minute bars so the future
-live risk monitor can train a dedicated exit-hazard model instead of reusing
-the entry ranker.
+- Keep the live documentation and config aligned around the `v007b` / `v008` / `v004` stack and current thresholds (`0.60`, `0.30`, `0.08`, `2` confirmations).
+- Continue hardening evaluation so promotion decisions reflect the real live funnel, including entry vetoes, portfolio controls, and the separate open-position exit-risk layer.
+- Use the `intraday_risk_rows` training flow to iterate on challengers for `intraday_risk_monitor_stop30m_v004` without regressing realtime feature compatibility.
