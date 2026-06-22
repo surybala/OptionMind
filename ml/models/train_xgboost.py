@@ -136,6 +136,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--include-features",
+        default="",
+        help="Optional comma-separated allowlist of model features.",
+    )
+    parser.add_argument(
         "--exclude-features",
         default="",
         help=(
@@ -163,6 +168,7 @@ def main() -> int:
     model_output = Path(args.model_output) if args.model_output else output.with_name(f"{output.stem}.xgboost.json")
     df = load_dataset(Path(args.input))
     exclude_features = {f.strip() for f in args.exclude_features.split(",") if f.strip()}
+    include_features = {f.strip() for f in args.include_features.split(",") if f.strip()} or None
     artifact = train_xgboost(
         df,
         model_output=model_output,
@@ -181,6 +187,7 @@ def main() -> int:
         max_rows_per_underlying=args.max_rows_per_underlying,
         high_vol_oversample_factor=args.high_vol_oversample_factor,
         exclude_features=exclude_features,
+        include_features=include_features,
         max_dte=args.max_dte,
         loss_config=AsymmetricLossConfig(
             downside_scale=args.downside_scale,
@@ -221,6 +228,7 @@ def train_xgboost(
     max_rows_per_underlying: int | None = None,
     high_vol_oversample_factor: int = 1,
     exclude_features: set[str] | None = None,
+    include_features: set[str] | None = None,
     max_dte: int | None = None,
 ) -> XGBoostModelArtifact:
     if xgb is None:
@@ -247,6 +255,8 @@ def train_xgboost(
 
     clean = _engineer_features(clean)
     feature_columns = _select_feature_columns(clean)
+    if include_features is not None:
+        feature_columns = [f for f in feature_columns if f in include_features]
     if exclude_features:
         feature_columns = [f for f in feature_columns if f not in exclude_features]
     if not feature_columns:

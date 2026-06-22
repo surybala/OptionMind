@@ -32,6 +32,14 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger('optionwheel')
 
+_MULTI_LEG_CLOSE_COUNTS = {
+    'PCS': 2,
+    'CCS': 2,
+    'IC': 4,
+    'IFLY': 4,
+    'STRANGLE': 2,
+}
+
 
 # ── OSI symbol builder (mirrors executor._osi_symbol) ─────────────────────────
 
@@ -83,6 +91,38 @@ def _pos_to_osi_set(pos: dict) -> set[str]:
         if sc: osi.add(_osi(symbol, expiry, sc, 'CALL'))
 
     return osi
+
+
+def _expected_close_leg_count(pos: dict) -> int:
+    return _MULTI_LEG_CLOSE_COUNTS.get(str(pos.get('type') or '').upper(), 1)
+
+
+def _normalize_order_class(value) -> str:
+    text = str(value or '').strip().lower()
+    if not text:
+        return ''
+    if '.' in text:
+        text = text.split('.')[-1]
+    return text
+
+
+def _is_partial_multi_leg_close_order(pos: dict, order) -> bool:
+    expected = _expected_close_leg_count(pos)
+    if expected <= 1:
+        return False
+
+    raw_legs = getattr(order, 'legs', None)
+    legs = raw_legs if isinstance(raw_legs, (list, tuple)) else None
+    if legs is not None:
+        return len(legs) < expected
+
+    order_class = _normalize_order_class(getattr(order, 'order_class', ''))
+    if order_class and order_class == 'mleg':
+        return False
+
+    symbol = str(getattr(order, 'symbol', '') or '').strip()
+    side = str(getattr(order, 'side', '') or '').strip()
+    return bool(symbol or side or order_class != 'mleg')
 
 
 # ── Reconciler ─────────────────────────────────────────────────────────────────
@@ -278,6 +318,23 @@ class PositionReconciler:
                     continue
 
                 if order_status in _OPEN:
+                    if _is_partial_multi_leg_close_order(pos, order):
+                        try:
+                            self.executor.client.cancel_order_by_id(order_id)
+                            cancel_note = "canceled on Alpaca"
+                        except Exception as exc:
+                            cancel_note = f"cancel attempt failed ({exc})"
+                        self.db.reopen_position(pos_id)
+                        _log.warning(
+                            "[reconciler] PENDING_CLOSE id=%s %s %s — close "
+                            "order %s is a partial/non-MLEG close for a "
+                            "multi-leg position; %s and reopened to EXECUTED "
+                            "for resubmission.",
+                            pos_id, pos.get('type'), pos.get('symbol'),
+                            order_id, cancel_note,
+                        )
+                        reopened += 1
+                        continue
                     _log.info(
                         "[reconciler] PENDING_CLOSE id=%s %s %s — close order "
                         "%s still '%s'; leaving PENDING_CLOSE.",

@@ -436,7 +436,7 @@ def _engineer_intraday_features(df: pd.DataFrame) -> pd.DataFrame:
     clean["current_debit_to_profit_take"] = (current_debit / profit_take_debit.replace(0.0, np.nan)).round(8)
     clean["debit_to_width"] = (current_debit / spread_width.replace(0.0, np.nan)).round(8)
     clean["loss_pct_of_max_loss"] = (
-        ((-pnl_per_contract).clip(lower=0.0) / (max_loss.replace(0.0, np.nan) * 100.0))
+        ((-pnl_per_contract).clip(lower=0.0) / max_loss.replace(0.0, np.nan))
     ).round(8)
     clean["credit_retained_pct"] = (current_debit / entry_credit.replace(0.0, np.nan)).round(8)
 

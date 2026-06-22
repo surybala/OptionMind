@@ -126,6 +126,11 @@ def parse_args() -> argparse.Namespace:
              "Should match the veto threshold used at inference time.",
     )
     parser.add_argument(
+        "--include-features",
+        default="",
+        help="Optional comma-separated allowlist of model features.",
+    )
+    parser.add_argument(
         "--exclude-features",
         default="",
         help=(
@@ -158,6 +163,7 @@ def main() -> int:
         df = df[dte_col <= args.max_dte].reset_index(drop=True)
         print(f"DTE filter: {pre:,} -> {len(df):,} rows (max_dte={args.max_dte})", file=sys.stderr)
     exclude_features = {f.strip() for f in args.exclude_features.split(",") if f.strip()}
+    include_features = {f.strip() for f in args.include_features.split(",") if f.strip()} or None
     artifact = train_large_loss_classifier(
         df,
         model_output=model_output,
@@ -173,6 +179,7 @@ def main() -> int:
         early_stopping_rounds=args.early_stopping_rounds,
         scale_pos_weight=args.scale_pos_weight,
         exclude_features=exclude_features,
+        include_features=include_features,
         threshold=args.threshold,
         params={
             "max_depth": args.max_depth,
@@ -207,6 +214,7 @@ def train_large_loss_classifier(
     num_boost_round: int = 200,
     scale_pos_weight: float | None = None,
     exclude_features: set[str] | None = None,
+    include_features: set[str] | None = None,
     threshold: float = 0.15,
     params: dict[str, Any] | None = None,
 ) -> LargeLossClassifierArtifact:
@@ -243,6 +251,8 @@ def train_large_loss_classifier(
 
     clean = _engineer_features(clean)
     feature_columns = _select_feature_columns(clean)
+    if include_features is not None:
+        feature_columns = [f for f in feature_columns if f in include_features]
     if exclude_features:
         feature_columns = [f for f in feature_columns if f not in exclude_features]
     if not feature_columns:

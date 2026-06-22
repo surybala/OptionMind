@@ -158,6 +158,20 @@ def test_engineer_features_skips_iv_skew_wing_when_columns_missing():
     assert "iv_skew_wing" not in out.columns
 
 
+def test_engineer_features_skips_iv_skew_when_rows_have_no_implied_volatility():
+    df = pd.DataFrame([{
+        "long_option_entry_price": 0.20,
+        "underlying_close": 500.0,
+        "long_strike": 495.0,
+        "option_type": "put",
+        "dte": 0,
+    }])
+
+    out = _engineer_features(df)
+
+    assert "iv_skew_wing" not in out.columns
+
+
 def test_bs_iv_simple_roundtrip():
     """Compute a price from a known sigma; recover the same sigma via IV solver."""
     S, K, T, r, sigma = 500.0, 490.0, 21 / 365.0, 0.045, 0.25

@@ -466,7 +466,14 @@ def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     # IV skew wing: long-leg IV minus short-leg IV.
     # Requires columns present in credit-spread rows only; silently skipped for
     # short-option datasets that lack long_strike / long_option_entry_price.
-    _iv_skew_required = {"long_option_entry_price", "underlying_close", "long_strike", "option_type", "dte"}
+    _iv_skew_required = {
+        "implied_volatility",
+        "long_option_entry_price",
+        "underlying_close",
+        "long_strike",
+        "option_type",
+        "dte",
+    }
     if _iv_skew_required.issubset(df.columns) and "iv_skew_wing" not in df.columns:
         df["iv_skew_wing"] = _compute_iv_skew_wing(df)
 

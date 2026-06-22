@@ -3,7 +3,17 @@ import pytest
 
 pytest.importorskip("xgboost")
 
-from ml.models.train_intraday_risk_monitor import train_intraday_risk_monitor
+from ml.models.train_intraday_risk_monitor import _engineer_intraday_features, train_intraday_risk_monitor
+
+
+def test_loss_pct_of_max_loss_uses_contract_dollar_units():
+    frame = _frame(entry_count=1, states_per_entry=1)
+    frame.loc[0, "max_loss"] = 350.0
+    frame.loc[0, "pnl_per_contract"] = -175.0
+
+    engineered = _engineer_intraday_features(frame)
+
+    assert engineered["loss_pct_of_max_loss"].iloc[0] == pytest.approx(0.5)
 
 
 def _frame(entry_count: int = 12, states_per_entry: int = 3) -> pd.DataFrame:

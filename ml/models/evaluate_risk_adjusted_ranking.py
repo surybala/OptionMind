@@ -130,8 +130,6 @@ def evaluate_risk_adjusted_ranking(
     config:
         Evaluation configuration.  Defaults to ``RiskAdjustedConfig()``.
     """
-    if xgb is None:
-        raise ImportError("xgboost is required to evaluate risk-adjusted ranking.")
     cfg = config or RiskAdjustedConfig()
     df = load_dataset(dataset_path)
     ranker_artifact = json.loads(ranker_artifact_path.read_text(encoding="utf-8"))
@@ -303,6 +301,8 @@ def compute_sortino_score(gated_score: pd.Series, df: pd.DataFrame) -> pd.Series
 
 
 def _score_classifier(df: pd.DataFrame, artifact_path: Path) -> np.ndarray:
+    if xgb is None:
+        raise ImportError("xgboost is required to score risk classifier artifacts.")
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
     engineered = _engineer_features(df.copy())
     feature_columns = list(artifact["feature_columns"])

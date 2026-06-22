@@ -443,8 +443,8 @@ class TestLimitOrderRequestMleg(unittest.TestCase):
         self.executor.execute_close_position(pos, limit_price=0.50, dry_run=False)
         self.assertEqual(len(self._legs()), 2)
 
-    def test_close_pcs_omits_missing_long_leg_from_broker_snapshot(self):
-        """Avoid SELL_TO_CLOSE when Alpaca does not show the long hedge leg."""
+    def test_close_pcs_keeps_mleg_when_long_missing_from_broker_snapshot(self):
+        """Incomplete Alpaca snapshots must not downgrade a spread close."""
         short_sym = self._osi('SPY', '2026-04-30', 480.0, 'PUT')
         long_sym = self._osi('SPY', '2026-04-30', 475.0, 'PUT')
         self.executor.client.get_all_positions.return_value = [
@@ -455,12 +455,10 @@ class TestLimitOrderRequestMleg(unittest.TestCase):
         self.executor.execute_close_position(pos, limit_price=0.50, dry_run=False)
 
         kw = self._kw()
-        self.assertNotIn('legs', kw)
-        self.assertEqual(kw['symbol'], short_sym)
-        self.assertNotEqual(kw['symbol'], long_sym)
-        from src.executor import OrderSide, PositionIntent
-        self.assertIs(kw['side'], OrderSide.BUY)
-        self.assertIs(kw['position_intent'], PositionIntent.BUY_TO_CLOSE)
+        self.assertIs(kw['order_class'], self._mleg)
+        self.assertEqual(len(kw['legs']), 2)
+        syms = {leg['symbol'] for leg in kw['legs']}
+        self.assertEqual(syms, {short_sym, long_sym})
 
     def test_close_pcs_short_is_buy_to_close(self):
         """Reversing PCS: the original short put is now bought to close."""

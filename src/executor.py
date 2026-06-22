@@ -704,6 +704,7 @@ class AlpacaExecutor:
         lp = max(0.01, round(limit_price, 2)) if limit_price is not None else None
 
         broker_qty = self._get_option_position_qty_by_symbol()
+        multi_leg_close = strat in {'PCS', 'CCS', 'IC', 'IFLY', 'STRANGLE'}
 
         def _held(symbol_: str, expected_side: str) -> bool:
             if broker_qty is None:
@@ -714,6 +715,26 @@ class AlpacaExecutor:
             return qty < 0 if expected_side == 'short' else qty > 0
 
         def _add_leg(specs: list[dict], option_symbol: str, side, intent, expected_side: str) -> None:
+            if multi_leg_close:
+                # Alpaca's position snapshot can omit hedge legs for open MLEG
+                # spreads.  Keep the full DB-defined close order intact instead
+                # of silently degrading a spread close into a mismatched
+                # single-leg order with the spread's net debit limit.
+                if broker_qty is not None and not _held(option_symbol, expected_side):
+                    _log.warning(
+                        "[executor] Close %s %s: Alpaca position snapshot does "
+                        "not show the expected %s leg %s; submitting the full "
+                        "multi-leg close from DB legs.",
+                        strat, symbol, expected_side, option_symbol,
+                    )
+                specs.append({
+                    'symbol': option_symbol,
+                    'side': side,
+                    'intent': intent,
+                    'expected_side': expected_side,
+                })
+                return
+
             if not _held(option_symbol, expected_side):
                 _log.warning(
                     "[executor] Close %s %s: skipping %s leg %s because Alpaca "

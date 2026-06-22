@@ -272,9 +272,11 @@ class TestReconcilePendingCloses:
             _osi(symbol, FUTURE_EXPIRY, 145.0, 'PUT'),
         }
 
-    def _order(self, status):
+    def _order(self, status, **attrs):
         o = MagicMock()
         o.status = status
+        for key, value in attrs.items():
+            setattr(o, key, value)
         return o
 
     def test_legs_gone_confirms_close(self):
@@ -324,7 +326,11 @@ class TestReconcilePendingCloses:
         db.mark_pending_close(tid, pnl=12.34, close_order_id='CLOSE-OPEN-1')
         osis = self._pcs_osis()
         recon = _make_reconciler(db, alpaca_symbols=osis)
-        recon.executor.client.get_order_by_id.return_value = self._order('new')
+        recon.executor.client.get_order_by_id.return_value = self._order(
+            'new',
+            order_class='mleg',
+            legs=[MagicMock(), MagicMock()],
+        )
 
         result = recon.reconcile_pending_closes(alpaca_symbols=osis)
 
@@ -333,6 +339,26 @@ class TestReconcilePendingCloses:
         rows = db.get_pending_close_positions()
         assert len(rows) == 1
         assert rows[0]['order_id'] == 'CLOSE-OPEN-1'
+
+    def test_legs_present_with_open_partial_close_order_reopens(self):
+        db   = _tmp_db()
+        tid  = self._insert_pending_close(db)
+        db.mark_pending_close(tid, pnl=12.34, close_order_id='CLOSE-PARTIAL-1')
+        osis = self._pcs_osis()
+        recon = _make_reconciler(db, alpaca_symbols=osis)
+        recon.executor.client.get_order_by_id.return_value = self._order(
+            'new',
+            symbol=_osi('AAPL', FUTURE_EXPIRY, 150.0, 'PUT'),
+        )
+
+        result = recon.reconcile_pending_closes(alpaca_symbols=osis)
+
+        assert result['confirmed'] == 0
+        assert result['reopened'] == 1
+        recon.executor.client.cancel_order_by_id.assert_called_once_with('CLOSE-PARTIAL-1')
+        open_pos = db.get_open_positions()
+        assert len(open_pos) == 1
+        assert open_pos[0]['status'] == 'EXECUTED'
 
     def test_legs_present_with_terminal_close_order_reopens(self):
         db   = _tmp_db()
