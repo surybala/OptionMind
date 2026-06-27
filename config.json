@@ -80,22 +80,22 @@
     "_auto_execute_prob_note": "Legacy compatibility field only; live auto-mode does not use a probability threshold.",
     "stop_loss_multiplier": 2.0,
     "_stop_loss_note": "Legacy guard: close when current_mark > multiplier × entry_premium. Still active but the width-relative guard below is the primary trigger for spreads.",
-    "stop_loss_max_loss_pct": 0.80,
-    "_stop_loss_max_loss_note": "Primary spread guard: close when unrealised loss exceeds this fraction of max possible loss (spread_width - entry_premium). 0.80 = exit when 80% of width is lost. Set to null to disable (legacy multiplier only).",
+    "stop_loss_max_loss_pct": 0.30,
+    "_stop_loss_max_loss_note": "Primary spread guard: close when unrealised loss exceeds this fraction of max possible loss (spread_width - entry_premium). 0.30 = exit when 30% of max loss is reached. Set to null to disable (legacy multiplier only).",
     "stop_loss_check_interval_minutes": 1,
     "_interval_note": "How often the position monitor polls for stop-loss triggers during market hours (default 15). Lower values give tighter intraday protection at the cost of more API calls.",
-    "new_position_grace_minutes": 5,
+    "new_position_grace_minutes": 2,
     "_new_position_grace_note": "Do not fire stop-loss, profit-take, or gamma-risk exits on freshly opened positions until this many minutes have passed. Prevents noisy immediate closeouts while fills, quotes, and broker greeks settle.",
     "max_loss_multiple": {
-      "enabled": false,
-      "default": 30.0,
+      "enabled": true,
+      "default": 8.0,
       "by_strategy": {
-        "PCS": 30.0,
-        "CCS": 30.0,
-        "IC": 30.0,
-        "IFLY": 30.0
+        "PCS": 8.0,
+        "CCS": 8.0,
+        "IC": 6.0,
+        "IFLY": 6.0
       },
-      "_note": "Reject new trades whose max loss per contract is too large relative to collected credit. 30.0 means do not risk more than $30 for each $1 collected."
+      "_note": "Reject new trades whose max loss per contract is too large relative to collected credit. 8.0 means do not risk more than $8 for each $1 collected on standard spreads."
     },
     "ml_position_sizing": {
       "enabled": true,
@@ -184,11 +184,11 @@
       "artifact_path": "",
       "registry_path": "artifacts/risk_model_registry.json",
       "threshold": 0.08,
-      "confirmations_required": 2,
-      "min_age_minutes": 10,
+      "confirmations_required": 1,
+      "min_age_minutes": 5,
       "min_dte": 0,
       "max_dte": 21,
-      "_note": "Primary proactive exit model for open positions. Loads the champion from artifacts/risk_model_registry.json and closes when score >= threshold for the configured number of consecutive confirmations. Current live config requires 2 confirmations; deterministic stop-loss remains active as the final fallback; gamma-risk manual close is disabled in live config."
+      "_note": "Primary proactive exit model for open positions. Loads the champion from artifacts/risk_model_registry.json and closes when score >= threshold for the configured number of consecutive confirmations. Current live config requires 1 confirmation after a 5-minute warm-up; deterministic stop-loss remains active as the final fallback; gamma-risk manual close is disabled in live config."
     },
     "vix_filter": {
       "enabled": true,

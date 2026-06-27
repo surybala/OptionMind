@@ -123,9 +123,12 @@ The live entry stack is loaded from `artifacts/model_registry.json`. The live op
 - Entry rollback ranker: `xgboost_v006c_500r_dp28`
 - `ml_scanner.large_loss_veto_threshold = 0.60`
 - `ml_scanner.stop_loss_veto_threshold = 0.30`
+- `risk_parameters.stop_loss_max_loss_pct = 0.30`
+- `risk_parameters.new_position_grace_minutes = 2`
+- `risk_parameters.max_loss_multiple.default = 8.0` (`PCS`/`CCS`), `6.0` (`IC`/`IFLY`)
 - `risk_parameters.ml_exit_risk.threshold = 0.08`
-- `risk_parameters.ml_exit_risk.confirmations_required = 2`
-- `risk_parameters.ml_exit_risk.min_age_minutes = 10`
+- `risk_parameters.ml_exit_risk.confirmations_required = 1`
+- `risk_parameters.ml_exit_risk.min_age_minutes = 5`
 - Dashboard open-position `risk_level` is now derived purely from ML exit-risk score proximity, not the old heuristic `critical/caution` labelling
 
 ### Entry stack notes

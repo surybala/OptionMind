@@ -195,17 +195,39 @@ class TestPositionMonitor:
 
     @patch('src.market_data.adapter.yf.Ticker')
     def test_pcs_triggers_exactly_at_boundary(self, mock_tf):
-        """Loss exactly == 2× premium is NOT a trigger (strictly greater)."""
+        """Loss exactly == 2× premium now closes immediately."""
         db  = _tmp_db()
         entry_premium = 0.50
-        # mark = short - long = 1.50 - 0.00 = 1.50 → loss = 1.50 - 0.50 = 1.00 = 2× (not > 2×)
+        # mark = short - long = 1.50 - 0.00 = 1.50 → loss = 1.50 - 0.50 = 1.00 = 2×
         mock_tf.return_value = _mock_yf(puts={150.0: 1.50, 145.0: 0.00}, calls={})
         db.log_trade('AAPL', FUTURE_EXPIRY, 150, 'PCS', entry_premium, 0.80,
                      status='EXECUTED',
                      legs={'short_strike': 150.0, 'long_strike': 145.0})
         monitor = _make_monitor(db)
         closed  = monitor.run(dry_run=True)
-        assert closed == []   # exactly 2× → no close
+        assert len(closed) == 1
+
+    @patch('src.market_data.adapter.yf.Ticker')
+    def test_pcs_width_relative_stop_triggers_exactly_at_boundary(self, mock_tf):
+        """Width-relative spread stop closes as soon as the configured boundary is hit."""
+        db  = _tmp_db()
+        entry_premium = 0.50
+        # width=5.00, max_loss=4.50, 30% threshold=1.35, so mark=1.85 hits the boundary exactly.
+        mock_tf.return_value = _mock_yf(puts={150.0: 1.85, 145.0: 0.00}, calls={})
+        db.log_trade('AAPL', FUTURE_EXPIRY, 150, 'PCS', entry_premium, 0.80,
+                     status='EXECUTED',
+                     legs={'short_strike': 150.0, 'long_strike': 145.0})
+        monitor = _make_monitor(
+            db,
+            {
+                'risk_parameters': {
+                    'stop_loss_multiplier': 99.0,
+                    'stop_loss_max_loss_pct': 0.30,
+                }
+            },
+        )
+        closed = monitor.run(dry_run=True)
+        assert len(closed) == 1
 
     # ── CCS stop-loss ─────────────────────────────────────────────────────────
 

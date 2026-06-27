@@ -35,7 +35,7 @@ Current live thresholds from `config.json`:
 - `ml_scanner.large_loss_veto_threshold = 0.60`
 - `ml_scanner.stop_loss_veto_threshold = 0.30`
 
-The entry evaluator in this document covers the new-trade funnel only. Open-position exits are handled by the separate `intraday_risk_monitor_stop30m_v004` model in `artifacts/risk_model_registry.json`, currently configured at `threshold = 0.08` with `confirmations_required = 2`.
+The entry evaluator in this document covers the new-trade funnel only. Open-position exits are handled by the separate `intraday_risk_monitor_stop30m_v004` model in `artifacts/risk_model_registry.json`, currently configured at `threshold = 0.08`, `confirmations_required = 1`, and `min_age_minutes = 5`.
 
 ## Training Commands
 

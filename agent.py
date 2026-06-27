@@ -70,6 +70,7 @@ from src.agent_risk import (
     apply_ml_position_sizing,
     apply_ml_quantity_overlays,
     capital_for_pick,
+    filter_max_loss_multiple,
 )
 from src.agent_audit import (
     mispricing_score as mispricing_score_for_pick,
@@ -122,6 +123,37 @@ def _count_enabled_strategies(config: dict) -> int:
     strategies = config.get('strategies', {})
     count = sum(1 for v in strategies.values() if v.get('enabled', False))
     return max(count, 1)
+
+
+def _max_loss_multiple_limit(config: dict, pick: dict) -> float:
+    cfg = config.get('risk_parameters', {}).get('max_loss_multiple', {})
+    default_limit = float(cfg.get('default', cfg.get('limit', 6.0)))
+    by_strategy = cfg.get('by_strategy', {})
+    strat = (pick.get('strategy') or '').upper()
+    try:
+        return float(by_strategy.get(strat, default_limit))
+    except (TypeError, ValueError):
+        return default_limit
+
+
+def _max_loss_multiple_reject_reason(config: dict, pick: dict) -> str:
+    limit = _max_loss_multiple_limit(config, pick)
+    try:
+        multiple = float(pick.get('max_loss_multiple'))
+    except (TypeError, ValueError):
+        multiple = float('inf')
+    try:
+        max_loss = float(pick.get('max_loss_per_contract') or 0.0)
+    except (TypeError, ValueError):
+        max_loss = 0.0
+    try:
+        credit = float(pick.get('premium') or 0.0) * 100.0
+    except (TypeError, ValueError):
+        credit = 0.0
+    return (
+        f"Max-loss multiple {multiple:.2f}x exceeded {limit:.2f}x limit "
+        f"(credit=${credit:.2f}, max_loss=${max_loss:.2f}/contract)"
+    )
 
 
 def _load_tickers(args, config: dict) -> list[str]:
@@ -755,6 +787,21 @@ def _run_once(args, headless: bool = False) -> None:
         risk_rejected.append(_pick)
     if not picks:
         log.info("No picks survived pre-flight contract validation — nothing to trade.")
+        write_scan_audit([], risk_rejected, db=db)
+        return
+
+    # ── Reject underpaid payoff geometry before capital sizing ────────────────
+    geometry_input = list(picks)
+    picks = filter_max_loss_multiple(picks, config)
+    capture_rejections(
+        geometry_input,
+        picks,
+        'Max-loss multiple',
+        lambda p: _max_loss_multiple_reject_reason(config, p),
+        risk_rejected,
+    )
+    if not picks:
+        log.info("No picks survived the max-loss multiple geometry filter.")
         write_scan_audit([], risk_rejected, db=db)
         return
 

@@ -72,7 +72,7 @@ class StopLossRule:
             if width is not None and width > entry_premium:
                 max_loss_dollars = width - entry_premium
                 width_trig = self._max_loss_pct * max_loss_dollars
-                triggered  = loss > width_trig
+                triggered  = loss >= width_trig
                 trig_label = (
                     f"{self._max_loss_pct:.0%} of max-loss "
                     f"(width={width:.0f}, trig={width_trig:.2f})"
@@ -91,7 +91,7 @@ class StopLossRule:
 
         # ── Premium-multiplier guard (fallback: non-spread positions or legacy) ─
         mult_trig  = self._multiplier * entry_premium
-        triggered  = loss > mult_trig
+        triggered  = loss >= mult_trig
         trig_label = f"{self._multiplier}× premium ({mult_trig:.2f})"
 
         if not triggered:
