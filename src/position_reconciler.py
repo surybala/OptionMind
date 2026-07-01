@@ -2,12 +2,12 @@
 PositionReconciler — Alpaca ↔ Database Sync Daemon
 ====================================================
 
-Runs independently from the risk manager on a slower interval (default 5 min).
+Runs independently from the risk manager on its own reconciliation interval.
 Detects and resolves four types of drift between OptionWheel's local database
 and Alpaca's live option positions:
 
   1. PENDING opens      — open order submitted; confirm fill or void if unfilled
-  2. PENDING_CLOSE      — close in-flight; confirm if legs gone from Alpaca, else reopen
+  2. PENDING_CLOSE      — close in-flight; confirm if legs gone from Alpaca, else retry
   3. Ghost EXECUTED     — DB says EXECUTED but all legs gone from Alpaca
                           (expired naturally, assignment, or manually closed externally)
   4. Orphan Alpaca      — option position in Alpaca with no matching DB record
@@ -38,6 +38,10 @@ _MULTI_LEG_CLOSE_COUNTS = {
     'IC': 4,
     'IFLY': 4,
     'STRANGLE': 2,
+}
+
+_DEFAULT_CLOSE_EXECUTION_CFG = {
+    'stale_order_seconds': 120,
 }
 
 
@@ -150,6 +154,114 @@ class PositionReconciler:
         self.db                  = db
         self.executor            = executor
         self.ghost_grace_minutes = ghost_grace_minutes
+
+    def _close_execution_cfg(self) -> dict:
+        config = getattr(self.executor, 'config', None)
+        if not isinstance(config, dict):
+            return dict(_DEFAULT_CLOSE_EXECUTION_CFG)
+        risk = config.get('risk_parameters', {})
+        close_cfg = risk.get('close_execution', {})
+        if not isinstance(close_cfg, dict):
+            close_cfg = {}
+        return {**_DEFAULT_CLOSE_EXECUTION_CFG, **close_cfg}
+
+    @staticmethod
+    def _parse_ts(value) -> datetime.datetime | None:
+        if not value:
+            return None
+        try:
+            return datetime.datetime.fromisoformat(str(value))
+        except Exception:
+            return None
+
+    def _pending_close_is_stale(self, pos: dict, order=None) -> bool:
+        cfg = self._close_execution_cfg()
+        stale_after = max(0, int(cfg.get('stale_order_seconds', 120) or 0))
+        if stale_after <= 0:
+            return False
+        started = None
+        for candidate in (
+            getattr(order, 'submitted_at', None),
+            getattr(order, 'updated_at', None),
+            pos.get('status_updated_at'),
+        ):
+            started = self._parse_ts(candidate)
+            if started is not None:
+                break
+        if started is None:
+            return False
+        now = (
+            datetime.datetime.now(started.tzinfo)
+            if started.tzinfo is not None
+            else datetime.datetime.now()
+        )
+        return (now - started).total_seconds() >= stale_after
+
+    @staticmethod
+    def _reference_limit_price(pos: dict, order) -> float | None:
+        raw_limit = getattr(order, 'limit_price', None)
+        try:
+            if isinstance(raw_limit, (numbers.Real, str)):
+                return float(raw_limit)
+        except (TypeError, ValueError):
+            pass
+        try:
+            premium = float(pos.get('premium') or 0.0)
+            contracts = max(1, int(pos.get('contracts') or 1))
+            pnl = float(pos.get('pnl') or 0.0)
+        except (TypeError, ValueError):
+            return None
+        return premium - (pnl / (100.0 * contracts))
+
+    def _retry_pending_close(self, pos: dict, *, reference_price: float | None) -> bool:
+        pos_id = int(pos['id'])
+        order_id = pos.get('close_order_id') or pos.get('order_id')
+        try:
+            if order_id:
+                self.executor.client.cancel_order_by_id(order_id)
+                self.db.upsert_trade_order(pos_id, order_id, role='CLOSE', status='canceled')
+        except Exception as exc:
+            _log.warning(
+                "[reconciler] PENDING_CLOSE id=%s %s %s — failed to cancel stale close "
+                "order %s (%s); leaving PENDING_CLOSE.",
+                pos_id, pos.get('type'), pos.get('symbol'), order_id, exc,
+            )
+            return False
+
+        self.db.reopen_position(pos_id)
+        retry_pos = dict(pos)
+        retry_pos['status'] = 'EXECUTED'
+        retry_pos['close_order_id'] = None
+        retry_pos['order_id'] = None
+
+        from src.position_lifecycle import PositionLifecycleService
+
+        result = PositionLifecycleService(self.db, self.executor).close_position(
+            retry_pos,
+            limit_price=reference_price,
+            pnl=float(pos.get('pnl') or 0.0),
+            dry_run=False,
+            reason=str(pos.get('close_reason') or 'PENDING_CLOSE_RETRY'),
+        )
+        if result.success:
+            _log.warning(
+                "[reconciler] PENDING_CLOSE id=%s %s %s — stale close order %s retried "
+                "as %s (%s).",
+                pos_id,
+                pos.get('type'),
+                pos.get('symbol'),
+                order_id,
+                result.status,
+                result.order_id or 'no-order-id',
+            )
+            return True
+
+        _log.warning(
+            "[reconciler] PENDING_CLOSE id=%s %s %s — retry after stale close order %s "
+            "failed: %s",
+            pos_id, pos.get('type'), pos.get('symbol'), order_id, result.error,
+        )
+        return False
 
     # ── Alpaca query ───────────────────────────────────────────────────────────
 
@@ -266,7 +378,7 @@ class PositionReconciler:
           (P&L recorded as 0 — no close order_id was stored pre-crash; operator
           should correct via ``db.update_status`` if the exact figure matters)
         - Any leg present and close order still open → leave PENDING_CLOSE
-        - Any leg present and close order terminal/missing → ``reopen_position`` for retry
+        - Any leg present and close order stale/terminal/missing → resubmit close now
 
         Returns ``{'confirmed': N, 'reopened': N}``.
         """
@@ -335,6 +447,12 @@ class PositionReconciler:
                         )
                         reopened += 1
                         continue
+                    if self._pending_close_is_stale(pos, order):
+                        if self._retry_pending_close(
+                            pos,
+                            reference_price=self._reference_limit_price(pos, order),
+                        ):
+                            continue
                     _log.info(
                         "[reconciler] PENDING_CLOSE id=%s %s %s — close order "
                         "%s still '%s'; leaving PENDING_CLOSE.",
@@ -401,6 +519,11 @@ class PositionReconciler:
                 confirmed += 1
             else:
                 # Legs still present and no active close order — retry later.
+                if self._retry_pending_close(
+                    pos,
+                    reference_price=self._reference_limit_price(pos, order),
+                ):
+                    continue
                 self.db.reopen_position(pos_id)
                 _log.warning(
                     "[reconciler] PENDING_CLOSE id=%s %s %s — legs still in Alpaca; "

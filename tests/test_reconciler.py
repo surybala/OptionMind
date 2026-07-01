@@ -15,6 +15,7 @@ Coverage:
 import os
 import tempfile
 import datetime
+import sqlite3
 import pytest
 from unittest.mock import MagicMock, patch, PropertyMock
 
@@ -47,6 +48,8 @@ def _mock_executor(alpaca_symbols: set[str] | None = None) -> MagicMock:
     fake Position objects for each supplied OSI string."""
     executor = MagicMock()
     executor.is_logged_in = True
+    executor.config = {}
+    executor.execute_close_position.return_value = 'RETRY-CLOSE-DEFAULT'
 
     positions = []
     for sym in (alpaca_symbols or set()):
@@ -279,6 +282,15 @@ class TestReconcilePendingCloses:
             setattr(o, key, value)
         return o
 
+    def _age_pending_close(self, db, tid, *, seconds_ago: int):
+        stale_at = (datetime.datetime.now() - datetime.timedelta(seconds=seconds_ago)).isoformat()
+        with sqlite3.connect(db.db_path) as conn:
+            conn.execute(
+                "UPDATE trades SET status_updated_at = ? WHERE id = ?",
+                (stale_at, tid),
+            )
+            conn.commit()
+
     def test_legs_gone_confirms_close(self):
         db   = _tmp_db()
         tid  = self._insert_pending_close(db)
@@ -294,7 +306,7 @@ class TestReconcilePendingCloses:
         assert history[0]['status'] == 'CLOSED'
         assert history[0]['order_id'] == 'RECONCILED'
 
-    def test_legs_present_reopens_position(self):
+    def test_legs_present_retries_close_immediately(self):
         db   = _tmp_db()
         tid  = self._insert_pending_close(db)
         osis = self._pcs_osis()
@@ -302,15 +314,18 @@ class TestReconcilePendingCloses:
 
         result = recon.reconcile_pending_closes(alpaca_symbols=osis)
 
-        assert result['reopened']  == 1
+        assert result['reopened']  == 0
         assert result['confirmed'] == 0
-        # Row back to EXECUTED
-        open_pos = db.get_open_positions()
-        assert len(open_pos) == 1
-        assert open_pos[0]['status'] == 'EXECUTED'
+        assert recon.executor.execute_close_position.call_count == 1
+        kwargs = recon.executor.execute_close_position.call_args.kwargs
+        assert kwargs['order_type'] == 'limit'
+        assert kwargs['limit_price'] > 0.50
+        rows = db.get_pending_close_positions()
+        assert len(rows) == 1
+        assert rows[0]['close_order_id'] == 'RETRY-CLOSE-DEFAULT'
 
-    def test_partial_legs_in_alpaca_reopens(self):
-        """If only one leg is present, position is not fully closed — reopen."""
+    def test_partial_legs_in_alpaca_retries_close_immediately(self):
+        """If only one leg is present, position is not fully closed — resubmit close."""
         db   = _tmp_db()
         self._insert_pending_close(db)
         # Only the short leg still in Alpaca
@@ -318,7 +333,14 @@ class TestReconcilePendingCloses:
         recon   = _make_reconciler(db, alpaca_symbols=partial)
 
         result = recon.reconcile_pending_closes(alpaca_symbols=partial)
-        assert result['reopened'] == 1
+        assert result['reopened'] == 0
+        assert recon.executor.execute_close_position.call_count == 1
+        kwargs = recon.executor.execute_close_position.call_args.kwargs
+        assert kwargs['order_type'] == 'limit'
+        assert kwargs['limit_price'] > 0.50
+        rows = db.get_pending_close_positions()
+        assert len(rows) == 1
+        assert rows[0]['close_order_id'] == 'RETRY-CLOSE-DEFAULT'
 
     def test_legs_present_with_open_close_order_stays_pending(self):
         db   = _tmp_db()
@@ -339,6 +361,77 @@ class TestReconcilePendingCloses:
         rows = db.get_pending_close_positions()
         assert len(rows) == 1
         assert rows[0]['order_id'] == 'CLOSE-OPEN-1'
+
+    def test_stale_open_close_order_retries_with_new_limit(self):
+        db   = _tmp_db()
+        tid  = self._insert_pending_close(db)
+        db.mark_pending_close(tid, pnl=12.34, close_order_id='CLOSE-OPEN-1')
+        self._age_pending_close(db, tid, seconds_ago=600)
+        osis = self._pcs_osis()
+        recon = _make_reconciler(db, alpaca_symbols=osis)
+        recon.executor.config = {
+            'risk_parameters': {
+                'close_execution': {
+                    'stale_order_seconds': 120,
+                    'market_after_same_day_attempts': 3,
+                }
+            }
+        }
+        order = self._order(
+            'new',
+            order_class='mleg',
+            legs=[MagicMock(), MagicMock()],
+            limit_price=0.50,
+        )
+        recon.executor.client.get_order_by_id.return_value = order
+        recon.executor.execute_close_position.return_value = 'CLOSE-OPEN-2'
+
+        result = recon.reconcile_pending_closes(alpaca_symbols=osis)
+
+        assert result['confirmed'] == 0
+        assert result['reopened'] == 0
+        recon.executor.client.cancel_order_by_id.assert_called_once_with('CLOSE-OPEN-1')
+        assert recon.executor.execute_close_position.call_args.kwargs['order_type'] == 'limit'
+        assert recon.executor.execute_close_position.call_args.kwargs['limit_price'] > 0.50
+        rows = db.get_pending_close_positions()
+        assert len(rows) == 1
+        assert rows[0]['close_order_id'] == 'CLOSE-OPEN-2'
+
+    def test_stale_open_close_order_escalates_to_market_after_same_day_attempts(self):
+        db   = _tmp_db()
+        tid  = self._insert_pending_close(db)
+        db.upsert_trade_order(tid, 'CLOSE-ATTEMPT-1', role='CLOSE', status='canceled')
+        db.mark_pending_close(tid, pnl=12.34, close_order_id='CLOSE-OPEN-2')
+        self._age_pending_close(db, tid, seconds_ago=600)
+        osis = self._pcs_osis()
+        recon = _make_reconciler(db, alpaca_symbols=osis)
+        recon.executor.config = {
+            'risk_parameters': {
+                'close_execution': {
+                    'stale_order_seconds': 120,
+                    'market_after_same_day_attempts': 3,
+                }
+            }
+        }
+        order = self._order(
+            'accepted',
+            order_class='mleg',
+            legs=[MagicMock(), MagicMock()],
+            limit_price=0.55,
+        )
+        recon.executor.client.get_order_by_id.return_value = order
+        recon.executor.execute_close_position.return_value = 'CLOSE-MARKET-3'
+
+        result = recon.reconcile_pending_closes(alpaca_symbols=osis)
+
+        assert result['confirmed'] == 0
+        assert result['reopened'] == 0
+        recon.executor.client.cancel_order_by_id.assert_called_once_with('CLOSE-OPEN-2')
+        assert recon.executor.execute_close_position.call_args.kwargs['order_type'] == 'market'
+        assert recon.executor.execute_close_position.call_args.kwargs['limit_price'] is None
+        rows = db.get_pending_close_positions()
+        assert len(rows) == 1
+        assert rows[0]['close_order_id'] == 'CLOSE-MARKET-3'
 
     def test_legs_present_with_open_partial_close_order_reopens(self):
         db   = _tmp_db()
@@ -367,11 +460,14 @@ class TestReconcilePendingCloses:
         osis = self._pcs_osis()
         recon = _make_reconciler(db, alpaca_symbols=osis)
         recon.executor.client.get_order_by_id.return_value = self._order('canceled')
+        recon.executor.execute_close_position.return_value = 'CLOSE-CANCEL-2'
 
         result = recon.reconcile_pending_closes(alpaca_symbols=osis)
 
-        assert result['reopened'] == 1
-        assert len(db.get_open_positions()) == 1
+        assert result['reopened'] == 0
+        rows = db.get_pending_close_positions()
+        assert len(rows) == 1
+        assert rows[0]['close_order_id'] == 'CLOSE-CANCEL-2'
 
     def test_no_legs_data_skips_row(self):
         """Position with unrecognised strategy cannot build OSI symbols — skipped with warning."""

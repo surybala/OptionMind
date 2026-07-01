@@ -82,6 +82,15 @@
     "_stop_loss_note": "Legacy guard: close when current_mark > multiplier × entry_premium. Still active but the width-relative guard below is the primary trigger for spreads.",
     "stop_loss_max_loss_pct": 0.30,
     "_stop_loss_max_loss_note": "Primary spread guard: close when unrealised loss exceeds this fraction of max possible loss (spread_width - entry_premium). 0.30 = exit when 30% of max loss is reached. Set to null to disable (legacy multiplier only).",
+    "close_execution": {
+      "limit_buffer_pct": 0.05,
+      "limit_buffer_dollars": 0.05,
+      "retry_limit_increment_pct": 0.05,
+      "retry_limit_increment_dollars": 0.05,
+      "market_after_same_day_attempts": 3,
+      "stale_order_seconds": 120,
+      "_note": "Close ladder for all exits. First try a slightly marketable DAY limit debit, then add slippage on retries. If the same trade has already had this many same-day close attempts, the next retry uses a market order."
+    },
     "stop_loss_check_interval_minutes": 1,
     "_interval_note": "How often the position monitor polls for stop-loss triggers during market hours (default 15). Lower values give tighter intraday protection at the cost of more API calls.",
     "new_position_grace_minutes": 2,
@@ -332,10 +341,10 @@
     "eod_risk_report": true,
     "weekly_digest": true,
     "_weekly_digest_note": "Send a weekly summary email every Friday after market close. Includes week P&L, cumulative P&L, capital deployed, win rate, best/worst trade, and open-position risk breakdown.",
-    "reconcile_interval_seconds": 300,
-    "_reconcile_note": "How often the Alpaca↔DB reconciliation daemon runs (seconds). Runs independently of market hours and the risk cycle. Default 300 (5 min). Resolves PENDING opens, PENDING_CLOSE rows, ghost EXECUTED positions, and logs orphan Alpaca positions.",
+    "reconcile_interval_seconds": 60,
+    "_reconcile_note": "How often the Alpaca↔DB reconciliation daemon runs (seconds). Runs independently of market hours and the risk cycle. Lowered to 60 so stale PENDING_CLOSE rows can be canceled/retried quickly before assignment risk grows.",
     "ghost_grace_minutes": 10,
-    "_ghost_grace_note": "EXECUTED positions created within this many minutes are exempt from ghost detection. In auto mode the agent and reconciler run concurrently; Alpaca MLEG fills can take several seconds to appear in the positions API. 10 min = 2× the default reconcile interval."
+    "_ghost_grace_note": "EXECUTED positions created within this many minutes are exempt from ghost detection. In auto mode the agent and reconciler run concurrently; Alpaca MLEG fills can take several seconds to appear in the positions API. Keep this comfortably above the reconcile interval to avoid false ghosts."
   },
 
   "_earnings_note": "ETFs do not have earnings announcements — this filter is disabled for the ETF universe.",

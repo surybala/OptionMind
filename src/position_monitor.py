@@ -436,7 +436,7 @@ class PositionMonitor:
         from src.position_lifecycle import PositionLifecycleService
         result = PositionLifecycleService(self.db, self.executor).close_position(
             pos,
-            limit_price=round(current_mark, 2),
+            limit_price=current_mark,
             pnl=pnl_dollars,
             dry_run=False,
             reason=reason_tag,

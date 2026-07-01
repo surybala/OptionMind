@@ -270,7 +270,7 @@ def close_one(pos: dict, executor: AlpacaExecutor, db: TradeDatabase,
     except Exception:
         pass
 
-    limit_px = round(current_mark, 2) if current_mark is not None else None
+    limit_px = current_mark
 
     contracts = int(pos.get('contracts') or 1)
     premium  = float(pos.get('premium', 0) or 0)

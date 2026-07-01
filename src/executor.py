@@ -658,6 +658,7 @@ class AlpacaExecutor:
         self,
         pos: dict,
         limit_price: float = None,
+        order_type: str = 'limit',
         amount: int = 1,
         dry_run: bool = True,
     ) -> str | None:
@@ -685,16 +686,24 @@ class AlpacaExecutor:
             except Exception:
                 legs = {}
 
+        order_type = str(order_type or 'limit').strip().lower()
+        if order_type not in {'limit', 'market'}:
+            _log.warning(
+                "[executor] Unsupported close order_type '%s' for %s %s; falling back to limit.",
+                order_type, strat, symbol,
+            )
+            order_type = 'limit'
+
         if dry_run:
-            _log.info("[DRY RUN] CLOSE %s %s %s  legs=%s  limit=$%s",
-                      strat, symbol, expiry, legs, limit_price or 'market')
+            _log.info("[DRY RUN] CLOSE %s %s %s  legs=%s  type=%s  limit=$%s",
+                      strat, symbol, expiry, legs, order_type, limit_price or 'market')
             return "DRY_RUN_CLOSE"
 
         if not self.is_logged_in:
             if not self.login():
                 return None
 
-        from alpaca.trading.requests import LimitOrderRequest, OptionLegRequest
+        from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, OptionLegRequest
         from alpaca.trading.enums import OrderClass
 
         # Use `is not None` (not truthiness) so that a mark of 0.0 isn't
@@ -757,21 +766,24 @@ class AlpacaExecutor:
                     strat, symbol,
                 )
                 return None
+            request_cls = MarketOrderRequest if order_type == 'market' else LimitOrderRequest
             if len(specs) == 1:
                 leg = specs[0]
-                return LimitOrderRequest(
+                kwargs = dict(
                     symbol=leg['symbol'],
                     qty=amount,
                     side=leg['side'],
-                    type=OrderType.LIMIT,
+                    type=OrderType.MARKET if order_type == 'market' else OrderType.LIMIT,
                     time_in_force=TimeInForce.DAY,
-                    limit_price=lp,
                     position_intent=leg['intent'],
                 )
-            return LimitOrderRequest(
+                if order_type == 'limit':
+                    kwargs['limit_price'] = lp
+                return request_cls(**kwargs)
+            kwargs = dict(
                 order_class=OrderClass.MLEG, qty=amount,
-                type=OrderType.LIMIT, time_in_force=TimeInForce.DAY,
-                limit_price=lp,
+                type=OrderType.MARKET if order_type == 'market' else OrderType.LIMIT,
+                time_in_force=TimeInForce.DAY,
                 legs=[
                     OptionLegRequest(
                         symbol=leg['symbol'],
@@ -782,6 +794,9 @@ class AlpacaExecutor:
                     for leg in specs
                 ],
             )
+            if order_type == 'limit':
+                kwargs['limit_price'] = lp
+            return request_cls(**kwargs)
 
         try:
             if strat == 'PCS':

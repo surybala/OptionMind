@@ -156,6 +156,8 @@ class TestLimitOrderRequestMleg(unittest.TestCase):
         # LimitOrderRequest — freshly replaced so call_args is clean per test
         self._LimitOrderRequest = MagicMock(return_value=MagicMock(name='limit_order'))
         _reqs.LimitOrderRequest = self._LimitOrderRequest
+        self._MarketOrderRequest = MagicMock(return_value=MagicMock(name='market_order'))
+        _reqs.MarketOrderRequest = self._MarketOrderRequest
 
         # OptionLegRequest — side_effect returns kwargs dict so leg fields
         # are inspectable without having to unwrap Mock objects
@@ -170,7 +172,9 @@ class TestLimitOrderRequestMleg(unittest.TestCase):
     # ── helpers ───────────────────────────────────────────────────────────────
 
     def _kw(self):
-        """Return keyword args from the most recent LimitOrderRequest() call."""
+        """Return keyword args from the most recent order request constructor."""
+        if self._MarketOrderRequest.called:
+            return self._MarketOrderRequest.call_args.kwargs
         self.assertTrue(
             self._LimitOrderRequest.called,
             "LimitOrderRequest was never called — has CreateMultiLegOrderRequest crept back in?",
@@ -416,6 +420,18 @@ class TestLimitOrderRequestMleg(unittest.TestCase):
         pos = self._pos('PCS', {'short_strike': 480.0, 'long_strike': 475.0})
         self.executor.execute_close_position(pos, limit_price=0.50, dry_run=False)
         self.assertTrue(self._LimitOrderRequest.called)
+        self.executor.client.submit_order.assert_called_once()
+
+    def test_close_pcs_uses_market_order_request_when_requested(self):
+        pos = self._pos('PCS', {'short_strike': 480.0, 'long_strike': 475.0})
+        self.executor.execute_close_position(
+            pos,
+            limit_price=None,
+            order_type='market',
+            dry_run=False,
+        )
+        self.assertTrue(self._MarketOrderRequest.called)
+        self.assertFalse(self._LimitOrderRequest.called)
         self.executor.client.submit_order.assert_called_once()
 
     def test_close_reuses_related_order_when_qty_held_for_orders(self):
