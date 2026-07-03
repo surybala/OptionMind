@@ -71,6 +71,7 @@ from src.agent_risk import (
     apply_ml_quantity_overlays,
     capital_for_pick,
     filter_max_loss_multiple,
+    max_loss_multiple_limit,
 )
 from src.agent_audit import (
     mispricing_score as mispricing_score_for_pick,
@@ -126,14 +127,7 @@ def _count_enabled_strategies(config: dict) -> int:
 
 
 def _max_loss_multiple_limit(config: dict, pick: dict) -> float:
-    cfg = config.get('risk_parameters', {}).get('max_loss_multiple', {})
-    default_limit = float(cfg.get('default', cfg.get('limit', 6.0)))
-    by_strategy = cfg.get('by_strategy', {})
-    strat = (pick.get('strategy') or '').upper()
-    try:
-        return float(by_strategy.get(strat, default_limit))
-    except (TypeError, ValueError):
-        return default_limit
+    return max_loss_multiple_limit(config, pick)
 
 
 def _max_loss_multiple_reject_reason(config: dict, pick: dict) -> str:

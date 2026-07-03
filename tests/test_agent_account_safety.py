@@ -26,13 +26,15 @@ from agent import (  # noqa: E402
 from src.agent_risk import apply_ml_position_sizing, apply_ml_quantity_overlays  # noqa: E402
 
 
-def _pcs_pick(symbol='SPY', premium=0.50, quantity=1):
+def _pcs_pick(symbol='SPY', premium=0.50, quantity=1, prob_expiry=0.80,
+              short_strike=500, long_strike=495):
     return {
         'symbol': symbol,
         'strategy': 'PCS',
-        'short_strike': 500,
-        'long_strike': 495,
+        'short_strike': short_strike,
+        'long_strike': long_strike,
         'premium': premium,
+        'prob_expiry': prob_expiry,
         'quantity': quantity,
         'score': 0.9,
     }
@@ -57,6 +59,64 @@ def test_max_loss_multiple_filter_rejects_underpaid_width():
     assert kept == [rich_credit]
     assert rich_credit['max_loss_multiple'] < 6.0
     assert thin_credit['max_loss_multiple'] == 9.0
+
+
+def test_max_loss_multiple_filter_allows_high_prob_expiry_relief_tier():
+    high_prob = _pcs_pick(
+        symbol='QQQ',
+        premium=0.64,
+        prob_expiry=0.86,
+        short_strike=500,
+        long_strike=485,
+    )
+
+    kept = _filter_max_loss_multiple(
+        [high_prob],
+        {
+            'risk_parameters': {
+                'max_loss_multiple': {
+                    'enabled': True,
+                    'default': 8.0,
+                    'prob_expiry_tiers': [
+                        {'min_prob_expiry': 0.85, 'limit': 25.0},
+                    ],
+                }
+            }
+        },
+    )
+
+    assert kept == [high_prob]
+    assert round(high_prob['max_loss_multiple'], 2) == 22.44
+    assert high_prob['max_loss_multiple_limit'] == 25.0
+
+
+def test_max_loss_multiple_filter_still_rejects_low_prob_thin_credit_trade():
+    low_prob = _pcs_pick(
+        symbol='QQQ',
+        premium=0.64,
+        prob_expiry=0.84,
+        short_strike=500,
+        long_strike=485,
+    )
+
+    kept = _filter_max_loss_multiple(
+        [low_prob],
+        {
+            'risk_parameters': {
+                'max_loss_multiple': {
+                    'enabled': True,
+                    'default': 8.0,
+                    'prob_expiry_tiers': [
+                        {'min_prob_expiry': 0.85, 'limit': 25.0},
+                    ],
+                }
+            }
+        },
+    )
+
+    assert kept == []
+    assert round(low_prob['max_loss_multiple'], 2) == 22.44
+    assert low_prob['max_loss_multiple_limit'] == 8.0
 
 
 def test_directional_exposure_cap_shrinks_quantity():

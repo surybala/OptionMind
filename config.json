@@ -104,7 +104,17 @@
         "IC": 6.0,
         "IFLY": 6.0
       },
-      "_note": "Reject new trades whose max loss per contract is too large relative to collected credit. 8.0 means do not risk more than $8 for each $1 collected on standard spreads."
+      "prob_expiry_tiers": [
+        {
+          "min_prob_expiry": 0.85,
+          "limit": 25.0
+        },
+        {
+          "min_prob_expiry": 0.9,
+          "limit": 40.0
+        }
+      ],
+      "_note": "Reject new trades whose max loss per contract is too large relative to collected credit. Base cap stays strict, but very high prob_expiry trades can use looser tiers so thin-credit setups are not all filtered out."
     },
     "ml_position_sizing": {
       "enabled": true,

@@ -86,6 +86,64 @@ def max_loss_multiple(pick: dict) -> float:
     return round(max_loss_per_contract(pick) / credit, 4)
 
 
+def pick_prob_expiry(pick: dict) -> float | None:
+    """Return the model-estimated expiry-worthless probability when available."""
+    raw = pick.get('prob_expiry')
+    if raw is None:
+        return None
+    try:
+        prob = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if 0.0 <= prob <= 1.0:
+        return prob
+    return None
+
+
+def max_loss_multiple_limit(config: dict, pick: dict) -> float:
+    """
+    Resolve the allowed max-loss multiple for a pick.
+
+    The base cap is strategy-specific, but very high ``prob_expiry`` trades can
+    opt into a looser limit via configured probability tiers so the bot can
+    still trade when all available credits are thin.
+    """
+    cfg = config.get('risk_parameters', {}).get('max_loss_multiple', {})
+    default_limit = float(cfg.get('default', cfg.get('limit', 6.0)))
+    by_strategy = cfg.get('by_strategy', {})
+    strat = (pick.get('strategy') or '').upper()
+    try:
+        limit = float(by_strategy.get(strat, default_limit))
+    except (TypeError, ValueError):
+        limit = default_limit
+
+    prob_expiry = pick_prob_expiry(pick)
+    tiers = cfg.get('prob_expiry_tiers', [])
+    if prob_expiry is None or not isinstance(tiers, list):
+        return limit
+
+    for tier in tiers:
+        if not isinstance(tier, dict):
+            continue
+        try:
+            min_prob = float(
+                tier.get('min_prob_expiry', tier.get('min_prob', tier.get('prob_expiry', -1.0)))
+            )
+        except (TypeError, ValueError):
+            continue
+        if prob_expiry < min_prob:
+            continue
+
+        candidate = tier.get('by_strategy', {}).get(strat, tier.get('limit'))
+        if candidate is None:
+            continue
+        try:
+            limit = max(limit, float(candidate))
+        except (TypeError, ValueError):
+            continue
+    return limit
+
+
 def overlay_exposure_per_contract(pick: dict) -> float:
     """Overlay budgets use max loss when available, not gross width."""
     max_loss = max_loss_per_contract(pick)
@@ -100,24 +158,26 @@ def filter_max_loss_multiple(picks: list[dict], config: dict) -> list[dict]:
     cfg = config.get('risk_parameters', {}).get('max_loss_multiple', {})
     if not cfg.get('enabled', True):
         return picks
-    default_limit = float(cfg.get('default', cfg.get('limit', 6.0)))
-    by_strategy = cfg.get('by_strategy', {})
     kept: list[dict] = []
     rejected = 0
     for pick in picks:
         strat = (pick.get('strategy') or '').upper()
-        limit = float(by_strategy.get(strat, default_limit))
+        limit = max_loss_multiple_limit(config, pick)
         multiple = max_loss_multiple(pick)
         pick['max_loss_multiple'] = multiple
         pick['max_loss_per_contract'] = max_loss_per_contract(pick)
+        pick['max_loss_multiple_limit'] = limit
         if multiple <= limit:
             kept.append(pick)
         else:
             rejected += 1
+            prob_expiry = pick_prob_expiry(pick)
+            prob_note = f", prob_expiry={prob_expiry:.1%}" if prob_expiry is not None else ""
             log.info(
-                "Max-loss multiple filter: rejected %s %s %.2fx > %.2fx "
+                "Max-loss multiple filter: rejected %s %s %.2fx > %.2fx%s "
                 "(credit=$%.2f, max_loss=$%.2f/contract).",
                 strat, pick.get('symbol'), multiple, limit,
+                prob_note,
                 float(pick.get('premium') or 0) * 100,
                 pick['max_loss_per_contract'],
             )
