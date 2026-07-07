@@ -87,16 +87,17 @@ def max_loss_multiple(pick: dict) -> float:
 
 
 def pick_prob_expiry(pick: dict) -> float | None:
-    """Return the model-estimated expiry-worthless probability when available."""
-    raw = pick.get('prob_expiry')
-    if raw is None:
-        return None
-    try:
-        prob = float(raw)
-    except (TypeError, ValueError):
-        return None
-    if 0.0 <= prob <= 1.0:
-        return prob
+    """Return the expiry/profit probability used for max-loss tiering."""
+    for key in ('prob_expiry', 'probability_of_profit', 'prob_win'):
+        raw = pick.get(key)
+        if raw is None:
+            continue
+        try:
+            prob = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if 0.0 <= prob <= 1.0:
+            return prob
     return None
 
 
