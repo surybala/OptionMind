@@ -720,8 +720,8 @@ def test_min_prob_profit_does_not_filter_picks(tmp_path):
     assert len(picks) > 0, "min_prob_profit should not filter picks; ML pipeline is the sole gate"
 
 
-def test_prob_win_still_populated_in_picks(tmp_path):
-    """prob_win is still computed and stored for display purposes, just not used as a filter."""
+def test_live_scanner_does_not_synthesize_prob_win_from_delta(tmp_path):
+    """Live ranker scores entries, but does not present 1-delta as model probability."""
     provider = FakeLiveProvider()
     registry_path = _champion_registry(tmp_path)
 
@@ -746,8 +746,8 @@ def test_prob_win_still_populated_in_picks(tmp_path):
 
     assert len(picks) > 0
     for pick in picks:
-        assert "prob_win" in pick
-        assert isinstance(pick["prob_win"], float)
-        assert 0.0 <= pick["prob_win"] <= 1.0
+        assert "prob_win" not in pick
+        assert "prob_win_from_delta" not in pick["score_components"]
+        assert pick["ranking_context"]["short_leg_delta"] is not None
         assert "ranking_context" in pick
         assert "ranking_reason" in pick

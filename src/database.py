@@ -1018,7 +1018,17 @@ class TradeDatabase:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT * FROM trades
+                SELECT trades.*,
+                       (
+                           SELECT filled_at
+                             FROM trade_orders
+                            WHERE trade_id = trades.id
+                              AND role = 'OPEN'
+                              AND filled_at IS NOT NULL
+                            ORDER BY filled_at DESC
+                            LIMIT 1
+                       ) AS filled_at
+                  FROM trades
                  WHERE status IN ('EXECUTED', 'DRY_RUN')
                    AND expiry >= ?
                  ORDER BY timestamp ASC

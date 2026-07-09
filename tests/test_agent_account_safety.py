@@ -90,7 +90,7 @@ def test_max_loss_multiple_filter_allows_high_prob_expiry_relief_tier():
     assert high_prob['max_loss_multiple_limit'] == 25.0
 
 
-def test_max_loss_multiple_filter_allows_prob_win_alias_relief_tier():
+def test_max_loss_multiple_filter_allows_model_probability_relief_tier():
     high_prob = _pcs_pick(
         symbol='QQQ',
         premium=0.64,
@@ -98,7 +98,7 @@ def test_max_loss_multiple_filter_allows_prob_win_alias_relief_tier():
         short_strike=500,
         long_strike=485,
     )
-    high_prob['prob_win'] = 0.86
+    high_prob['probability_of_profit'] = 0.86
 
     kept = _filter_max_loss_multiple(
         [high_prob],
@@ -120,18 +120,18 @@ def test_max_loss_multiple_filter_allows_prob_win_alias_relief_tier():
     assert high_prob['max_loss_multiple_limit'] == 25.0
 
 
-def test_max_loss_multiple_filter_rejects_low_prob_win_alias():
-    low_prob = _pcs_pick(
+def test_max_loss_multiple_filter_ignores_delta_derived_prob_win_alias():
+    delta_prob = _pcs_pick(
         symbol='QQQ',
         premium=0.64,
         prob_expiry=None,
         short_strike=500,
         long_strike=485,
     )
-    low_prob['prob_win'] = 0.84
+    delta_prob['prob_win'] = 0.99
 
     kept = _filter_max_loss_multiple(
-        [low_prob],
+        [delta_prob],
         {
             'risk_parameters': {
                 'max_loss_multiple': {
@@ -146,8 +146,8 @@ def test_max_loss_multiple_filter_rejects_low_prob_win_alias():
     )
 
     assert kept == []
-    assert round(low_prob['max_loss_multiple'], 2) == 22.44
-    assert low_prob['max_loss_multiple_limit'] == 8.0
+    assert round(delta_prob['max_loss_multiple'], 2) == 22.44
+    assert delta_prob['max_loss_multiple_limit'] == 8.0
 
 
 def test_max_loss_multiple_filter_still_rejects_low_prob_thin_credit_trade():

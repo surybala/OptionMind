@@ -31,6 +31,16 @@ def fmt_mcap(v) -> str:
     return f'{v:,.0f}'
 
 
+def fmt_prob(v) -> str:
+    """Format a model-derived probability or show n/a when unavailable."""
+    try:
+        if v is None:
+            raise TypeError
+        return f'{float(v):>5.1%}'
+    except (TypeError, ValueError):
+        return f"{'n/a':>6}"
+
+
 def legs_from_pick(pick: dict) -> dict:
     """
     Extract leg strikes from a model candidate dict into a flat dict suitable
@@ -211,7 +221,7 @@ def print_plan(picks: list[dict], capital_budget=None) -> None:
         qty     = p.get('quantity', 1)
         credit  = p.get('premium', 0) * 100 * qty   # total dollars
         capital = capital_for_pick(p) * qty           # total capital
-        prob    = p.get('prob_win', 0)
+        prob    = fmt_prob(p.get('prob_win'))
         roi     = p.get('roi', 0)
         score   = p.get('score', 0)
         mcap    = fmt_mcap(p.get('market_cap'))
@@ -225,7 +235,7 @@ def print_plan(picks: list[dict], capital_budget=None) -> None:
         print(
             f"{i:>3}. {strat:<6}  {symbol:<6}  {price_str}  {expiry:<10}  {legs:<32}  "
             f"{qty:>4}  ${credit:>6.2f}  ${capital:>8,.0f}  "
-            f"{prob:>5.1%}  {roi:>5.1%}  {score:>6.3f}  "
+            f"{prob}  {roi:>5.1%}  {score:>6.3f}  "
             f"{mcap:>7}  {oi_str}  {vol_str}"
         )
 

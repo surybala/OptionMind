@@ -127,8 +127,8 @@ The live entry stack is loaded from `artifacts/model_registry.json`. The live op
 - `risk_parameters.new_position_grace_minutes = 2`
 - `risk_parameters.max_loss_multiple.default = 8.0` (`PCS`/`CCS`), `6.0` (`IC`/`IFLY`)
 - `risk_parameters.ml_exit_risk.threshold = 0.08`
-- `risk_parameters.ml_exit_risk.confirmations_required = 1`
-- `risk_parameters.ml_exit_risk.min_age_minutes = 5`
+- `risk_parameters.ml_exit_risk.confirmations_required = 2`
+- `risk_parameters.ml_exit_risk.min_age_minutes = 10`
 - Dashboard open-position `risk_level` is now derived purely from ML exit-risk score proximity, not the old heuristic `critical/caution` labelling
 
 ### Entry stack notes

@@ -109,7 +109,8 @@ class ModelScanner:
         item = dict(candidate)
         item.setdefault("source", "ml_model")
         item.setdefault("score", item.get("model_score", 0.0))
-        item.setdefault("prob_win", item.get("probability_of_profit", 0.0))
+        if item.get("prob_win") is None and item.get("probability_of_profit") is not None:
+            item["prob_win"] = item.get("probability_of_profit")
         item.setdefault("quantity", 1)
         item.setdefault(
             "mispricing_score_basis",
@@ -532,7 +533,6 @@ class LivePaperInferenceProvider:
                 credit = round(short.bid - long.ask, 4)
                 if credit < min_credit:
                     continue
-                prob_win = _probability_from_delta(short.row.get("option_delta"))
                 actual_width = abs(float(short.contract.strike) - float(long.contract.strike))
                 max_loss = max(0.01, actual_width - credit)
                 dte = int(short.row.get("dte") or max(1, (short.contract.expiration - timestamp.date()).days))
@@ -587,7 +587,6 @@ class LivePaperInferenceProvider:
                     "width": round(actual_width, 4),
                     "premium": credit,
                     "max_loss": round(max_loss, 4),
-                    "prob_win": round(prob_win, 4),
                     "roi": round(roi, 4),
                     "annualized_roi": round(roi * (365 / max(1, dte)), 4),
                     "model_score": round(float(short.score), 6),
@@ -625,7 +624,6 @@ class LivePaperInferenceProvider:
                         "short_bid": short.bid,
                         "long_ask": long.ask,
                         "net_credit": credit,
-                        "prob_win_from_delta": round(prob_win, 4),
                     },
                 }
                 if option_type == "put":
@@ -846,14 +844,6 @@ def _feature_option_price(snapshot: OptionChainSnapshot) -> float | None:
     if snapshot.bid is not None and snapshot.ask is not None and snapshot.bid > 0 and snapshot.ask > 0:
         return round((snapshot.bid + snapshot.ask) / 2.0, 8)
     return snapshot.last or snapshot.bid or snapshot.ask
-
-
-def _probability_from_delta(delta: Any) -> float:
-    try:
-        value = abs(float(delta))
-    except (TypeError, ValueError):
-        return 0.0
-    return max(0.0, min(1.0, 1.0 - value))
 
 
 def _latest_close(rows: list[dict[str, Any]], underlying: str) -> float | None:

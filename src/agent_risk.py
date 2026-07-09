@@ -87,8 +87,8 @@ def max_loss_multiple(pick: dict) -> float:
 
 
 def pick_prob_expiry(pick: dict) -> float | None:
-    """Return the expiry/profit probability used for max-loss tiering."""
-    for key in ('prob_expiry', 'probability_of_profit', 'prob_win'):
+    """Return the model/provider probability used for max-loss tiering."""
+    for key in ('prob_expiry', 'probability_of_profit'):
         raw = pick.get(key)
         if raw is None:
             continue

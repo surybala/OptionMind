@@ -175,6 +175,43 @@ def test_ml_exit_risk_service_applies_min_age_guard(tmp_path):
     assert payload["ml_exit_risk_guard_reason"] == "below_min_age_minutes"
 
 
+def test_ml_exit_risk_service_uses_fill_timestamp_before_insert_timestamp(tmp_path):
+    service = MlExitRiskService(_monitor_config(tmp_path, min_age_minutes=10.0))
+    pos = _base_position()
+    pos["timestamp"] = (datetime.datetime.now() - datetime.timedelta(hours=2)).isoformat()
+    pos["status_updated_at"] = (datetime.datetime.now() - datetime.timedelta(minutes=30)).isoformat()
+    pos["filled_at"] = datetime.datetime.now().isoformat()
+
+    payload = service.score_position(
+        pos,
+        current_mark=1.10,
+        spot=99.5,
+        risk={"risk_score": 0.95},
+    )
+
+    assert payload is not None
+    assert payload["ml_exit_risk_should_trigger"] is False
+    assert payload["ml_exit_risk_guard_reason"] == "below_min_age_minutes"
+
+
+def test_ml_exit_risk_service_uses_status_update_before_insert_timestamp(tmp_path):
+    service = MlExitRiskService(_monitor_config(tmp_path, min_age_minutes=10.0))
+    pos = _base_position()
+    pos["timestamp"] = (datetime.datetime.now() - datetime.timedelta(hours=2)).isoformat()
+    pos["status_updated_at"] = datetime.datetime.now().isoformat()
+
+    payload = service.score_position(
+        pos,
+        current_mark=1.10,
+        spot=99.5,
+        risk={"risk_score": 0.95},
+    )
+
+    assert payload is not None
+    assert payload["ml_exit_risk_should_trigger"] is False
+    assert payload["ml_exit_risk_guard_reason"] == "below_min_age_minutes"
+
+
 def test_ml_exit_risk_service_still_scores_without_greek_risk_payload(tmp_path):
     service = MlExitRiskService(_monitor_config(tmp_path))
     pos = _base_position()

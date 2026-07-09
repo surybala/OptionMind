@@ -186,6 +186,16 @@ def _fmt_opt(v, fmt: str = '.2f', prefix: str = '', suffix: str = '') -> str:
         return '—'
 
 
+def _fmt_prob(v) -> str:
+    """Format a model-derived probability or return n/a when unavailable."""
+    if v is None:
+        return 'n/a'
+    try:
+        return f"{float(v):.1%}"
+    except (TypeError, ValueError):
+        return 'n/a'
+
+
 def _pnl_source_label(row: dict) -> str:
     source = row.get('pnl_source') or 'UNKNOWN'
     verified = bool(row.get('pnl_verified'))
@@ -204,7 +214,7 @@ def _render_trade_executed_text(pick: dict, order_id: str, reason: str) -> str:
     price     = pick.get('current_price', 0.0)
     premium   = float(pick.get('premium', 0))
     qty       = int(pick.get('quantity', 1))
-    prob      = float(pick.get('prob_win', 0))
+    prob      = _fmt_prob(pick.get('prob_win'))
     roi       = float(pick.get('roi', 0))
     score     = float(pick.get('score', 0))
     legs      = _legs_str(pick)
@@ -219,7 +229,7 @@ def _render_trade_executed_text(pick: dict, order_id: str, reason: str) -> str:
         f"Legs:       {legs}\n"
         f"Contracts:  {qty}\n"
         f"Credit:     ${premium * 100:.2f}/contract  (${premium * 100 * qty:.2f} total)\n"
-        f"Prob Win:   {prob:.1%}\n"
+        f"Prob Win:   {prob}\n"
         f"ROI:        {roi:.1%}\n"
         f"Score:      {score:.4f}\n"
         f"Order ID:   {order_id}\n"
@@ -336,12 +346,12 @@ def _render_trade_plan_text(
         premium = float(p.get('premium', 0))
         cap     = float(p.get('capital') or 0)
         total_cap += cap
-        prob    = float(p.get('prob_win', 0))
+        prob    = _fmt_prob(p.get('prob_win'))
         roi     = float(p.get('roi', 0))
         score   = float(p.get('score', 0))
         lines.append(
             f"{i:<3} {strat:<10} {symbol:<7} {spot_s} {expiry:<12} "
-            f"{legs:<22} ${premium * 100:>7.2f}  ${cap:>8,.0f} {prob:>5.0%} {roi:>5.0%} {score:>7.4f}"
+            f"{legs:<22} ${premium * 100:>7.2f}  ${cap:>8,.0f} {prob:>6} {roi:>5.0%} {score:>7.4f}"
         )
     lines += [
         '-' * 108,
@@ -393,7 +403,7 @@ def _render_trade_executed_html(pick: dict, order_id: str, reason: str) -> str:
     price   = pick.get('current_price', 0.0)
     premium = float(pick.get('premium', 0))
     qty     = int(pick.get('quantity', 1))
-    prob    = float(pick.get('prob_win', 0))
+    prob    = _fmt_prob(pick.get('prob_win'))
     roi     = float(pick.get('roi', 0))
     score   = float(pick.get('score', 0))
     legs    = _legs_str(pick)
@@ -406,7 +416,7 @@ def _render_trade_executed_html(pick: dict, order_id: str, reason: str) -> str:
         ('Legs',       legs),
         ('Contracts',  f'<strong>{qty}</strong>'),
         ('Credit',     f'${premium * 100:.2f}/contract &nbsp; (<strong>${premium * 100 * qty:.2f} total</strong>)'),
-        ('Prob Win',   f'{prob:.1%}'),
+        ('Prob Win',   prob),
         ('ROI',        f'{roi:.1%}'),
         ('Score',      f'{score:.4f}'),
         ('Reason',     reason),
@@ -572,7 +582,7 @@ def _render_trade_plan_html(
         legs    = _legs_str(p)
         premium = float(p.get('premium', 0))
         cap     = float(p.get('capital') or 0)
-        prob    = float(p.get('prob_win', 0))
+        prob    = _fmt_prob(p.get('prob_win'))
         roi     = float(p.get('roi', 0))
         score   = float(p.get('score', 0))
         rows_html += (
@@ -584,7 +594,7 @@ def _render_trade_plan_html(
             f"<td style='font-family:monospace'>{legs}</td>"
             f"<td>${premium * 100:.2f}</td>"
             f"<td>${cap:,.0f}</td>"
-            f"<td>{prob:.0%}</td>"
+            f"<td>{prob}</td>"
             f"<td>{roi:.0%}</td>"
             f"<td>{score:.4f}</td>"
             f"</tr>"

@@ -216,7 +216,7 @@ class MlExitRiskService:
             (pnl_per_share / entry_premium) if pnl_per_share is not None and entry_premium > 0 else None
         )
         dte = self._dte(pos.get("expiry"))
-        age_minutes = self._position_age_minutes(pos.get("timestamp"))
+        age_minutes = self._position_age_minutes(self._position_age_timestamp(pos))
         contracts = int(pos.get("contracts") or 1)
         spot = self._optional_float(spot if spot is not None else pos.get("spot"))
         legs = self._parse_legs(pos)
@@ -508,6 +508,14 @@ class MlExitRiskService:
             return (exp_date - datetime.date.today()).days
         except Exception:
             return None
+
+    @staticmethod
+    def _position_age_timestamp(pos: dict) -> Any:
+        for key in ("filled_at", "status_updated_at", "timestamp", "created_at"):
+            value = pos.get(key)
+            if value:
+                return value
+        return None
 
     @staticmethod
     def _position_age_minutes(timestamp: Any) -> float | None:

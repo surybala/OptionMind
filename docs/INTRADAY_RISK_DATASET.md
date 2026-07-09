@@ -9,7 +9,7 @@ It is intentionally separate from `candidate_rows`:
 - `intraday_risk_rows` trains exit hazard and volatility-spike detection.
 
 Current live champion: `intraday_risk_monitor_stop30m_v004` in `artifacts/risk_model_registry.json`
-with `operating_threshold = 0.08`, `confirmations_required = 1`, `min_age_minutes = 5` in `config.json`, and target
+with `operating_threshold = 0.08`, `confirmations_required = 2`, `min_age_minutes = 10` in `config.json`, and target
 `stop_loss_hit_30m`.
 
 ## Design

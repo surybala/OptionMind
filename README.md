@@ -136,8 +136,8 @@ Important operational details:
       "enabled": true,
       "registry_path": "artifacts/risk_model_registry.json",
       "threshold": 0.08,
-      "confirmations_required": 1,
-      "min_age_minutes": 5
+      "confirmations_required": 2,
+      "min_age_minutes": 10
     }
   }
 }
@@ -149,8 +149,8 @@ Notes:
 - `stop_loss_max_loss_pct = 0.30` caps spread losers once 30% of max loss is reached.
 - `new_position_grace_minutes = 2` keeps only a short post-entry quote-settle buffer.
 - `ml_exit_risk.threshold = 0.08` is the risk-score trigger cutoff.
-- `confirmations_required = 1` closes on the first qualifying ML exit-risk breach.
-- `min_age_minutes = 5` keeps a brief warm-up window before ML exits can fire.
+- `confirmations_required = 2` requires two consecutive qualifying ML exit-risk breaches.
+- `min_age_minutes = 10` keeps a warm-up window before ML exits can fire.
 - `risk_parameters.max_loss_multiple` is enabled to reject underpaid spread geometry before execution.
 - Dashboard open-position severity badges are now driven purely by ML exit-risk score proximity (`SAFE` / `WATCH` / `CAUTION` / `CRITICAL`), not the legacy heuristic stop/gamma labels.
 

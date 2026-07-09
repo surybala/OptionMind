@@ -383,8 +383,8 @@ class PositionMonitor:
             return False
 
         ts_raw = (
-            pos.get('status_updated_at')
-            or pos.get('filled_at')
+            pos.get('filled_at')
+            or pos.get('status_updated_at')
             or pos.get('timestamp')
             or pos.get('created_at')
         )

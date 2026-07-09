@@ -21,6 +21,15 @@ from src.utils import get_logger
 log = get_logger()
 
 
+def _fmt_prob(value) -> str:
+    try:
+        if value is None:
+            raise TypeError
+        return f"{float(value):.1%}"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
 # ── Approval gate ────────────────────────────────────────────────────────────
 
 def approval_gate(picks: list[dict]):
@@ -157,10 +166,10 @@ def execute_picks(
                   or pick.get('short_call')
                   or 0)
         prem   = pick.get('premium', 0)
-        prob   = pick.get('prob_win', 0)
+        prob   = _fmt_prob(pick.get('prob_win'))
 
         print(f"  [{i}/{len(approved)}] {strat} {symbol} {expiry}  "
-              f"credit=${prem:.2f}  prob={prob:.1%} ...", end=" ", flush=True)
+              f"credit=${prem:.2f}  prob={prob} ...", end=" ", flush=True)
 
         # ── Phase 1: pre-insert PENDING row before touching the broker ─────────
         # If the process dies between broker submission and DB write the row

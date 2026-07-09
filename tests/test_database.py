@@ -271,6 +271,25 @@ class TestOrderLedgerAndPnlSource(unittest.TestCase):
         self.assertEqual([o['order_id'] for o in orders], ['OPEN-1', 'CLOSE-1'])
         self.assertEqual([o['role'] for o in orders], ['OPEN', 'CLOSE'])
 
+    def test_get_open_positions_includes_open_order_filled_at(self):
+        tid = self.db.log_trade(
+            'AAPL', '2099-12-31', 150.0, 'PCS', 0.50, 0.80,
+            status='EXECUTED',
+            legs={'short_strike': 150.0, 'long_strike': 145.0},
+        )
+        self.db.upsert_trade_order(
+            tid,
+            'OPEN-1',
+            role='OPEN',
+            status='filled',
+            filled_at='2099-01-01T09:35:00',
+        )
+
+        positions = self.db.get_open_positions()
+
+        self.assertEqual(len(positions), 1)
+        self.assertEqual(positions[0]['filled_at'], '2099-01-01T09:35:00')
+
     def test_confirm_close_stores_verified_pnl_source(self):
         tid = self.db.log_trade(
             'AAPL', '2026-04-30', 150.0, 'PCS', 0.50, 0.80,
